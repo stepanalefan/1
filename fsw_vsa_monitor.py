@@ -1,0 +1,1238 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+fsw_vsa_monitor.py
+==================
+Real-time GUI for an R&S FSW (e.g. FSW50) running the VSA application (FSW-K70),
+connected over Ethernet (LAN).
+
+Features
+--------
+* Connect via HiSLIP, VXI-11 or raw socket (port 5025) - or a built-in DEMO mode.
+* Read / write signal & analyzer settings:
+    centre frequency, reference level, attenuation (auto/manual), preamp,
+    modulation, symbol rate, capture oversampling (-> sample rate),
+    capture length (auto/manual), result length, Tx filter (type, alpha/BT),
+    measurement filter auto, equalizer, burst search, pattern search,
+    trigger source, statistic count, instrument display update.
+* Live constellation (measured symbols) with persistence.
+* Live results: MER RMS, Power, Carrier Frequency Error
+  (+ EVM RMS, Symbol Rate Error, I/Q Offset), with mean/min/max and a trend plot.
+* Optional CSV logging of every sweep.
+
+Install
+-------
+    pip install numpy pyqtgraph PyQt5 pyvisa pyvisa-py
+
+    (pyvisa-py is a pure-Python VISA backend. If NI-VISA or R&S VISA is installed,
+     it is used automatically and pyvisa-py is just the fallback.)
+
+Run
+---
+    python fsw_vsa_monitor.py                      # GUI, enter IP and press Connect
+    python fsw_vsa_monitor.py --ip 192.168.1.50 --connect
+    python fsw_vsa_monitor.py --demo               # no instrument needed
+
+SCPI notes (FSW-K70)
+--------------------
+* The script selects (or creates) a VSA channel (type DDEM) and applies the
+  standard 4-window layout with  [SENS:]DDEM:PRES:CALC :
+      window 1 = magnitude (capture buffer), window 2 = spectrum,
+      window 3 = Result Summary,             window 4 = Constellation I/Q.
+  The constellation trace is read from window 4, results from window 3.
+* Results:  CALC3:MARK:FUNC:DDEM:STAT:<SNR|MPOW|CFER|EVM|SRER|OOFF>?
+  (SNR is the K70 name for MER; no suffix = value of the current sweep.)
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as _dt
+import math
+import queue
+import sys
+import threading
+import time
+from collections import deque
+
+import numpy as np
+
+try:
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    import pyqtgraph as pg
+except ImportError as _e:  # pragma: no cover
+    sys.exit(f"Missing GUI dependency ({_e}). Run:  pip install PyQt5 pyqtgraph numpy")
+
+try:
+    import pyvisa
+except ImportError:  # pragma: no cover - demo mode still works
+    pyvisa = None
+
+
+# --------------------------------------------------------------------------- #
+#  Constants                                                                   #
+# --------------------------------------------------------------------------- #
+SUMMARY_WIN = 3          # Result Summary window after DDEM:PRES:CALC
+CONST_WIN = 4            # Constellation I/Q window after DDEM:PRES:CALC
+MAX_PLOT_POINTS = 60000  # decimate constellation above this
+INVALID = 9.0e37         # FSW returns 9.91E37 for "no result"
+
+# key, SCPI statistic suffix, label, unit
+RESULTS = [
+    ("mer",   "SNR",  "MER RMS",            "dB"),
+    ("power", "MPOW", "Power",              "dBm"),
+    ("cfe",   "CFER", "Carrier Freq Error", "Hz"),
+    ("evm",   "EVM",  "EVM RMS",            "%"),
+    ("srerr", "SRER", "Symbol Rate Error",  "ppm"),
+    ("iqoff", "OOFF", "I/Q Offset",         "dB"),
+]
+RESULT_LABEL = {k: (lbl, unit) for k, _, lbl, unit in RESULTS}
+PRIMARY = ("mer", "power", "cfe")
+
+MODULATIONS = ["BPSK", "QPSK", "OQPSK", "pi/4-DQPSK", "8PSK",
+               "16QAM", "32QAM", "64QAM", "128QAM", "256QAM", "512QAM", "1024QAM",
+               "16APSK", "32APSK", "MSK"]
+TX_FILTERS = ["RRC", "RC", "GAUSS"]          # combo is editable: type any K70 filter name
+OVERSAMPLING = ["2", "4", "8", "16", "32", "64", "128"]
+TRIGGERS = ["IMM", "EXT", "EXT2", "EXT3", "IFP", "RFP"]
+PROTOCOLS = ["HiSLIP (hislip0)", "VXI-11 (INSTR)", "Raw socket (5025)", "Demo (no instrument)"]
+
+
+# --------------------------------------------------------------------------- #
+#  Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+_SI_PREFIX = {"T": 1e12, "G": 1e9, "M": 1e6, "k": 1e3, "K": 1e3,
+              "m": 1e-3, "u": 1e-6, "µ": 1e-6, "n": 1e-9}
+_UNITS = ("sym/s", "sps", "baud", "hz", "dbm", "db", "sym", "s", "%")
+
+
+def parse_si(text: str) -> float:
+    """'1.5 GHz' -> 1.5e9, '10M' -> 1e7, '2e6' -> 2e6.  (M = mega, m = milli)"""
+    t = text.strip().replace(" ", "").replace(",", ".")
+    low = t.lower()
+    for u in _UNITS:
+        if low.endswith(u) and len(t) > len(u):
+            t = t[: -len(u)]
+            break
+    if t and t[-1] in _SI_PREFIX:
+        return float(t[:-1]) * _SI_PREFIX[t[-1]]
+    return float(t)
+
+
+def fmt_si(v, unit: str = "", digits: int = 9) -> str:
+    if v is None or not math.isfinite(v):
+        return "—"
+    if v == 0:
+        return f"0 {unit}".strip()
+    exp = int(math.floor(math.log10(abs(v)) / 3) * 3)
+    exp = max(-9, min(12, exp))
+    prefix = {12: "T", 9: "G", 6: "M", 3: "k", 0: "", -3: "m", -6: "u", -9: "n"}[exp]
+    return f"{v / 10 ** exp:.{digits}g} {prefix}{unit}".strip()
+
+
+def fmt_result(key: str, v) -> str:
+    if v is None or not math.isfinite(v):
+        return "—"
+    unit = RESULT_LABEL[key][1]
+    if key == "cfe":
+        return f"{v:+.2f} Hz" if abs(v) < 1e3 else ("+" if v > 0 else "") + fmt_si(v, "Hz", 6)
+    if key == "evm":
+        return f"{v:.3f} %"
+    if key == "srerr":
+        return f"{v:+.3f} ppm"
+    return f"{v:.2f} {unit}"
+
+
+def mod_commands(name: str) -> list[str]:
+    """SCPI commands that select a modulation in K70."""
+    n = name.strip()
+    if n == "BPSK":
+        return ["DDEM:FORM PSK", "DDEM:PSK:NST 2"]
+    if n == "QPSK":
+        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM NORM"]
+    if n == "OQPSK":
+        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM OQPSK"]
+    if n == "pi/4-DQPSK":
+        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM DPI4"]
+    if n == "MSK":
+        return ["DDEM:FORM MSK"]
+    for fam in ("APSK", "QAM", "PSK", "ASK"):
+        if n.endswith(fam) and n[: -len(fam)].isdigit():
+            return [f"DDEM:FORM {fam}", f"DDEM:{fam}:NST {int(n[:-len(fam)])}"]
+    return []  # unknown/unsupported label read back from the instrument -> leave as is
+
+
+def ideal_points(mod: str) -> np.ndarray:
+    """Ideal constellation (unit average power) - used by the demo simulator."""
+    if mod in ("QPSK", "OQPSK", "MSK"):
+        p = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
+    elif mod == "pi/4-DQPSK":
+        p = np.exp(1j * np.pi / 4 * np.arange(8))
+    elif mod == "BPSK":
+        p = np.array([1, -1], dtype=complex)
+    elif mod.endswith("APSK"):
+        rings = {"16": [(4, 1.0), (12, 2.6)], "32": [(4, 1.0), (12, 2.6), (16, 4.2)]}
+        p = np.concatenate([r * np.exp(1j * (2 * np.pi * np.arange(k) / k + np.pi / k))
+                            for k, r in rings.get(mod[:-4], rings["16"])])
+    elif mod.endswith("PSK"):
+        m = int(mod[:-3] or 8)
+        p = np.exp(1j * 2 * np.pi * np.arange(m) / m)
+    elif mod.endswith("QAM"):
+        m = int(mod[:-3])
+        side = int(math.ceil(math.sqrt(m)))
+        ax = np.arange(side) - (side - 1) / 2
+        grid = (ax[None, :] + 1j * ax[:, None]).ravel()
+        p = grid[np.argsort(np.abs(grid), kind="stable")][:m]
+    else:
+        p = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
+    return p / np.sqrt(np.mean(np.abs(p) ** 2))
+
+
+# --------------------------------------------------------------------------- #
+#  Instrument driver (FSW-K70 over VISA)                                       #
+# --------------------------------------------------------------------------- #
+class FswVsa:
+    """Thin SCPI wrapper. Used only from the worker thread."""
+
+    def __init__(self, resource: str, timeout_ms: int = 30000):
+        if pyvisa is None:
+            raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
+        try:
+            self.rm = pyvisa.ResourceManager()
+        except Exception:
+            self.rm = pyvisa.ResourceManager("@py")
+        self.inst = self.rm.open_resource(resource)
+        self.inst.timeout = timeout_ms
+        if resource.upper().endswith("::SOCKET"):
+            self.inst.read_termination = "\n"
+            self.inst.write_termination = "\n"
+        else:
+            try:
+                self.inst.clear()
+            except Exception:
+                pass
+        self.idn = self.query("*IDN?").strip()
+        self.channel = self._setup()
+
+    # -- low level ---------------------------------------------------------
+    def write(self, cmd: str):
+        self.inst.write(cmd)
+
+    def query(self, cmd: str) -> str:
+        return self.inst.query(cmd).strip()
+
+    def errors(self, maxn: int = 30) -> list[str]:
+        out = []
+        for _ in range(maxn):
+            e = self.query("SYST:ERR?")
+            if e.startswith("0") or e.startswith("+0"):
+                break
+            out.append(e)
+        return out
+
+    def _qf(self, cmd):
+        try:
+            v = float(self.query(cmd))
+            return None if abs(v) >= INVALID else v
+        except Exception:
+            return None
+
+    def _qi(self, cmd):
+        v = self._qf(cmd)
+        return None if v is None else int(round(v))
+
+    def _qb(self, cmd):
+        try:
+            v = self.query(cmd).upper()
+        except Exception:
+            return None
+        if v in ("ON", "OFF"):
+            return v == "ON"
+        try:
+            return float(v) != 0
+        except ValueError:
+            return None
+
+    def _qs(self, cmd):
+        try:
+            return self.query(cmd).strip().strip("'\"")
+        except Exception:
+            return None
+
+    # -- setup -------------------------------------------------------------
+    def _setup(self) -> str:
+        self.write("*CLS")
+        name = None
+        try:
+            items = [x.strip().strip("'\"") for x in self.query("INST:LIST?").split(",")]
+            for typ, nm in zip(items[0::2], items[1::2]):
+                if typ.upper().startswith("DDEM"):
+                    name = nm
+                    break
+        except Exception:
+            pass
+        if name:
+            self.write(f"INST:SEL '{name}'")
+        else:
+            name = "VSA"
+            self.write(f"INST:CRE DDEM, '{name}'")
+        self.query("*OPC?")
+        self.write("INIT:CONT OFF")                # single-sweep mode, we trigger each sweep
+        self.preset_layout()
+        self.write("FORM REAL,32")                 # binary trace transfer
+        self.write("FORM:BORD SWAP")               # little endian
+        self.errors()
+        return name
+
+    def preset_layout(self):
+        self.write("DDEM:PRES:CALC")               # W1 mag, W2 spectrum, W3 summary, W4 constellation
+        self.query("*OPC?")
+
+    def set_display_update(self, on: bool):
+        self.write(f"SYST:DISP:UPD {'ON' if on else 'OFF'}")
+
+    def auto_level(self):
+        self.write("ADJ:LEV")
+        self.query("*OPC?")
+
+    # -- settings ----------------------------------------------------------
+    def _read_modulation(self):
+        try:
+            form = self.query("DDEM:FORM?").upper()
+            if form.startswith("QPSK"):
+                sub = self.query("DDEM:QPSK:FORM?").upper()
+                if sub.startswith("OQ"):
+                    return "OQPSK"
+                if sub.startswith("DPI4"):
+                    return "pi/4-DQPSK"
+                if sub.startswith("NORM"):
+                    return "QPSK"
+                return f"QPSK ({sub})"
+            if form == "PSK":
+                n = int(float(self.query("DDEM:PSK:NST?")))
+                return "BPSK" if n == 2 else f"{n}PSK"
+            if form in ("QAM", "APSK", "ASK"):
+                return f"{int(float(self.query(f'DDEM:{form}:NST?')))}{form}"
+            return form
+        except Exception:
+            return None
+
+    def read_settings(self) -> dict:
+        old = self.inst.timeout
+        self.inst.timeout = min(old, 5000)    # unsupported queries just time out quickly
+        try:
+            s = {
+                "center":      self._qf("FREQ:CENT?"),
+                "ref_level":   self._qf("DISP:WIND:TRAC:Y:SCAL:RLEV?"),
+                "att_auto":    self._qb("INP:ATT:AUTO?"),
+                "att":         self._qf("INP:ATT?"),
+                "preamp":      self._qb("INP:GAIN:STAT?"),
+                "modulation":  self._read_modulation(),
+                "symbol_rate": self._qf("DDEM:SRAT?"),
+                "prat":        self._qi("DDEM:PRAT?"),
+                "tfil_state":  self._qb("DDEM:TFIL:STAT?"),
+                "tfil_name":   self._qs("DDEM:TFIL:NAME?"),
+                "tfil_alpha":  self._qf("DDEM:TFIL:ALPH?"),
+                "mfil_auto":   self._qb("DDEM:MFIL:AUTO?"),
+                "rlen_auto":   self._qb("DDEM:RLEN:AUTO?"),
+                "capture_len": self._qi("DDEM:RLEN:SYMB?"),
+                "result_len":  self._qi("DDEM:TIME?"),
+                "sweep_count": self._qi("SWE:COUN?"),
+                "equalizer":   self._qb("DDEM:EQU:STAT?"),
+                "burst":       self._qb("DDEM:SEAR:BURS:STAT?"),
+                "pattern":     self._qb("DDEM:SEAR:SYNC:STAT?"),
+                "trig_source": self._qs("TRIG:SOUR?"),
+            }
+            if s["capture_len"] is None and s["symbol_rate"]:
+                t = self._qf("DDEM:RLEN?")           # seconds
+                s["capture_len"] = None if t is None else int(round(t * s["symbol_rate"]))
+            return s
+        finally:
+            self.inst.timeout = old
+            try:
+                self.errors()
+            except Exception:
+                pass
+
+    def apply_settings(self, s: dict):
+        self.write("*CLS")
+        cmds: list[str] = []
+
+        def num(key, cmd):
+            if s.get(key) is not None:
+                cmds.append(f"{cmd} {s[key]:.10g}")
+
+        def onoff(key, cmd):
+            if s.get(key) is not None:
+                cmds.append(f"{cmd} {'ON' if s[key] else 'OFF'}")
+
+        if s.get("modulation"):
+            cmds += mod_commands(s["modulation"])
+        num("center", "FREQ:CENT")
+        num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
+        onoff("att_auto", "INP:ATT:AUTO")
+        if not s.get("att_auto"):
+            num("att", "INP:ATT")
+        onoff("preamp", "INP:GAIN:STAT")
+        num("symbol_rate", "DDEM:SRAT")
+        if s.get("prat") is not None:
+            cmds.append(f"DDEM:PRAT {int(s['prat'])}")
+        onoff("tfil_state", "DDEM:TFIL:STAT")
+        if s.get("tfil_state"):
+            if s.get("tfil_name"):
+                cmds.append(f"DDEM:TFIL:NAME '{s['tfil_name']}'")
+            num("tfil_alpha", "DDEM:TFIL:ALPH")
+        onoff("mfil_auto", "DDEM:MFIL:AUTO")
+        onoff("rlen_auto", "DDEM:RLEN:AUTO")
+        if s.get("capture_len") is not None and not s.get("rlen_auto"):
+            cmds.append(f"DDEM:RLEN {int(s['capture_len'])} SYM")
+        if s.get("result_len") is not None:
+            cmds.append(f"DDEM:TIME {int(s['result_len'])}")
+        if s.get("sweep_count") is not None:
+            cmds.append(f"SWE:COUN {int(s['sweep_count'])}")
+        onoff("equalizer", "DDEM:EQU:STAT")
+        onoff("burst", "DDEM:SEAR:BURS:STAT")
+        onoff("pattern", "DDEM:SEAR:SYNC:STAT")
+        if s.get("trig_source"):
+            cmds.append(f"TRIG:SOUR {s['trig_source']}")
+
+        errors = []
+        for c in cmds:
+            self.write(c)
+            errors += [f"{c}  →  {e}" for e in self.errors()]
+        self.query("*OPC?")
+        return cmds, errors
+
+    # -- measurement -------------------------------------------------------
+    def measure(self) -> dict:
+        t0 = time.perf_counter()
+        self.query("INIT:IMM;*OPC?")                       # one (single) sweep, wait for it
+        raw = self.inst.query_binary_values(f"TRAC{CONST_WIN}:DATA? TRACE1", datatype="f",
+                                            is_big_endian=False, container=np.array)
+        raw = np.asarray(raw, dtype=np.float64)
+        n = raw.size // 2 * 2
+        res = {"i": raw[0:n:2], "q": raw[1:n:2], "t": time.time()}
+        for key, scpi, _, _ in RESULTS:
+            try:
+                v = float(self.query(f"CALC{SUMMARY_WIN}:MARK:FUNC:DDEM:STAT:{scpi}?"))
+                res[key] = float("nan") if abs(v) >= INVALID else v
+            except Exception:
+                res[key] = float("nan")
+        res["sweep_time"] = time.perf_counter() - t0
+        return res
+
+    def close(self):
+        try:
+            self.write("INIT:CONT ON")
+            self.write("SYST:DISP:UPD ON")
+        except Exception:
+            pass
+        try:
+            self.inst.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+#  Simulated instrument (DEMO mode)                                            #
+# --------------------------------------------------------------------------- #
+class DemoFsw:
+    def __init__(self):
+        self.idn = "Rohde&Schwarz,FSW-50,DEMO,simulated"
+        self.channel = "VSA (demo)"
+        self.rng = np.random.default_rng()
+        self.snr = 30.0
+        self.cfe = 150.0
+        self.s = {"center": 2.4e9, "ref_level": -10.0, "att_auto": True, "att": 10.0,
+                  "preamp": False, "modulation": "16QAM", "symbol_rate": 10e6, "prat": 4,
+                  "tfil_state": True, "tfil_name": "RRC", "tfil_alpha": 0.35,
+                  "mfil_auto": True, "rlen_auto": False, "capture_len": 4000,
+                  "result_len": 1000, "sweep_count": 1, "equalizer": False,
+                  "burst": False, "pattern": False, "trig_source": "IMM"}
+
+    def read_settings(self):
+        return dict(self.s)
+
+    def apply_settings(self, s):
+        cmds = []
+        for k, v in s.items():
+            if v is not None:
+                self.s[k] = v
+                cmds.append(f"{k} = {v}")
+        return cmds, []
+
+    def preset_layout(self):
+        pass
+
+    def set_display_update(self, on):
+        pass
+
+    def auto_level(self):
+        time.sleep(0.3)
+        self.s["ref_level"] = -12.0
+
+    def measure(self):
+        n = int(self.s["result_len"] or 1000)
+        pts = ideal_points(self.s["modulation"] or "QPSK")
+        sym = pts[self.rng.integers(len(pts), size=n)]
+        self.snr = float(np.clip(self.snr + self.rng.normal(0, 0.4), 18, 36))
+        self.cfe = float(np.clip(self.cfe + self.rng.normal(0, 8), -800, 800))
+        sigma = math.sqrt(10 ** (-self.snr / 10) / 2)
+        rx = sym + sigma * (self.rng.normal(size=n) + 1j * self.rng.normal(size=n))
+        err = np.mean(np.abs(rx - sym) ** 2)
+        sig = np.mean(np.abs(sym) ** 2)
+        time.sleep(0.04 + min(0.3, (self.s["capture_len"] or n) / (self.s["symbol_rate"] or 1e6)))
+        return {"i": rx.real, "q": rx.imag, "t": time.time(),
+                "mer": 10 * math.log10(sig / err), "evm": 100 * math.sqrt(err / sig),
+                "power": self.s["ref_level"] - 8 + self.rng.normal(0, 0.03),
+                "cfe": self.cfe, "srerr": self.rng.normal(0, 0.5),
+                "iqoff": -45 + self.rng.normal(0, 0.5), "sweep_time": 0.0}
+
+    def close(self):
+        pass
+
+
+# --------------------------------------------------------------------------- #
+#  Worker thread: owns the instrument, runs jobs and the sweep loop            #
+# --------------------------------------------------------------------------- #
+class Worker(QtCore.QObject):
+    measured = QtCore.pyqtSignal(object)
+    job_done = QtCore.pyqtSignal(str, object)
+    failed = QtCore.pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.dev = None
+        self.jobs: "queue.Queue[tuple[str, callable]]" = queue.Queue()
+        self.running = False
+        self.single = False
+        self.quit = False
+        self._gui_ready = threading.Event()
+        self._gui_ready.set()
+
+    def submit(self, tag: str, fn):
+        self.jobs.put((tag, fn))
+
+    def ack(self):
+        self._gui_ready.set()
+
+    @QtCore.pyqtSlot()
+    def loop(self):
+        while not self.quit:
+            try:
+                tag, fn = self.jobs.get_nowait()
+            except queue.Empty:
+                tag = None
+            if tag is not None:
+                try:
+                    self.job_done.emit(tag, fn())
+                except Exception as e:
+                    self.failed.emit(tag, f"{type(e).__name__}: {e}")
+                continue
+            if self.dev is not None and (self.running or self.single) and self._gui_ready.is_set():
+                self.single = False
+                try:
+                    r = self.dev.measure()
+                    self._gui_ready.clear()       # back-pressure: wait until GUI drew it
+                    self.measured.emit(r)
+                except Exception as e:
+                    self.running = False
+                    self.failed.emit("measure", f"{type(e).__name__}: {e}")
+            else:
+                time.sleep(0.02)
+
+
+# --------------------------------------------------------------------------- #
+#  GUI widgets                                                                 #
+# --------------------------------------------------------------------------- #
+class SIEdit(QtWidgets.QLineEdit):
+    def __init__(self, unit: str, example: str):
+        super().__init__()
+        self.unit = unit
+        self.setPlaceholderText(example)
+        self.setToolTip("Accepts SI prefixes: k, M, G (e.g. 2.4G, 10 MHz, 3.84e6)")
+
+    def value(self) -> float:
+        return parse_si(self.text())
+
+    def setValue(self, v):
+        self.setText(fmt_si(v, self.unit, 10))
+
+
+class Tile(QtWidgets.QFrame):
+    def __init__(self, title: str, color: str):
+        super().__init__()
+        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.setStyleSheet("Tile{background:#181c22;border:1px solid #2a3038;border-radius:8px;}")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        t = QtWidgets.QLabel(title)
+        t.setStyleSheet("color:#8a96a3;font-size:12px;font-weight:600;")
+        self.value = QtWidgets.QLabel("—")
+        self.value.setStyleSheet(f"color:{color};font-size:30px;font-weight:700;")
+        self.sub = QtWidgets.QLabel("mean —   min —   max —")
+        self.sub.setStyleSheet("color:#7c8793;font-size:11px;")
+        for w in (t, self.value, self.sub):
+            lay.addWidget(w)
+
+
+class RunningStat:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.n, self.sum, self.min, self.max = 0, 0.0, math.inf, -math.inf
+
+    def add(self, v):
+        if v is None or not math.isfinite(v):
+            return
+        self.n += 1
+        self.sum += v
+        self.min = min(self.min, v)
+        self.max = max(self.max, v)
+
+    @property
+    def mean(self):
+        return self.sum / self.n if self.n else float("nan")
+
+
+# --------------------------------------------------------------------------- #
+#  Main window                                                                 #
+# --------------------------------------------------------------------------- #
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, args):
+        super().__init__()
+        self.setWindowTitle("FSW VSA Monitor (K70)")
+        self.resize(1560, 940)
+        self.connected = False
+        self.supported: set[str] = set()
+        self.persist: deque = deque(maxlen=1)
+        self.trend = {k: deque(maxlen=600) for k, *_ in RESULTS}
+        self.stats = {k: RunningStat() for k, *_ in RESULTS}
+        self.csv_file = None
+        self.csv_writer = None
+        self.t_start = None
+        self.last_rx = None
+        self.rate = 0.0
+        self.sweeps = 0
+        self._range = None
+
+        self._build_ui()
+        self._set_connected(False)
+
+        self.worker_thread = QtCore.QThread(self)
+        self.worker = Worker()
+        self.worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.worker.loop)
+        self.worker.measured.connect(self.on_measured)
+        self.worker.job_done.connect(self.on_job_done)
+        self.worker.failed.connect(self.on_failed)
+        self.worker_thread.start()
+
+        if args.ip:
+            self.ip_edit.setText(args.ip)
+        if args.protocol:
+            self.proto.setCurrentIndex({"hislip": 0, "vxi11": 1, "socket": 2}[args.protocol])
+        if args.demo:
+            self.proto.setCurrentIndex(3)
+        if args.connect or args.demo:
+            QtCore.QTimer.singleShot(200, self.on_connect)
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        pg.setConfigOptions(antialias=False, background="#0f1216", foreground="#c9d1d9")
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        root.addWidget(split, 1)
+
+        # ---------------- left: settings (scrollable)
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left)
+        lv.setContentsMargins(4, 4, 4, 4)
+        self.w: dict[str, QtWidgets.QWidget] = {}
+
+        # connection
+        g = QtWidgets.QGroupBox("Connection (LAN)")
+        f = QtWidgets.QFormLayout(g)
+        self.ip_edit = QtWidgets.QLineEdit("192.168.0.10")
+        self.ip_edit.setToolTip("IP / hostname, or a full VISA resource string "
+                                "(e.g. TCPIP0::192.168.0.10::hislip0::INSTR)")
+        self.proto = QtWidgets.QComboBox()
+        self.proto.addItems(PROTOCOLS)
+        self.timeout_spin = QtWidgets.QSpinBox()
+        self.timeout_spin.setRange(2, 600)
+        self.timeout_spin.setValue(30)
+        self.timeout_spin.setSuffix(" s")
+        self.connect_btn = QtWidgets.QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.on_connect_toggle)
+        self.idn_label = QtWidgets.QLabel("not connected")
+        self.idn_label.setWordWrap(True)
+        self.idn_label.setStyleSheet("color:#8a96a3;font-size:11px;")
+        self.disp_upd = QtWidgets.QCheckBox("Update FSW screen during remote")
+        self.disp_upd.setChecked(True)
+        self.disp_upd.toggled.connect(self.on_display_update)
+        f.addRow("Address", self.ip_edit)
+        f.addRow("Protocol", self.proto)
+        f.addRow("Timeout", self.timeout_spin)
+        f.addRow(self.connect_btn)
+        f.addRow(self.idn_label)
+        f.addRow(self.disp_upd)
+        lv.addWidget(g)
+
+        # frequency & level
+        self.g_level = g = QtWidgets.QGroupBox("Frequency & Level")
+        f = QtWidgets.QFormLayout(g)
+        self.w["center"] = SIEdit("Hz", "e.g. 2.4 GHz")
+        self.w["ref_level"] = QtWidgets.QDoubleSpinBox()
+        self.w["ref_level"].setRange(-130, 30)
+        self.w["ref_level"].setDecimals(2)
+        self.w["ref_level"].setSuffix(" dBm")
+        self.w["att_auto"] = QtWidgets.QCheckBox("Auto")
+        self.w["att"] = QtWidgets.QDoubleSpinBox()
+        self.w["att"].setRange(0, 79)
+        self.w["att"].setDecimals(0)
+        self.w["att"].setSuffix(" dB")
+        self.w["att_auto"].toggled.connect(lambda on: self.w["att"].setEnabled(not on and "att" in self.supported))
+        att_row = QtWidgets.QHBoxLayout()
+        att_row.addWidget(self.w["att"], 1)
+        att_row.addWidget(self.w["att_auto"])
+        self.w["preamp"] = QtWidgets.QCheckBox("Preamplifier (B24)")
+        self.autolevel_btn = QtWidgets.QPushButton("Auto Level")
+        self.autolevel_btn.clicked.connect(self.on_autolevel)
+        f.addRow("Center freq", self.w["center"])
+        f.addRow("Ref level", self.w["ref_level"])
+        f.addRow("Attenuation", att_row)
+        f.addRow(self.w["preamp"])
+        f.addRow(self.autolevel_btn)
+        lv.addWidget(g)
+
+        # signal description
+        self.g_sig = g = QtWidgets.QGroupBox("Signal Description")
+        f = QtWidgets.QFormLayout(g)
+        self.w["modulation"] = QtWidgets.QComboBox()
+        self.w["modulation"].addItems(MODULATIONS)
+        self.w["symbol_rate"] = SIEdit("Hz", "e.g. 10M")
+        self.w["prat"] = QtWidgets.QComboBox()
+        self.w["prat"].addItems(OVERSAMPLING)
+        self.sr_label = QtWidgets.QLabel("—")
+        self.w["tfil_state"] = QtWidgets.QCheckBox("Enabled")
+        self.w["tfil_name"] = QtWidgets.QComboBox()
+        self.w["tfil_name"].setEditable(True)
+        self.w["tfil_name"].addItems(TX_FILTERS)
+        self.w["tfil_name"].setToolTip("Any K70 Tx filter name can be typed here")
+        self.w["tfil_alpha"] = QtWidgets.QDoubleSpinBox()
+        self.w["tfil_alpha"].setRange(0.01, 1.0)
+        self.w["tfil_alpha"].setSingleStep(0.01)
+        self.w["tfil_alpha"].setDecimals(3)
+        self.w["mfil_auto"] = QtWidgets.QCheckBox("Meas filter = Auto (matched)")
+        self.w["symbol_rate"].textChanged.connect(self._update_derived)
+        self.w["prat"].currentIndexChanged.connect(self._update_derived)
+        f.addRow("Modulation", self.w["modulation"])
+        f.addRow("Symbol rate", self.w["symbol_rate"])
+        f.addRow("Oversampling", self.w["prat"])
+        f.addRow("Sample rate", self.sr_label)
+        f.addRow("Tx filter", self.w["tfil_state"])
+        f.addRow("Filter type", self.w["tfil_name"])
+        f.addRow("Alpha / BT", self.w["tfil_alpha"])
+        f.addRow(self.w["mfil_auto"])
+        lv.addWidget(g)
+
+        # capture
+        self.g_cap = g = QtWidgets.QGroupBox("Capture / Result")
+        f = QtWidgets.QFormLayout(g)
+        self.w["rlen_auto"] = QtWidgets.QCheckBox("Auto")
+        self.w["capture_len"] = QtWidgets.QSpinBox()
+        self.w["capture_len"].setRange(16, 100_000_000)
+        self.w["capture_len"].setSingleStep(1000)
+        self.w["capture_len"].setSuffix(" sym")
+        self.w["capture_len"].valueChanged.connect(self._update_derived)
+        self.w["rlen_auto"].toggled.connect(
+            lambda on: self.w["capture_len"].setEnabled(not on and "capture_len" in self.supported))
+        cap_row = QtWidgets.QHBoxLayout()
+        cap_row.addWidget(self.w["capture_len"], 1)
+        cap_row.addWidget(self.w["rlen_auto"])
+        self.cap_time = QtWidgets.QLabel("—")
+        self.w["result_len"] = QtWidgets.QSpinBox()
+        self.w["result_len"].setRange(16, 1_000_000)
+        self.w["result_len"].setSingleStep(100)
+        self.w["result_len"].setSuffix(" sym")
+        self.w["sweep_count"] = QtWidgets.QSpinBox()
+        self.w["sweep_count"].setRange(0, 32767)
+        self.w["sweep_count"].setToolTip("Statistic count (sweeps per single measurement)")
+        f.addRow("Capture length", cap_row)
+        f.addRow("Capture time", self.cap_time)
+        f.addRow("Result length", self.w["result_len"])
+        f.addRow("Statistic count", self.w["sweep_count"])
+        lv.addWidget(g)
+
+        # demod / sync / trigger
+        self.g_dem = g = QtWidgets.QGroupBox("Demodulation / Sync / Trigger")
+        f = QtWidgets.QFormLayout(g)
+        self.w["equalizer"] = QtWidgets.QCheckBox("Equalizer")
+        self.w["burst"] = QtWidgets.QCheckBox("Burst search")
+        self.w["pattern"] = QtWidgets.QCheckBox("Pattern search")
+        self.w["trig_source"] = QtWidgets.QComboBox()
+        self.w["trig_source"].addItems(TRIGGERS)
+        f.addRow(self.w["equalizer"])
+        f.addRow(self.w["burst"])
+        f.addRow(self.w["pattern"])
+        f.addRow("Trigger", self.w["trig_source"])
+        lv.addWidget(g)
+
+        # apply / read
+        btns = QtWidgets.QGridLayout()
+        self.apply_btn = QtWidgets.QPushButton("Apply ▶ FSW")
+        self.apply_btn.setStyleSheet("font-weight:700;")
+        self.read_btn = QtWidgets.QPushButton("Read ◀ FSW")
+        self.layout_btn = QtWidgets.QPushButton("Restore VSA layout")
+        self.apply_btn.clicked.connect(self.on_apply)
+        self.read_btn.clicked.connect(self.on_read)
+        self.layout_btn.clicked.connect(self.on_layout)
+        btns.addWidget(self.apply_btn, 0, 0)
+        btns.addWidget(self.read_btn, 0, 1)
+        btns.addWidget(self.layout_btn, 1, 0, 1, 2)
+        lv.addLayout(btns)
+        lv.addStretch(1)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(left)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(340)
+        split.addWidget(scroll)
+
+        # ---------------- centre: constellation
+        mid = QtWidgets.QWidget()
+        mv = QtWidgets.QVBoxLayout(mid)
+        mv.setContentsMargins(4, 4, 4, 4)
+        bar = QtWidgets.QHBoxLayout()
+        self.run_btn = QtWidgets.QPushButton("▶ Run")
+        self.run_btn.setCheckable(True)
+        self.run_btn.toggled.connect(self.on_run)
+        self.single_btn = QtWidgets.QPushButton("Single")
+        self.single_btn.clicked.connect(self.on_single)
+        self.persist_spin = QtWidgets.QSpinBox()
+        self.persist_spin.setRange(1, 50)
+        self.persist_spin.setPrefix("Persistence: ")
+        self.persist_spin.setSuffix(" sweeps")
+        self.persist_spin.valueChanged.connect(lambda n: setattr(self, "persist", deque(self.persist, maxlen=n)))
+        self.autoscale = QtWidgets.QCheckBox("Auto scale")
+        self.autoscale.setChecked(True)
+        self.reset_btn = QtWidgets.QPushButton("Reset stats")
+        self.reset_btn.clicked.connect(self.on_reset)
+        self.csv_chk = QtWidgets.QCheckBox("Log CSV")
+        self.csv_chk.toggled.connect(self.on_csv)
+        for wdg in (self.run_btn, self.single_btn, self.persist_spin, self.autoscale,
+                    self.reset_btn, self.csv_chk):
+            bar.addWidget(wdg)
+        bar.addStretch(1)
+        mv.addLayout(bar)
+
+        self.const_plot = pg.PlotWidget(title="Constellation I/Q (measured)")
+        self.const_plot.setAspectLocked(True)
+        self.const_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.const_plot.setLabel("bottom", "I")
+        self.const_plot.setLabel("left", "Q")
+        self.const_plot.addLine(x=0, pen=pg.mkPen("#3a424c"))
+        self.const_plot.addLine(y=0, pen=pg.mkPen("#3a424c"))
+        self.const_curve = self.const_plot.plot([], [], pen=None, symbol="o", symbolSize=3,
+                                                symbolPen=None, symbolBrush=pg.mkBrush(255, 196, 0, 150))
+        self.const_plot.setRange(xRange=(-1.5, 1.5), yRange=(-1.5, 1.5))
+        mv.addWidget(self.const_plot, 1)
+        split.addWidget(mid)
+
+        # ---------------- right: results
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(4, 4, 4, 4)
+        colors = {"mer": "#4fd18b", "power": "#58a6ff", "cfe": "#f0883e"}
+        self.tiles = {}
+        for k in PRIMARY:
+            self.tiles[k] = Tile(RESULT_LABEL[k][0], colors[k])
+            rv.addWidget(self.tiles[k])
+        extra = QtWidgets.QGroupBox("Additional results")
+        ef = QtWidgets.QFormLayout(extra)
+        self.extra_labels = {}
+        for k, _, lbl, _ in RESULTS:
+            if k not in PRIMARY:
+                self.extra_labels[k] = QtWidgets.QLabel("—")
+                self.extra_labels[k].setStyleSheet("font-size:14px;font-weight:600;")
+                ef.addRow(lbl, self.extra_labels[k])
+        rv.addWidget(extra)
+
+        trow = QtWidgets.QHBoxLayout()
+        trow.addWidget(QtWidgets.QLabel("Trend:"))
+        self.trend_sel = QtWidgets.QComboBox()
+        for k, _, lbl, unit in RESULTS:
+            self.trend_sel.addItem(f"{lbl} [{unit}]", k)
+        self.trend_sel.currentIndexChanged.connect(self._redraw_trend)
+        trow.addWidget(self.trend_sel, 1)
+        rv.addLayout(trow)
+        self.trend_plot = pg.PlotWidget()
+        self.trend_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.trend_plot.setLabel("bottom", "time", units="s")
+        self.trend_curve = self.trend_plot.plot([], [], pen=pg.mkPen("#4fd18b", width=2))
+        rv.addWidget(self.trend_plot, 1)
+        right.setMinimumWidth(330)
+        split.addWidget(right)
+        split.setSizes([360, 820, 380])
+
+        # ---------------- bottom: log
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(130)
+        self.log.setStyleSheet("font-family:Consolas,monospace;font-size:11px;")
+        root.addWidget(self.log)
+        self.status = self.statusBar()
+
+        self.setStyleSheet("""
+            QWidget{background:#0f1216;color:#c9d1d9;}
+            QGroupBox{border:1px solid #2a3038;border-radius:6px;margin-top:14px;padding-top:6px;font-weight:600;}
+            QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#8a96a3;}
+            QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox,QPlainTextEdit{background:#161b22;border:1px solid #30363d;
+                border-radius:4px;padding:3px;}
+            QPushButton{background:#21262d;border:1px solid #30363d;border-radius:5px;padding:5px 10px;}
+            QPushButton:hover{background:#2d333b;}
+            QPushButton:checked{background:#1f6f43;border-color:#2ea043;}
+            QPushButton:disabled,QLineEdit:disabled,QSpinBox:disabled,QDoubleSpinBox:disabled,
+            QComboBox:disabled,QCheckBox:disabled{color:#4d5560;}
+        """)
+
+    # ------------------------------------------------------------ helpers
+    def logmsg(self, text: str, level: str = "info"):
+        color = {"info": "#c9d1d9", "ok": "#4fd18b", "warn": "#f0b03e", "err": "#ff6b6b"}[level]
+        ts = _dt.datetime.now().strftime("%H:%M:%S")
+        self.log.appendHtml(f'<span style="color:#6e7681">{ts}</span> '
+                            f'<span style="color:{color}">{text}</span>')
+
+    def _set_connected(self, on: bool):
+        self.connected = on
+        for wdg in (self.g_level, self.g_sig, self.g_cap, self.g_dem, self.apply_btn, self.read_btn,
+                    self.layout_btn, self.run_btn, self.single_btn):
+            wdg.setEnabled(on)
+        self.connect_btn.setText("Disconnect" if on else "Connect")
+        self.ip_edit.setEnabled(not on)
+        self.proto.setEnabled(not on)
+        if not on:
+            self.run_btn.setChecked(False)
+            self.idn_label.setText("not connected")
+
+    def _resource(self) -> str:
+        addr = self.ip_edit.text().strip()
+        if "::" in addr:
+            return addr
+        return [f"TCPIP0::{addr}::hislip0::INSTR",
+                f"TCPIP0::{addr}::inst0::INSTR",
+                f"TCPIP0::{addr}::5025::SOCKET"][self.proto.currentIndex()]
+
+    def _update_derived(self, *_):
+        try:
+            sr = parse_si(self.w["symbol_rate"].text())
+            ovs = int(self.w["prat"].currentText())
+            self.sr_label.setText(fmt_si(sr * ovs, "Hz", 8) + f"  ({ovs} × SR)")
+            self.cap_time.setText(fmt_si(self.w["capture_len"].value() / sr, "s", 6))
+        except Exception:
+            self.sr_label.setText("—")
+            self.cap_time.setText("—")
+
+    @staticmethod
+    def _set_combo(combo: QtWidgets.QComboBox, text: str):
+        idx = combo.findText(text, QtCore.Qt.MatchFixedString)
+        if idx < 0:
+            combo.addItem(text)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(idx)
+
+    # ---------------------------------------------------------- settings
+    def populate(self, s: dict):
+        self.supported = {k for k, v in s.items() if v is not None}
+        w = self.w
+        for key, wdg in w.items():
+            wdg.setEnabled(key in self.supported)
+        setters = {
+            "center": lambda v: w["center"].setValue(v),
+            "ref_level": lambda v: w["ref_level"].setValue(v),
+            "att_auto": lambda v: w["att_auto"].setChecked(v),
+            "att": lambda v: w["att"].setValue(v),
+            "preamp": lambda v: w["preamp"].setChecked(v),
+            "modulation": lambda v: self._set_combo(w["modulation"], v),
+            "symbol_rate": lambda v: w["symbol_rate"].setValue(v),
+            "prat": lambda v: self._set_combo(w["prat"], str(int(v))),
+            "tfil_state": lambda v: w["tfil_state"].setChecked(v),
+            "tfil_name": lambda v: self._set_combo(w["tfil_name"], v),
+            "tfil_alpha": lambda v: w["tfil_alpha"].setValue(v),
+            "mfil_auto": lambda v: w["mfil_auto"].setChecked(v),
+            "rlen_auto": lambda v: w["rlen_auto"].setChecked(v),
+            "capture_len": lambda v: w["capture_len"].setValue(int(v)),
+            "result_len": lambda v: w["result_len"].setValue(int(v)),
+            "sweep_count": lambda v: w["sweep_count"].setValue(int(v)),
+            "equalizer": lambda v: w["equalizer"].setChecked(v),
+            "burst": lambda v: w["burst"].setChecked(v),
+            "pattern": lambda v: w["pattern"].setChecked(v),
+            "trig_source": lambda v: self._set_combo(w["trig_source"], v),
+        }
+        for k, fn in setters.items():
+            if s.get(k) is not None:
+                fn(s[k])
+        w["att"].setEnabled("att" in self.supported and not w["att_auto"].isChecked())
+        w["capture_len"].setEnabled("capture_len" in self.supported and not w["rlen_auto"].isChecked())
+        self._update_derived()
+        missing = sorted(set(s) - self.supported)
+        if missing:
+            self.logmsg(f"Not available on this instrument/firmware (disabled): {', '.join(missing)}", "warn")
+
+    def collect(self) -> dict:
+        w = self.w
+        getters = {
+            "center": lambda: w["center"].value(),
+            "ref_level": lambda: w["ref_level"].value(),
+            "att_auto": lambda: w["att_auto"].isChecked(),
+            "att": lambda: w["att"].value(),
+            "preamp": lambda: w["preamp"].isChecked(),
+            "modulation": lambda: w["modulation"].currentText(),
+            "symbol_rate": lambda: w["symbol_rate"].value(),
+            "prat": lambda: int(w["prat"].currentText()),
+            "tfil_state": lambda: w["tfil_state"].isChecked(),
+            "tfil_name": lambda: w["tfil_name"].currentText().strip(),
+            "tfil_alpha": lambda: w["tfil_alpha"].value(),
+            "mfil_auto": lambda: w["mfil_auto"].isChecked(),
+            "rlen_auto": lambda: w["rlen_auto"].isChecked(),
+            "capture_len": lambda: w["capture_len"].value(),
+            "result_len": lambda: w["result_len"].value(),
+            "sweep_count": lambda: w["sweep_count"].value(),
+            "equalizer": lambda: w["equalizer"].isChecked(),
+            "burst": lambda: w["burst"].isChecked(),
+            "pattern": lambda: w["pattern"].isChecked(),
+            "trig_source": lambda: w["trig_source"].currentText().strip(),
+        }
+        return {k: g() for k, g in getters.items() if k in self.supported}
+
+    # ----------------------------------------------------------- actions
+    def on_connect_toggle(self):
+        if self.connected:
+            self.on_disconnect()
+        else:
+            self.on_connect()
+
+    def on_connect(self):
+        demo = self.proto.currentIndex() == 3
+        res = None if demo else self._resource()
+        tmo = self.timeout_spin.value() * 1000
+        self.connect_btn.setEnabled(False)
+        self.logmsg("Starting DEMO (simulated FSW)…" if demo else f"Connecting to {res} …")
+
+        def job():
+            dev = DemoFsw() if demo else FswVsa(res, tmo)
+            self.worker.dev = dev
+            return dev
+        self.worker.submit("connect", job)
+
+    def on_disconnect(self):
+        self.worker.running = False
+
+        def job():
+            dev, self.worker.dev = self.worker.dev, None
+            if dev:
+                dev.close()
+        self.worker.submit("disconnect", job)
+
+    def on_read(self):
+        self.worker.submit("read", lambda: self.worker.dev.read_settings())
+
+    def on_apply(self):
+        try:
+            s = self.collect()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Invalid value", f"Could not parse a field: {e}")
+            return
+        self.worker.submit("apply", lambda: self.worker.dev.apply_settings(s))
+
+    def on_autolevel(self):
+        self.logmsg("Auto level running…")
+        self.worker.submit("autolevel", lambda: self.worker.dev.auto_level())
+
+    def on_layout(self):
+        self.worker.submit("layout", lambda: self.worker.dev.preset_layout())
+
+    def on_display_update(self, on):
+        if self.connected:
+            self.worker.submit("display", lambda: self.worker.dev.set_display_update(on))
+
+    def on_run(self, on):
+        self.run_btn.setText("■ Stop" if on else "▶ Run")
+        self.worker.running = on
+        if on:
+            self.last_rx = None
+
+    def on_single(self):
+        self.worker.single = True
+
+    def on_reset(self):
+        for st in self.stats.values():
+            st.reset()
+        for d in self.trend.values():
+            d.clear()
+        self.t_start = None
+        self.sweeps = 0
+        self.persist.clear()
+        self._redraw_trend()
+        for k in PRIMARY:
+            self.tiles[k].sub.setText("mean —   min —   max —")
+
+    def on_csv(self, on):
+        if on:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Log results to CSV",
+                f"fsw_vsa_{_dt.datetime.now():%Y%m%d_%H%M%S}.csv", "CSV (*.csv)")
+            if not path:
+                self.csv_chk.blockSignals(True)
+                self.csv_chk.setChecked(False)
+                self.csv_chk.blockSignals(False)
+                return
+            self.csv_file = open(path, "w", newline="")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(["timestamp"] + [f"{lbl} [{u}]" for _, _, lbl, u in RESULTS])
+            self.logmsg(f"Logging to {path}", "ok")
+        elif self.csv_file:
+            self.csv_file.close()
+            self.csv_file = self.csv_writer = None
+            self.logmsg("CSV logging stopped")
+
+    # ---------------------------------------------------------- callbacks
+    def on_job_done(self, tag: str, result):
+        if tag == "connect":
+            self._set_connected(True)
+            self.connect_btn.setEnabled(True)
+            self.idn_label.setText(f"{result.idn}\nChannel: {result.channel}")
+            self.logmsg(f"Connected: {result.idn}", "ok")
+            self.on_display_update(self.disp_upd.isChecked())
+            self.on_read()
+        elif tag == "disconnect":
+            self._set_connected(False)
+            self.logmsg("Disconnected")
+        elif tag == "read":
+            self.populate(result)
+            self.logmsg("Settings read from FSW", "ok")
+        elif tag == "apply":
+            cmds, errors = result
+            if errors:
+                for e in errors:
+                    self.logmsg(e, "err")
+            self.logmsg(f"Applied {len(cmds)} settings" + (f", {len(errors)} error(s)" if errors else ""),
+                        "warn" if errors else "ok")
+            self.on_read()   # read back what the instrument actually accepted
+        elif tag == "autolevel":
+            self.logmsg("Auto level done", "ok")
+            self.on_read()
+        elif tag == "layout":
+            self.logmsg("VSA layout restored (W3 = Result Summary, W4 = Constellation)", "ok")
+
+    def on_failed(self, tag: str, msg: str):
+        self.logmsg(f"[{tag}] {msg}", "err")
+        if tag == "connect":
+            self.connect_btn.setEnabled(True)
+            self.worker.dev = None
+        if tag == "measure":
+            self.run_btn.setChecked(False)
+
+    def on_measured(self, r: dict):
+        try:
+            self._draw(r)
+        finally:
+            self.worker.ack()
+
+    def _draw(self, r: dict):
+        now = r["t"]
+        if self.t_start is None:
+            self.t_start = now
+        self.sweeps += 1
+
+        # constellation
+        i, q = r["i"], r["q"]
+        ok = np.isfinite(i) & np.isfinite(q)
+        self.persist.append((i[ok], q[ok]))
+        I = np.concatenate([p[0] for p in self.persist])
+        Q = np.concatenate([p[1] for p in self.persist])
+        if I.size > MAX_PLOT_POINTS:
+            step = int(math.ceil(I.size / MAX_PLOT_POINTS))
+            I, Q = I[::step], Q[::step]
+        self.const_curve.setData(I, Q)
+        if self.autoscale.isChecked() and I.size:
+            m = float(np.percentile(np.maximum(np.abs(I), np.abs(Q)), 99.9)) * 1.15 or 1.0
+            if self._range is None or not (0.85 < m / self._range < 1.15):
+                self._range = m
+                self.const_plot.setRange(xRange=(-m, m), yRange=(-m, m), padding=0)
+
+        # numbers
+        for k, *_ in RESULTS:
+            v = r.get(k, float("nan"))
+            self.stats[k].add(v)
+            if math.isfinite(v):
+                self.trend[k].append((now - self.t_start, v))
+        for k in PRIMARY:
+            st = self.stats[k]
+            self.tiles[k].value.setText(fmt_result(k, r.get(k)))
+            if st.n:
+                self.tiles[k].sub.setText(f"mean {fmt_result(k, st.mean)}   "
+                                          f"min {fmt_result(k, st.min)}   max {fmt_result(k, st.max)}")
+        for k, lbl in self.extra_labels.items():
+            lbl.setText(fmt_result(k, r.get(k)))
+        self._redraw_trend()
+
+        if self.csv_writer:
+            self.csv_writer.writerow([_dt.datetime.fromtimestamp(now).isoformat(timespec="milliseconds")]
+                                     + [f"{r.get(k, float('nan')):.6g}" for k, *_ in RESULTS])
+            self.csv_file.flush()
+
+        if self.last_rx is not None:
+            dt = now - self.last_rx
+            if dt > 0:
+                self.rate = 0.8 * self.rate + 0.2 / dt if self.rate else 1 / dt
+        self.last_rx = now
+        self.status.showMessage(f"Sweeps: {self.sweeps}    Rate: {self.rate:.1f} /s    "
+                                f"Points: {i.size}    Last sweep: {r.get('sweep_time', 0) * 1e3:.0f} ms")
+
+    def _redraw_trend(self, *_):
+        k = self.trend_sel.currentData()
+        data = self.trend.get(k)
+        if data:
+            t, v = zip(*data)
+            self.trend_curve.setData(np.array(t), np.array(v))
+        else:
+            self.trend_curve.setData([], [])
+
+    def closeEvent(self, ev):
+        self.worker.running = False
+        self.worker.quit = True
+        self.worker_thread.quit()
+        self.worker_thread.wait(5000)
+        if self.worker.dev:
+            try:
+                self.worker.dev.close()
+            except Exception:
+                pass
+        if self.csv_file:
+            self.csv_file.close()
+        ev.accept()
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    ap = argparse.ArgumentParser(description="R&S FSW VSA (K70) live monitor")
+    ap.add_argument("--ip", help="instrument IP / hostname or full VISA resource string")
+    ap.add_argument("--protocol", choices=["hislip", "vxi11", "socket"], help="LAN protocol")
+    ap.add_argument("--connect", action="store_true", help="connect on start-up")
+    ap.add_argument("--demo", action="store_true", help="simulated instrument, no hardware needed")
+    args = ap.parse_args()
+
+    app = QtWidgets.QApplication(sys.argv)
+    app.setStyle("Fusion")
+    win = MainWindow(args)
+    win.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
