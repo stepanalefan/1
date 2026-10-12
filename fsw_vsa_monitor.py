@@ -42,6 +42,18 @@ SCPI notes (FSW-K70)
   The constellation trace is read from window 4, results from window 3.
 * Results:  CALC3:MARK:FUNC:DDEM:STAT:<SNR|MPOW|CFER|EVM|SRER|OOFF>?
   (SNR is the K70 name for MER; no suffix = value of the current sweep.)
+* Burst search (DDEM:SEAR:BURS:STAT) only exists for Signal type = Bursted
+  (DDEM:SIGN:VAL BURS) and pattern search (DDEM:SEAR:SYNC:STAT) only when the
+  signal description contains a pattern (DDEM:SIGN:PATT ON); otherwise the FSW
+  answers -200 "Function not available". Apply only sends changed settings.
+
+Live update speed
+-----------------
+* Sweeps are started with 'INIT:IMM;*OPC' and completion is polled via *ESR?,
+  so Stop / Apply interrupt a running sweep (ABOR) immediately.
+* The status bar shows where the time goes (FSW sweep / trace / results / draw).
+* Biggest FSW-side factors: Statistic count (set 1 for live view), capture length
+  much longer than result length, and FSW screen update during remote.
 """
 
 from __future__ import annotations
@@ -51,6 +63,7 @@ import csv
 import datetime as _dt
 import math
 import queue
+import re
 import sys
 import threading
 import time
@@ -59,7 +72,7 @@ from collections import deque
 import numpy as np
 
 try:
-    from PyQt5 import QtCore, QtGui, QtWidgets
+    from PyQt5 import QtCore, QtWidgets
     import pyqtgraph as pg
 except ImportError as _e:  # pragma: no cover
     sys.exit(f"Missing GUI dependency ({_e}). Run:  pip install PyQt5 pyqtgraph numpy")
@@ -75,8 +88,9 @@ except ImportError:  # pragma: no cover - demo mode still works
 # --------------------------------------------------------------------------- #
 SUMMARY_WIN = 3          # Result Summary window after DDEM:PRES:CALC
 CONST_WIN = 4            # Constellation I/Q window after DDEM:PRES:CALC
-MAX_PLOT_POINTS = 60000  # decimate constellation above this
+MAX_PLOT_POINTS = 30000  # decimate constellation above this (keeps the GUI responsive)
 INVALID = 9.0e37         # FSW returns 9.91E37 for "no result"
+_NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 # key, SCPI statistic suffix, label, unit
 RESULTS = [
@@ -96,6 +110,7 @@ MODULATIONS = ["BPSK", "QPSK", "OQPSK", "pi/4-DQPSK", "8PSK",
 TX_FILTERS = ["RRC", "RC", "GAUSS"]          # combo is editable: type any K70 filter name
 OVERSAMPLING = ["2", "4", "8", "16", "32", "64", "128"]
 TRIGGERS = ["IMM", "EXT", "EXT2", "EXT3", "IFP", "RFP"]
+SIGNAL_TYPES = [("Continuous", "CONT"), ("Bursted", "BURS")]
 PROTOCOLS = ["HiSLIP (hislip0)", "VXI-11 (INSTR)", "Raw socket (5025)", "Demo (no instrument)"]
 
 
@@ -204,6 +219,9 @@ class FswVsa:
             self.rm = pyvisa.ResourceManager("@py")
         self.inst = self.rm.open_resource(resource)
         self.inst.timeout = timeout_ms
+        self.timeout_ms = timeout_ms
+        self._unsupported: set[str] = set()   # queries the firmware does not know (-113)
+        self._batch_results = True            # fetch all results in one round trip
         if resource.upper().endswith("::SOCKET"):
             self.inst.read_termination = "\n"
             self.inst.write_termination = "\n"
@@ -231,22 +249,62 @@ class FswVsa:
             out.append(e)
         return out
 
-    def _qf(self, cmd):
+    def _clear_io(self):
+        """Drop any stale response (e.g. a late answer to a timed-out query) so that
+        the next query does not read an old, unrelated value."""
         try:
-            v = float(self.query(cmd))
-            return None if abs(v) >= INVALID else v
+            self.inst.clear()          # VISA device clear (HiSLIP / VXI-11)
         except Exception:
+            pass
+        try:
+            self.write("*CLS")
+        except Exception:
+            pass
+
+    def _probe(self, cmd: str):
+        """Query a setting that may be unknown or not available in the current state.
+
+        '<cmd>;*OPC?' always produces an answer: '<value>;1' if the query worked and
+        just '1' if it failed. So an unavailable setting costs one round trip instead
+        of a full VISA timeout (the original script waited 5 s for each of them)."""
+        if cmd in self._unsupported:
             return None
+        try:
+            resp = self.query(f"{cmd};*OPC?")
+        except Exception:
+            self._unsupported.add(cmd)
+            self._clear_io()
+            return None
+        head, sep, tail = resp.rpartition(";")
+        if sep and tail.strip() == "1":
+            return head.strip()
+        try:   # remember only "undefined header", not "not available right now"
+            if any(e.lstrip("+").startswith("-113") for e in self.errors()):
+                self._unsupported.add(cmd)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _num(text):
+        m = _NUM_RE.search(text or "")
+        if not m:
+            return None
+        v = float(m.group(0))
+        return None if abs(v) >= INVALID else v
+
+    def _qf(self, cmd):
+        return self._num(self._probe(cmd))
 
     def _qi(self, cmd):
         v = self._qf(cmd)
         return None if v is None else int(round(v))
 
     def _qb(self, cmd):
-        try:
-            v = self.query(cmd).upper()
-        except Exception:
+        v = self._probe(cmd)
+        if v is None:
             return None
+        v = v.upper()
         if v in ("ON", "OFF"):
             return v == "ON"
         try:
@@ -255,10 +313,8 @@ class FswVsa:
             return None
 
     def _qs(self, cmd):
-        try:
-            return self.query(cmd).strip().strip("'\"")
-        except Exception:
-            return None
+        v = self._probe(cmd)
+        return None if v is None else v.strip("'\"")
 
     # -- setup -------------------------------------------------------------
     def _setup(self) -> str:
@@ -298,29 +354,45 @@ class FswVsa:
 
     # -- settings ----------------------------------------------------------
     def _read_modulation(self):
-        try:
-            form = self.query("DDEM:FORM?").upper()
-            if form.startswith("QPSK"):
-                sub = self.query("DDEM:QPSK:FORM?").upper()
-                if sub.startswith("OQ"):
-                    return "OQPSK"
-                if sub.startswith("DPI4"):
-                    return "pi/4-DQPSK"
-                if sub.startswith("NORM"):
-                    return "QPSK"
-                return f"QPSK ({sub})"
-            if form == "PSK":
-                n = int(float(self.query("DDEM:PSK:NST?")))
-                return "BPSK" if n == 2 else f"{n}PSK"
-            if form in ("QAM", "APSK", "ASK"):
-                return f"{int(float(self.query(f'DDEM:{form}:NST?')))}{form}"
-            return form
-        except Exception:
+        form = self._qs("DDEM:FORM?")
+        if not form:
             return None
+        form = form.upper()
+        if form.startswith("QPSK"):
+            sub = (self._qs("DDEM:QPSK:FORM?") or "").upper()
+            if sub.startswith("OQ"):
+                return "OQPSK"
+            if sub.startswith("DPI4"):
+                return "pi/4-DQPSK"
+            if sub.startswith("NORM"):
+                return "QPSK"
+            return f"QPSK ({sub})"
+        if form == "PSK":
+            n = self._qi("DDEM:PSK:NST?")
+            return None if n is None else ("BPSK" if n == 2 else f"{n}PSK")
+        if form in ("QAM", "APSK", "ASK"):
+            n = self._qi(f"DDEM:{form}:NST?")
+            return None if n is None else f"{n}{form}"
+        return form
+
+    def _read_capture_len(self, symbol_rate):
+        """Capture length in symbols. DDEM:RLEN? may answer in symbols or in seconds
+        (depends on firmware / last unit used), so decide from the answer itself."""
+        raw = self._probe("DDEM:RLEN?")
+        v = self._num(raw)
+        if v is None:
+            return None
+        unit = raw.upper()
+        if "SYM" in unit:
+            return int(round(v))
+        in_symbols = v >= 10 and abs(v - round(v)) < 1e-6
+        if in_symbols or not symbol_rate:
+            return int(round(v)) if in_symbols else None
+        return int(round(v * symbol_rate))
 
     def read_settings(self) -> dict:
         old = self.inst.timeout
-        self.inst.timeout = min(old, 5000)    # unsupported queries just time out quickly
+        self.inst.timeout = min(old, 3000)
         try:
             s = {
                 "center":      self._qf("FREQ:CENT?"),
@@ -336,17 +408,24 @@ class FswVsa:
                 "tfil_alpha":  self._qf("DDEM:TFIL:ALPH?"),
                 "mfil_auto":   self._qb("DDEM:MFIL:AUTO?"),
                 "rlen_auto":   self._qb("DDEM:RLEN:AUTO?"),
-                "capture_len": self._qi("DDEM:RLEN:SYMB?"),
                 "result_len":  self._qi("DDEM:TIME?"),
                 "sweep_count": self._qi("SWE:COUN?"),
                 "equalizer":   self._qb("DDEM:EQU:STAT?"),
-                "burst":       self._qb("DDEM:SEAR:BURS:STAT?"),
-                "pattern":     self._qb("DDEM:SEAR:SYNC:STAT?"),
+                "signal_type": None,
+                "pattern_sig": self._qb("DDEM:SIGN:PATT?"),
                 "trig_source": self._qs("TRIG:SOUR?"),
             }
-            if s["capture_len"] is None and s["symbol_rate"]:
-                t = self._qf("DDEM:RLEN?")           # seconds
-                s["capture_len"] = None if t is None else int(round(t * s["symbol_rate"]))
+            st = self._qs("DDEM:SIGN:VAL?")
+            if st:
+                s["signal_type"] = "BURS" if st.upper().startswith("BURS") else "CONT"
+            s["capture_len"] = self._read_capture_len(s["symbol_rate"])
+            # Burst search only exists for a bursted signal, pattern search only when
+            # the signal description contains a pattern. Otherwise the FSW answers
+            # -200 "Function not available" -> report them as simply "off".
+            s["burst"] = (self._qb("DDEM:SEAR:BURS:STAT?")
+                          if s["signal_type"] != "CONT" else False)
+            s["pattern"] = (self._qb("DDEM:SEAR:SYNC:STAT?")
+                            if s["pattern_sig"] is not False else False)
             return s
         finally:
             self.inst.timeout = old
@@ -355,46 +434,76 @@ class FswVsa:
             except Exception:
                 pass
 
-    def apply_settings(self, s: dict):
+    def apply_settings(self, s: dict, prev: dict | None = None):
+        """Send only the settings that differ from `prev` (the last values read from
+        the FSW). Every K70 setting change makes the instrument re-evaluate, so
+        re-sending 20 unchanged settings is slow and can provoke needless errors."""
+        prev = prev or {}
         self.write("*CLS")
         cmds: list[str] = []
+        notes: list[str] = []
+
+        def changed(key):
+            v, p = s.get(key), prev.get(key)
+            if v is None:
+                return False
+            if p is None:
+                return True
+            if isinstance(v, float) or isinstance(p, float):
+                return not math.isclose(float(v), float(p), rel_tol=1e-9, abs_tol=1e-9)
+            return v != p
+
+        def eff(key):          # value the instrument will have after this apply
+            return s[key] if s.get(key) is not None else prev.get(key)
 
         def num(key, cmd):
-            if s.get(key) is not None:
+            if changed(key):
                 cmds.append(f"{cmd} {s[key]:.10g}")
 
         def onoff(key, cmd):
-            if s.get(key) is not None:
+            if changed(key):
                 cmds.append(f"{cmd} {'ON' if s[key] else 'OFF'}")
 
-        if s.get("modulation"):
+        if changed("modulation"):
             cmds += mod_commands(s["modulation"])
         num("center", "FREQ:CENT")
         num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
         onoff("att_auto", "INP:ATT:AUTO")
-        if not s.get("att_auto"):
+        if not eff("att_auto"):
             num("att", "INP:ATT")
         onoff("preamp", "INP:GAIN:STAT")
         num("symbol_rate", "DDEM:SRAT")
-        if s.get("prat") is not None:
+        if changed("prat"):
             cmds.append(f"DDEM:PRAT {int(s['prat'])}")
         onoff("tfil_state", "DDEM:TFIL:STAT")
-        if s.get("tfil_state"):
-            if s.get("tfil_name"):
+        if eff("tfil_state"):
+            if changed("tfil_name") and s["tfil_name"]:
                 cmds.append(f"DDEM:TFIL:NAME '{s['tfil_name']}'")
             num("tfil_alpha", "DDEM:TFIL:ALPH")
         onoff("mfil_auto", "DDEM:MFIL:AUTO")
         onoff("rlen_auto", "DDEM:RLEN:AUTO")
-        if s.get("capture_len") is not None and not s.get("rlen_auto"):
+        if not eff("rlen_auto") and s.get("capture_len") is not None and (
+                changed("capture_len") or changed("rlen_auto")):
             cmds.append(f"DDEM:RLEN {int(s['capture_len'])} SYM")
-        if s.get("result_len") is not None:
+        if changed("result_len"):
             cmds.append(f"DDEM:TIME {int(s['result_len'])}")
-        if s.get("sweep_count") is not None:
+        if changed("sweep_count"):
             cmds.append(f"SWE:COUN {int(s['sweep_count'])}")
         onoff("equalizer", "DDEM:EQU:STAT")
-        onoff("burst", "DDEM:SEAR:BURS:STAT")
-        onoff("pattern", "DDEM:SEAR:SYNC:STAT")
-        if s.get("trig_source"):
+        if changed("signal_type"):
+            cmds.append(f"DDEM:SIGN:VAL {s['signal_type']}")
+        onoff("pattern_sig", "DDEM:SIGN:PATT")
+        if changed("burst"):
+            if eff("signal_type") == "CONT":
+                notes.append("Burst search skipped: only available for Signal type = Bursted")
+            else:
+                onoff("burst", "DDEM:SEAR:BURS:STAT")
+        if changed("pattern"):
+            if eff("pattern_sig") is False:
+                notes.append("Pattern search skipped: signal description has no pattern")
+            else:
+                onoff("pattern", "DDEM:SEAR:SYNC:STAT")
+        if changed("trig_source") and s["trig_source"]:
             cmds.append(f"TRIG:SOUR {s['trig_source']}")
 
         errors = []
@@ -402,28 +511,77 @@ class FswVsa:
             self.write(c)
             errors += [f"{c}  →  {e}" for e in self.errors()]
         self.query("*OPC?")
-        return cmds, errors
+        return cmds, errors, notes
 
     # -- measurement -------------------------------------------------------
-    def measure(self) -> dict:
+    def abort(self):
+        try:
+            self.write("ABOR")
+            self.query("*OPC?")
+        except Exception:
+            self._clear_io()
+
+    def _wait_sweep(self, should_abort) -> bool:
+        """Wait for the sweep started with '...;*OPC' by polling the ESR.
+
+        Unlike a blocking 'INIT;*OPC?' (which locked the I/O for the whole sweep and
+        left a late '1' in the output buffer after a timeout), this can be stopped at
+        any moment (Stop / Apply / Disconnect) and never desynchronises the I/O."""
         t0 = time.perf_counter()
-        self.query("INIT:IMM;*OPC?")                       # one (single) sweep, wait for it
+        deadline = t0 + self.timeout_ms / 1000
+        delay = 0.002
+        while True:
+            if int(float(self.query("*ESR?"))) & 1:      # bit 0 = operation complete
+                return True
+            if should_abort():
+                self.abort()
+                return False
+            if time.perf_counter() > deadline:
+                self.abort()
+                raise TimeoutError(
+                    f"sweep did not finish within {self.timeout_ms / 1000:.0f} s - check "
+                    f"trigger source, burst/pattern search and statistic count")
+            time.sleep(delay)
+            delay = min(delay * 1.5, 0.03)
+
+    def _read_results(self) -> dict:
+        qs = [f"CALC{SUMMARY_WIN}:MARK:FUNC:DDEM:STAT:{scpi}?" for _, scpi, _, _ in RESULTS]
+        if self._batch_results:
+            old = self.inst.timeout
+            self.inst.timeout = min(old, 5000)
+            try:
+                parts = self.query(";:".join(qs)).split(";")
+                if len(parts) == len(RESULTS):
+                    return {k: self._num(p) for (k, *_), p in zip(RESULTS, parts)}
+            except Exception:
+                self._clear_io()
+            finally:
+                self.inst.timeout = old
+            self._batch_results = False                   # fall back to one query each
+        return {k: self._qf(q) for (k, *_), q in zip(RESULTS, qs)}
+
+    def measure(self, should_abort=lambda: False):
+        t0 = time.perf_counter()
+        self.write("*CLS;:INIT:IMM;*OPC")                  # one single sweep, non-blocking
+        if not self._wait_sweep(should_abort):
+            return None                                    # aborted by the GUI
+        t1 = time.perf_counter()
         raw = self.inst.query_binary_values(f"TRAC{CONST_WIN}:DATA? TRACE1", datatype="f",
                                             is_big_endian=False, container=np.array)
         raw = np.asarray(raw, dtype=np.float64)
         n = raw.size // 2 * 2
-        res = {"i": raw[0:n:2], "q": raw[1:n:2], "t": time.time()}
-        for key, scpi, _, _ in RESULTS:
-            try:
-                v = float(self.query(f"CALC{SUMMARY_WIN}:MARK:FUNC:DDEM:STAT:{scpi}?"))
-                res[key] = float("nan") if abs(v) >= INVALID else v
-            except Exception:
-                res[key] = float("nan")
-        res["sweep_time"] = time.perf_counter() - t0
+        i, q = raw[0:n:2], raw[1:n:2]
+        ok = np.isfinite(i) & np.isfinite(q) & (np.abs(i) < 1e30) & (np.abs(q) < 1e30)
+        t2 = time.perf_counter()
+        res = {"i": i[ok], "q": q[ok], "t": time.time()}
+        res.update({k: (float("nan") if v is None else v) for k, v in self._read_results().items()})
+        t3 = time.perf_counter()
+        res.update(sweep_time=t3 - t0, t_acq=t1 - t0, t_trace=t2 - t1, t_res=t3 - t2)
         return res
 
     def close(self):
         try:
+            self.abort()
             self.write("INIT:CONT ON")
             self.write("SYST:DISP:UPD ON")
         except Exception:
@@ -449,18 +607,19 @@ class DemoFsw:
                   "tfil_state": True, "tfil_name": "RRC", "tfil_alpha": 0.35,
                   "mfil_auto": True, "rlen_auto": False, "capture_len": 4000,
                   "result_len": 1000, "sweep_count": 1, "equalizer": False,
+                  "signal_type": "CONT", "pattern_sig": False,
                   "burst": False, "pattern": False, "trig_source": "IMM"}
 
     def read_settings(self):
         return dict(self.s)
 
-    def apply_settings(self, s):
+    def apply_settings(self, s, prev=None):
         cmds = []
         for k, v in s.items():
-            if v is not None:
+            if v is not None and v != self.s.get(k):
                 self.s[k] = v
                 cmds.append(f"{k} = {v}")
-        return cmds, []
+        return cmds, [], []
 
     def preset_layout(self):
         pass
@@ -472,7 +631,7 @@ class DemoFsw:
         time.sleep(0.3)
         self.s["ref_level"] = -12.0
 
-    def measure(self):
+    def measure(self, should_abort=lambda: False):
         n = int(self.s["result_len"] or 1000)
         pts = ideal_points(self.s["modulation"] or "QPSK")
         sym = pts[self.rng.integers(len(pts), size=n)]
@@ -482,12 +641,17 @@ class DemoFsw:
         rx = sym + sigma * (self.rng.normal(size=n) + 1j * self.rng.normal(size=n))
         err = np.mean(np.abs(rx - sym) ** 2)
         sig = np.mean(np.abs(sym) ** 2)
+        t0 = time.perf_counter()
         time.sleep(0.04 + min(0.3, (self.s["capture_len"] or n) / (self.s["symbol_rate"] or 1e6)))
+        if should_abort():
+            return None
+        t_acq = time.perf_counter() - t0
         return {"i": rx.real, "q": rx.imag, "t": time.time(),
                 "mer": 10 * math.log10(sig / err), "evm": 100 * math.sqrt(err / sig),
                 "power": self.s["ref_level"] - 8 + self.rng.normal(0, 0.03),
                 "cfe": self.cfe, "srerr": self.rng.normal(0, 0.5),
-                "iqoff": -45 + self.rng.normal(0, 0.5), "sweep_time": 0.0}
+                "iqoff": -45 + self.rng.normal(0, 0.5),
+                "sweep_time": t_acq, "t_acq": t_acq, "t_trace": 0.0, "t_res": 0.0}
 
     def close(self):
         pass
@@ -531,16 +695,30 @@ class Worker(QtCore.QObject):
                     self.failed.emit(tag, f"{type(e).__name__}: {e}")
                 continue
             if self.dev is not None and (self.running or self.single) and self._gui_ready.is_set():
+                run_mode, was_single = self.running, self.single
                 self.single = False
+
+                def should_abort():
+                    # Stop pressed, window closing, or a job (Apply, Read...) waiting:
+                    # abort the sweep instead of making the user wait for it.
+                    return (self.quit or (run_mode and not self.running and not was_single)
+                            or not self.jobs.empty())
                 try:
-                    r = self.dev.measure()
+                    r = self.dev.measure(should_abort)
+                    if r is None:                 # aborted
+                        if was_single and not self.quit:
+                            self.single = True    # redo the single sweep after the job
+                        continue
                     self._gui_ready.clear()       # back-pressure: wait until GUI drew it
                     self.measured.emit(r)
                 except Exception as e:
                     self.running = False
+                    clear = getattr(self.dev, "_clear_io", None)
+                    if clear:
+                        clear()                   # never leave a stale answer in the buffer
                     self.failed.emit("measure", f"{type(e).__name__}: {e}")
             else:
-                time.sleep(0.02)
+                time.sleep(0.01)
 
 
 # --------------------------------------------------------------------------- #
@@ -607,6 +785,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1560, 940)
         self.connected = False
         self.supported: set[str] = set()
+        self.last_read: dict = {}          # last settings read from the FSW (Apply sends the diff)
+        self._warned_missing: set[str] = set()
         self.persist: deque = deque(maxlen=1)
         self.trend = {k: deque(maxlen=600) for k, *_ in RESULTS}
         self.stats = {k: RunningStat() for k, *_ in RESULTS}
@@ -672,7 +852,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.idn_label.setWordWrap(True)
         self.idn_label.setStyleSheet("color:#8a96a3;font-size:11px;")
         self.disp_upd = QtWidgets.QCheckBox("Update FSW screen during remote")
-        self.disp_upd.setChecked(True)
+        self.disp_upd.setToolTip("Off = much faster sweeps: the FSW does not have to redraw\n"
+                                 "its 4 result windows for every single sweep.")
+        self.disp_upd.setChecked(False)
         self.disp_upd.toggled.connect(self.on_display_update)
         f.addRow("Address", self.ip_edit)
         f.addRow("Protocol", self.proto)
@@ -772,11 +954,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.g_dem = g = QtWidgets.QGroupBox("Demodulation / Sync / Trigger")
         f = QtWidgets.QFormLayout(g)
         self.w["equalizer"] = QtWidgets.QCheckBox("Equalizer")
+        self.w["signal_type"] = QtWidgets.QComboBox()
+        for label, code in SIGNAL_TYPES:
+            self.w["signal_type"].addItem(label, code)
+        self.w["pattern_sig"] = QtWidgets.QCheckBox("Signal contains a sync pattern")
         self.w["burst"] = QtWidgets.QCheckBox("Burst search")
+        self.w["burst"].setToolTip("Only available when Signal type = Bursted")
         self.w["pattern"] = QtWidgets.QCheckBox("Pattern search")
+        self.w["pattern"].setToolTip("Only available when the signal contains a sync pattern\n"
+                                     "(pattern selected in the K70 signal description)")
+        self.w["signal_type"].currentIndexChanged.connect(self._update_dependencies)
+        self.w["pattern_sig"].toggled.connect(self._update_dependencies)
         self.w["trig_source"] = QtWidgets.QComboBox()
         self.w["trig_source"].addItems(TRIGGERS)
         f.addRow(self.w["equalizer"])
+        f.addRow("Signal type", self.w["signal_type"])
+        f.addRow(self.w["pattern_sig"])
         f.addRow(self.w["burst"])
         f.addRow(self.w["pattern"])
         f.addRow("Trigger", self.w["trig_source"])
@@ -837,8 +1030,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.const_plot.setLabel("left", "Q")
         self.const_plot.addLine(x=0, pen=pg.mkPen("#3a424c"))
         self.const_plot.addLine(y=0, pen=pg.mkPen("#3a424c"))
-        self.const_curve = self.const_plot.plot([], [], pen=None, symbol="o", symbolSize=3,
-                                                symbolPen=None, symbolBrush=pg.mkBrush(255, 196, 0, 150))
+        # A bare ScatterPlotItem (pixmap fragments) is several times faster than
+        # PlotDataItem(symbol=...) for tens of thousands of points.
+        self.const_curve = pg.ScatterPlotItem(size=3, pen=None, symbol="s", pxMode=True,
+                                              brush=pg.mkBrush(255, 196, 0, 150))
+        self.const_plot.addItem(self.const_curve)
+        self.const_plot.getPlotItem().setMenuEnabled(False)
         self.const_plot.setRange(xRange=(-1.5, 1.5), yRange=(-1.5, 1.5))
         mv.addWidget(self.const_plot, 1)
         split.addWidget(mid)
@@ -937,6 +1134,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sr_label.setText("—")
             self.cap_time.setText("—")
 
+    def _update_dependencies(self, *_):
+        w, sup = self.w, self.supported
+        bursted = "signal_type" not in sup or w["signal_type"].currentData() != "CONT"
+        has_pattern = "pattern_sig" not in sup or w["pattern_sig"].isChecked()
+        w["burst"].setEnabled("burst" in sup and bursted)
+        w["pattern"].setEnabled("pattern" in sup and has_pattern)
+
+    @staticmethod
+    def _set_combo_data(combo: QtWidgets.QComboBox, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
     @staticmethod
     def _set_combo(combo: QtWidgets.QComboBox, text: str):
         idx = combo.findText(text, QtCore.Qt.MatchFixedString)
@@ -969,6 +1179,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "result_len": lambda v: w["result_len"].setValue(int(v)),
             "sweep_count": lambda v: w["sweep_count"].setValue(int(v)),
             "equalizer": lambda v: w["equalizer"].setChecked(v),
+            "signal_type": lambda v: self._set_combo_data(w["signal_type"], v),
+            "pattern_sig": lambda v: w["pattern_sig"].setChecked(v),
             "burst": lambda v: w["burst"].setChecked(v),
             "pattern": lambda v: w["pattern"].setChecked(v),
             "trig_source": lambda v: self._set_combo(w["trig_source"], v),
@@ -978,9 +1190,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 fn(s[k])
         w["att"].setEnabled("att" in self.supported and not w["att_auto"].isChecked())
         w["capture_len"].setEnabled("capture_len" in self.supported and not w["rlen_auto"].isChecked())
+        self._update_dependencies()
         self._update_derived()
-        missing = sorted(set(s) - self.supported)
+        # remember exactly what the widgets now show -> Apply sends only what the user changed
+        self.last_read = self.collect()
+        missing = sorted(set(s) - self.supported - self._warned_missing)
         if missing:
+            self._warned_missing |= set(missing)
             self.logmsg(f"Not available on this instrument/firmware (disabled): {', '.join(missing)}", "warn")
 
     def collect(self) -> dict:
@@ -1003,6 +1219,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "result_len": lambda: w["result_len"].value(),
             "sweep_count": lambda: w["sweep_count"].value(),
             "equalizer": lambda: w["equalizer"].isChecked(),
+            "signal_type": lambda: w["signal_type"].currentData(),
+            "pattern_sig": lambda: w["pattern_sig"].isChecked(),
             "burst": lambda: w["burst"].isChecked(),
             "pattern": lambda: w["pattern"].isChecked(),
             "trig_source": lambda: w["trig_source"].currentText().strip(),
@@ -1047,7 +1265,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Invalid value", f"Could not parse a field: {e}")
             return
-        self.worker.submit("apply", lambda: self.worker.dev.apply_settings(s))
+        prev = dict(self.last_read)
+        self.worker.submit("apply", lambda: self.worker.dev.apply_settings(s, prev))
 
     def on_autolevel(self):
         self.logmsg("Auto level running…")
@@ -1065,6 +1284,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.running = on
         if on:
             self.last_rx = None
+            self._speed_hints()
+
+    def _speed_hints(self):
+        """Warn about settings that make every live update slow."""
+        s = self.last_read
+        if (s.get("sweep_count") or 0) > 1:
+            self.logmsg(f"Statistic count = {s['sweep_count']}: every update waits for "
+                        f"{s['sweep_count']} result ranges. Set it to 1 for a fast live view.", "warn")
+        cap, res = s.get("capture_len"), s.get("result_len")
+        if not s.get("rlen_auto") and cap and res and cap > 10 * res:
+            self.logmsg(f"Capture length ({cap} sym) is {cap // res}× the result length - the FSW "
+                        f"demodulates the whole capture every sweep. Reduce it or set Auto.", "warn")
+        if self.disp_upd.isChecked():
+            self.logmsg("FSW screen update is ON - sweeps are slower. Uncheck it for max speed.")
 
     def on_single(self):
         self.worker.single = True
@@ -1116,12 +1349,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.populate(result)
             self.logmsg("Settings read from FSW", "ok")
         elif tag == "apply":
-            cmds, errors = result
-            if errors:
-                for e in errors:
-                    self.logmsg(e, "err")
-            self.logmsg(f"Applied {len(cmds)} settings" + (f", {len(errors)} error(s)" if errors else ""),
-                        "warn" if errors else "ok")
+            cmds, errors, notes = result
+            for n in notes:
+                self.logmsg(n, "warn")
+            for e in errors:
+                self.logmsg(e, "err")
+            if not cmds:
+                self.logmsg("Nothing changed - no settings sent")
+            else:
+                self.logmsg(f"Applied {len(cmds)} setting(s): " + "; ".join(cmds)
+                            + (f"  —  {len(errors)} error(s)" if errors else ""),
+                            "warn" if errors else "ok")
             self.on_read()   # read back what the instrument actually accepted
         elif tag == "autolevel":
             self.logmsg("Auto level done", "ok")
@@ -1144,6 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.ack()
 
     def _draw(self, r: dict):
+        t_draw = time.perf_counter()
         now = r["t"]
         if self.t_start is None:
             self.t_start = now
@@ -1151,14 +1390,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # constellation
         i, q = r["i"], r["q"]
-        ok = np.isfinite(i) & np.isfinite(q)
+        ok = np.isfinite(i) & np.isfinite(q) & (np.abs(i) < 1e30) & (np.abs(q) < 1e30)
         self.persist.append((i[ok], q[ok]))
         I = np.concatenate([p[0] for p in self.persist])
         Q = np.concatenate([p[1] for p in self.persist])
         if I.size > MAX_PLOT_POINTS:
             step = int(math.ceil(I.size / MAX_PLOT_POINTS))
             I, Q = I[::step], Q[::step]
-        self.const_curve.setData(I, Q)
+        self.const_curve.setData(x=I, y=Q)
         if self.autoscale.isChecked() and I.size:
             m = float(np.percentile(np.maximum(np.abs(I), np.abs(Q)), 99.9)) * 1.15 or 1.0
             if self._range is None or not (0.85 < m / self._range < 1.15):
@@ -1191,8 +1430,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if dt > 0:
                 self.rate = 0.8 * self.rate + 0.2 / dt if self.rate else 1 / dt
         self.last_rx = now
-        self.status.showMessage(f"Sweeps: {self.sweeps}    Rate: {self.rate:.1f} /s    "
-                                f"Points: {i.size}    Last sweep: {r.get('sweep_time', 0) * 1e3:.0f} ms")
+        ms = lambda k: r.get(k, 0) * 1e3
+        self.status.showMessage(
+            f"Sweeps: {self.sweeps}    Rate: {self.rate:.1f} /s    Points: {i.size}    "
+            f"Last: {ms('sweep_time'):.0f} ms  (FSW sweep {ms('t_acq'):.0f} · trace {ms('t_trace'):.0f}"
+            f" · results {ms('t_res'):.0f} · draw {(time.perf_counter() - t_draw) * 1e3:.0f} ms)")
 
     def _redraw_trend(self, *_):
         k = self.trend_sel.currentData()
