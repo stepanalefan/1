@@ -19,6 +19,11 @@ Features
 * Live results: MER RMS, Power, Carrier Frequency Error
   (+ EVM RMS, Symbol Rate Error, I/Q Offset), with mean/min/max and a trend plot.
 * Optional CSV logging of every sweep.
+* Spectrum tab: live spectrum from an FSW Spectrum channel (created on first use,
+  INST:CRE SANALYZER) with center/span, ref level/range, attenuation, RBW/VBW,
+  sweep time, sweep points, detector, trace mode and count; peak marker and
+  channel power. Switching tabs switches the FSW channel (only the selected one
+  measures).
 
 Install
 -------
@@ -42,6 +47,9 @@ SCPI notes (FSW-K70)
   The constellation trace is read from window 4, results from window 3.
 * Results:  CALC3:MARK:FUNC:DDEM:STAT:<SNR|MPOW|CFER|EVM|SRER|OOFF>?
   (SNR is the K70 name for MER; no suffix = value of the current sweep.)
+* All SCPI headers and enumerated parameters were checked against R&S's official
+  FSW Python driver (RsFsw). Modulation: DDEM:FORM only knows the groups
+  APSK|ASK|FSK|MSK|PSK|QAM|QPSK|UQAM; OQPSK = DDEM:FORM QPSK + DDEM:QPSK:FORM OFFS.
 * Burst search (DDEM:SEAR:BURS:STAT) only exists for Signal type = Bursted
   (DDEM:SIGN:VAL BURS) and pattern search (DDEM:SEAR:SYNC:STAT) only when the
   signal description contains a pattern (DDEM:SIGN:PATT ON); otherwise the FSW
@@ -95,6 +103,7 @@ except ImportError:  # pragma: no cover - demo mode still works
 # --------------------------------------------------------------------------- #
 SUMMARY_WIN = 3          # Result Summary window after DDEM:PRES:CALC
 CONST_WIN = 4            # Constellation I/Q window after DDEM:PRES:CALC
+SPEC_WIN = 1             # spectrum trace window of the Spectrum channel
 MAX_PLOT_POINTS = 30000  # decimate constellation above this (keeps the GUI responsive)
 INVALID = 9.0e37         # FSW returns 9.91E37 for "no result"
 _NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
@@ -111,13 +120,35 @@ RESULTS = [
 RESULT_LABEL = {k: (lbl, unit) for k, _, lbl, unit in RESULTS}
 PRIMARY = ("mer", "power", "cfe")
 
-MODULATIONS = ["BPSK", "QPSK", "OQPSK", "pi/4-DQPSK", "8PSK",
-               "16QAM", "32QAM", "64QAM", "128QAM", "256QAM", "512QAM", "1024QAM",
-               "16APSK", "32APSK", "MSK"]
+# label -> (DDEM:FORM group, sub-format command or None, NSTate or None).
+# Values checked against the enums of R&S's official FSW driver (RsFsw):
+#   DDEM:FORM      APSK|ASK|FSK|MSK|PSK|QAM|QPSK|UQAM   (no separate OQPSK / BPSK group)
+#   DDEM:QPSK:FORM NORMal|DIFFerential|NPI4|DPI4|OFFSet|SOFFset|N3Pi4
+#   DDEM:PSK:NST   2|8,   DDEM:APSK:NST 16|32,   DDEM:QAM:FORM NORMal|...
+MOD_TABLE = {
+    "BPSK":        ("PSK",  "DDEM:PSK:FORM NORM",   2),
+    "QPSK":        ("QPSK", "DDEM:QPSK:FORM NORM",  None),
+    "OQPSK":       ("QPSK", "DDEM:QPSK:FORM OFFS",  None),
+    "SOQPSK":      ("QPSK", "DDEM:QPSK:FORM SOFF",  None),
+    "DQPSK":       ("QPSK", "DDEM:QPSK:FORM DIFF",  None),
+    "pi/4-QPSK":   ("QPSK", "DDEM:QPSK:FORM NPI4",  None),
+    "pi/4-DQPSK":  ("QPSK", "DDEM:QPSK:FORM DPI4",  None),
+    "3pi/4-QPSK":  ("QPSK", "DDEM:QPSK:FORM N3PI4", None),
+    "8PSK":        ("PSK",  "DDEM:PSK:FORM NORM",   8),
+    **{f"{n}QAM":  ("QAM",  "DDEM:QAM:FORM NORM",   n) for n in (16, 32, 64, 128, 256, 512, 1024)},
+    "16APSK":      ("APSK", None,                   16),
+    "32APSK":      ("APSK", None,                   32),
+    "MSK":         ("MSK",  None,                   None),
+}
+MODULATIONS = list(MOD_TABLE)
 TX_FILTERS = ["RRC", "RC", "GAUSS"]          # combo is editable: type any K70 filter name
 OVERSAMPLING = ["2", "4", "8", "16", "32", "64", "128"]
 TRIGGERS = ["IMM", "EXT", "EXT2", "EXT3", "IFP", "RFP"]
 SIGNAL_TYPES = [("Continuous", "CONT"), ("Bursted", "BURS")]
+DETECTORS = [("Auto", "AUTO"), ("Positive peak", "POS"), ("RMS", "RMS"), ("Average", "AVER"),
+             ("Negative peak", "NEG"), ("Sample", "SAMP"), ("Auto peak", "APE")]
+TRACE_MODES = [("Clear/Write", "WRIT"), ("Max hold", "MAXH"), ("Min hold", "MINH"),
+               ("Average", "AVER"), ("View", "VIEW")]
 PROTOCOLS = ["HiSLIP (hislip0)", "VXI-11 (INSTR)", "Raw socket (5025)", "Demo (no instrument)"]
 
 
@@ -168,29 +199,24 @@ def fmt_result(key: str, v) -> str:
 
 def mod_commands(name: str) -> list[str]:
     """SCPI commands that select a modulation in K70."""
-    n = name.strip()
-    if n == "BPSK":
-        return ["DDEM:FORM PSK", "DDEM:PSK:NST 2"]
-    if n == "QPSK":
-        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM NORM"]
-    if n == "OQPSK":
-        return ["DDEM:FORM OQPS"]          # Offset QPSK is its own format, not a QPSK sub-format
-    if n == "pi/4-DQPSK":
-        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM DPI4"]
-    if n == "MSK":
-        return ["DDEM:FORM MSK"]
-    for fam in ("APSK", "QAM", "PSK", "ASK"):
-        if n.endswith(fam) and n[: -len(fam)].isdigit():
-            return [f"DDEM:FORM {fam}", f"DDEM:{fam}:NST {int(n[:-len(fam)])}"]
-    return []  # unknown/unsupported label read back from the instrument -> leave as is
+    entry = MOD_TABLE.get(name.strip())
+    if entry is None:
+        return []  # unknown label read back from the instrument -> leave as is
+    group, sub, nst = entry
+    cmds = [f"DDEM:FORM {group}"]
+    if nst is not None:
+        cmds.append(f"DDEM:{group}:NST {nst}")
+    if sub:
+        cmds.append(sub)
+    return cmds
 
 
 def ideal_points(mod: str) -> np.ndarray:
     """Ideal constellation (unit average power) - used by the demo simulator."""
-    if mod in ("QPSK", "OQPSK", "MSK"):
-        p = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
-    elif mod == "pi/4-DQPSK":
+    if "pi/4" in mod:
         p = np.exp(1j * np.pi / 4 * np.arange(8))
+    elif "QPSK" in mod or mod == "MSK":
+        p = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
     elif mod == "BPSK":
         p = np.array([1, -1], dtype=complex)
     elif mod.endswith("APSK"):
@@ -209,6 +235,38 @@ def ideal_points(mod: str) -> np.ndarray:
     else:
         p = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
     return p / np.sqrt(np.mean(np.abs(p) ** 2))
+
+
+class _CmdDiff:
+    """Builds the SCPI commands for the settings that differ from the last read."""
+
+    def __init__(self, s: dict, prev: dict):
+        self.s, self.prev, self.cmds, self.notes = s, prev or {}, [], []
+
+    def changed(self, key):
+        v, p = self.s.get(key), self.prev.get(key)
+        if v is None:
+            return False
+        if p is None:
+            return True
+        if isinstance(v, float) or isinstance(p, float):
+            return not math.isclose(float(v), float(p), rel_tol=1e-9, abs_tol=1e-9)
+        return v != p
+
+    def eff(self, key):          # value the instrument will have after this apply
+        return self.s[key] if self.s.get(key) is not None else self.prev.get(key)
+
+    def num(self, key, cmd):
+        if self.changed(key):
+            self.cmds.append(f"{cmd} {self.s[key]:.10g}")
+
+    def onoff(self, key, cmd):
+        if self.changed(key):
+            self.cmds.append(f"{cmd} {'ON' if self.s[key] else 'OFF'}")
+
+    def word(self, key, cmd):
+        if self.changed(key) and self.s[key]:
+            self.cmds.append(f"{cmd} {self.s[key]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +288,8 @@ class FswVsa:
         self._unsupported: set[str] = set()   # queries the firmware does not know (-113)
         self._batch_results = True            # fetch all results in one round trip
         self.continuous = False               # FSW sweeping in INIT:CONT ON mode
+        self.app = "vsa"                      # active FSW channel: "vsa" (K70) or "spec"
+        self.channels: dict[str, str] = {}    # app -> FSW channel name
         self._last_raw = None                 # last trace, to detect "no new sweep yet"
         if resource.upper().endswith("::SOCKET"):
             self.inst.read_termination = "\n"
@@ -327,38 +387,66 @@ class FswVsa:
         return None if v is None else v.strip("'\"")
 
     # -- setup -------------------------------------------------------------
-    def _setup(self) -> str:
-        self.write("*CLS")
-        name = None
+    def _find_channel(self, types: tuple[str, ...]):
         try:
             items = [x.strip().strip("'\"") for x in self.query("INST:LIST?").split(",")]
-            for typ, nm in zip(items[0::2], items[1::2]):
-                if typ.upper().startswith("DDEM"):
-                    name = nm
-                    break
         except Exception:
-            pass
+            return None
+        for typ, nm in zip(items[0::2], items[1::2]):
+            if typ.upper() in types:
+                return nm
+        return None
+
+    def _open_channel(self, types, create_type, default_name) -> str:
+        """Select an existing channel of that type or create one."""
+        name = self._find_channel(types)
         if name:
             self.write(f"INST:SEL '{name}'")
         else:
-            name = "VSA"
-            self.write(f"INST:CRE DDEM, '{name}'")
+            name = default_name
+            self.write(f"INST:CRE {create_type}, '{name}'")
         self.query("*OPC?")
-        self.write("INIT:CONT OFF")                # single-sweep mode, we trigger each sweep
-        self.preset_layout()
+        self.write("INIT:CONT OFF")                # we control the sweep (Run / Single)
         self.write("FORM REAL,32")                 # binary trace transfer
         self.write("FORM:BORD SWAP")               # little endian
+        return name
+
+    def _setup(self) -> str:
+        self.write("*CLS")
+        name = self._open_channel(("DDEM",), "DDEM", "VSA")
+        self.channels["vsa"] = name
+        self.app = "vsa"
+        self.preset_layout()
         self.errors()
         return name
 
+    def select_app(self, app: str):
+        """Switch the FSW to the K70 (vsa) or the Spectrum (spec) channel. Only the
+        selected channel measures, so the GUI tab decides what the FSW does."""
+        if app == self.app:
+            return
+        if self.continuous:
+            self.stop_continuous()
+        if app in self.channels:
+            self.write(f"INST:SEL '{self.channels[app]}'")
+            self.query("*OPC?")
+            self.write("INIT:CONT OFF")
+        elif app == "spec":
+            self.channels["spec"] = self._open_channel(("SANALYZER", "SAN"), "SANALYZER", "Spectrum")
+        self.app = app
+        self._last_raw = None
+        self.errors()
+
     def preset_layout(self):
+        self.select_app("vsa")
         self.write("DDEM:PRES:CALC")               # W1 mag, W2 spectrum, W3 summary, W4 constellation
         self.query("*OPC?")
 
     def set_display_update(self, on: bool):
         self.write(f"SYST:DISP:UPD {'ON' if on else 'OFF'}")
 
-    def auto_level(self):
+    def auto_level(self, app: str = "vsa"):
+        self.select_app(app)
         self.write("ADJ:LEV")
         self.query("*OPC?")
 
@@ -368,21 +456,19 @@ class FswVsa:
         if not form:
             return None
         form = form.upper()
-        if form.startswith("OQPS"):
-            return "OQPSK"
         if form.startswith("QPSK"):
-            sub = (self._qs("DDEM:QPSK:FORM?") or "").upper()
-            if sub.startswith("DPI4"):
-                return "pi/4-DQPSK"
-            if sub.startswith("NORM"):
-                return "QPSK"
+            sub = (self._qs("DDEM:QPSK:FORM?") or "").upper()     # e.g. NORM, OFFS, DPI4
+            for label, (g, cmd, _) in MOD_TABLE.items():
+                if g == "QPSK" and sub and cmd.split()[-1].upper().startswith(sub[:4]):
+                    return label
             return f"QPSK ({sub})"
-        if form == "PSK":
-            n = self._qi("DDEM:PSK:NST?")
-            return None if n is None else ("BPSK" if n == 2 else f"{n}PSK")
-        if form in ("QAM", "APSK", "ASK"):
+        if form in ("PSK", "QAM", "APSK", "ASK"):
             n = self._qi(f"DDEM:{form}:NST?")
-            return None if n is None else f"{n}{form}"
+            if n is None:
+                return None
+            if form == "PSK" and n == 2:
+                return "BPSK"
+            return f"{n}{form}"
         return form
 
     def _read_capture_len(self, symbol_rate):
@@ -401,6 +487,7 @@ class FswVsa:
         return int(round(v * symbol_rate))
 
     def read_settings(self) -> dict:
+        self.select_app("vsa")
         old = self.inst.timeout
         self.inst.timeout = min(old, 3000)
         try:
@@ -448,80 +535,123 @@ class FswVsa:
         """Send only the settings that differ from `prev` (the last values read from
         the FSW). Every K70 setting change makes the instrument re-evaluate, so
         re-sending 20 unchanged settings is slow and can provoke needless errors."""
-        prev = prev or {}
+        self.select_app("vsa")
+        d = _CmdDiff(s, prev)
+        if d.changed("modulation"):
+            d.cmds += mod_commands(s["modulation"])
+        d.num("center", "FREQ:CENT")
+        d.num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
+        d.onoff("att_auto", "INP:ATT:AUTO")
+        if not d.eff("att_auto"):
+            d.num("att", "INP:ATT")
+        d.onoff("preamp", "INP:GAIN:STAT")
+        d.num("symbol_rate", "DDEM:SRAT")
+        if d.changed("prat"):
+            d.cmds.append(f"DDEM:PRAT {int(s['prat'])}")
+        d.onoff("tfil_state", "DDEM:TFIL:STAT")
+        if d.eff("tfil_state"):
+            if d.changed("tfil_name") and s["tfil_name"]:
+                d.cmds.append(f"DDEM:TFIL:NAME '{s['tfil_name']}'")
+            d.num("tfil_alpha", "DDEM:TFIL:ALPH")
+        d.onoff("mfil_auto", "DDEM:MFIL:AUTO")
+        d.onoff("rlen_auto", "DDEM:RLEN:AUTO")
+        if not d.eff("rlen_auto") and s.get("capture_len") is not None and (
+                d.changed("capture_len") or d.changed("rlen_auto")):
+            d.cmds.append(f"DDEM:RLEN {int(s['capture_len'])} SYM")
+        if d.changed("result_len"):
+            d.cmds.append(f"DDEM:TIME {int(s['result_len'])}")
+        if d.changed("sweep_count"):
+            d.cmds.append(f"SWE:COUN {int(s['sweep_count'])}")
+        d.onoff("equalizer", "DDEM:EQU:STAT")
+        d.word("signal_type", "DDEM:SIGN:VAL")
+        d.onoff("pattern_sig", "DDEM:SIGN:PATT")
+        if d.changed("burst"):
+            if d.eff("signal_type") == "CONT":
+                d.notes.append("Burst search skipped: only available for Signal type = Bursted")
+            else:
+                d.onoff("burst", "DDEM:SEAR:BURS:STAT")
+        if d.changed("pattern"):
+            if d.eff("pattern_sig") is False:
+                d.notes.append("Pattern search skipped: signal description has no pattern")
+            else:
+                d.onoff("pattern", "DDEM:SEAR:SYNC:STAT")
+        d.word("trig_source", "TRIG:SOUR")
+        return self._send(d)
+
+    def _send(self, d: _CmdDiff):
         self.write("*CLS")
-        cmds: list[str] = []
-        notes: list[str] = []
-
-        def changed(key):
-            v, p = s.get(key), prev.get(key)
-            if v is None:
-                return False
-            if p is None:
-                return True
-            if isinstance(v, float) or isinstance(p, float):
-                return not math.isclose(float(v), float(p), rel_tol=1e-9, abs_tol=1e-9)
-            return v != p
-
-        def eff(key):          # value the instrument will have after this apply
-            return s[key] if s.get(key) is not None else prev.get(key)
-
-        def num(key, cmd):
-            if changed(key):
-                cmds.append(f"{cmd} {s[key]:.10g}")
-
-        def onoff(key, cmd):
-            if changed(key):
-                cmds.append(f"{cmd} {'ON' if s[key] else 'OFF'}")
-
-        if changed("modulation"):
-            cmds += mod_commands(s["modulation"])
-        num("center", "FREQ:CENT")
-        num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
-        onoff("att_auto", "INP:ATT:AUTO")
-        if not eff("att_auto"):
-            num("att", "INP:ATT")
-        onoff("preamp", "INP:GAIN:STAT")
-        num("symbol_rate", "DDEM:SRAT")
-        if changed("prat"):
-            cmds.append(f"DDEM:PRAT {int(s['prat'])}")
-        onoff("tfil_state", "DDEM:TFIL:STAT")
-        if eff("tfil_state"):
-            if changed("tfil_name") and s["tfil_name"]:
-                cmds.append(f"DDEM:TFIL:NAME '{s['tfil_name']}'")
-            num("tfil_alpha", "DDEM:TFIL:ALPH")
-        onoff("mfil_auto", "DDEM:MFIL:AUTO")
-        onoff("rlen_auto", "DDEM:RLEN:AUTO")
-        if not eff("rlen_auto") and s.get("capture_len") is not None and (
-                changed("capture_len") or changed("rlen_auto")):
-            cmds.append(f"DDEM:RLEN {int(s['capture_len'])} SYM")
-        if changed("result_len"):
-            cmds.append(f"DDEM:TIME {int(s['result_len'])}")
-        if changed("sweep_count"):
-            cmds.append(f"SWE:COUN {int(s['sweep_count'])}")
-        onoff("equalizer", "DDEM:EQU:STAT")
-        if changed("signal_type"):
-            cmds.append(f"DDEM:SIGN:VAL {s['signal_type']}")
-        onoff("pattern_sig", "DDEM:SIGN:PATT")
-        if changed("burst"):
-            if eff("signal_type") == "CONT":
-                notes.append("Burst search skipped: only available for Signal type = Bursted")
-            else:
-                onoff("burst", "DDEM:SEAR:BURS:STAT")
-        if changed("pattern"):
-            if eff("pattern_sig") is False:
-                notes.append("Pattern search skipped: signal description has no pattern")
-            else:
-                onoff("pattern", "DDEM:SEAR:SYNC:STAT")
-        if changed("trig_source") and s["trig_source"]:
-            cmds.append(f"TRIG:SOUR {s['trig_source']}")
-
         errors = []
-        for c in cmds:
+        for c in d.cmds:
             self.write(c)
             errors += [f"{c}  →  {e}" for e in self.errors()]
         self.query("*OPC?")
-        return cmds, errors, notes
+        return d.cmds, errors, d.notes
+
+    # -- spectrum channel ----------------------------------------------------
+    def read_spec_settings(self) -> dict:
+        self.select_app("spec")
+        old = self.inst.timeout
+        self.inst.timeout = min(old, 3000)
+        try:
+            s = {
+                "center":     self._qf("FREQ:CENT?"),
+                "span":       self._qf("FREQ:SPAN?"),
+                "ref_level":  self._qf("DISP:WIND:TRAC:Y:SCAL:RLEV?"),
+                "range":      self._qf("DISP:WIND:TRAC:Y:SCAL?"),
+                "att_auto":   self._qb("INP:ATT:AUTO?"),
+                "att":        self._qf("INP:ATT?"),
+                "preamp":     self._qb("INP:GAIN:STAT?"),
+                "rbw_auto":   self._qb("BWID:RES:AUTO?"),
+                "rbw":        self._qf("BWID:RES?"),
+                "vbw_auto":   self._qb("BWID:VID:AUTO?"),
+                "vbw":        self._qf("BWID:VID?"),
+                "swt_auto":   self._qb("SWE:TIME:AUTO?"),
+                "swt":        self._qf("SWE:TIME?"),
+                "points":     self._qi("SWE:POIN?"),
+                "detector":   None,
+                "trace_mode": None,
+                "count":      self._qi("SWE:COUN?"),
+            }
+            det_auto = self._qb("DET:FUNC:AUTO?")
+            det = self._qs("DET:FUNC?")
+            if det_auto:
+                s["detector"] = "AUTO"
+            elif det:
+                code = det.upper()
+                s["detector"] = next((c for _, c in DETECTORS if c[:3] == code[:3]), code)
+            mode = self._qs("DISP:WIND:TRAC:MODE?")
+            s["trace_mode"] = mode.upper()[:4] if mode else None
+            return s
+        finally:
+            self.inst.timeout = old
+            try:
+                self.errors()
+            except Exception:
+                pass
+
+    def apply_spec_settings(self, s: dict, prev: dict | None = None):
+        self.select_app("spec")
+        d = _CmdDiff(s, prev)
+        d.num("center", "FREQ:CENT")
+        d.num("span", "FREQ:SPAN")
+        d.num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
+        d.num("range", "DISP:WIND:TRAC:Y:SCAL")
+        d.onoff("att_auto", "INP:ATT:AUTO")
+        if not d.eff("att_auto"):
+            d.num("att", "INP:ATT")
+        d.onoff("preamp", "INP:GAIN:STAT")
+        for key, cmd in (("rbw", "BWID:RES"), ("vbw", "BWID:VID"), ("swt", "SWE:TIME")):
+            d.onoff(f"{key}_auto", f"{cmd}:AUTO")
+            if not d.eff(f"{key}_auto") and (d.changed(key) or d.changed(f"{key}_auto")):
+                d.cmds.append(f"{cmd} {s[key]:.10g}")
+        if d.changed("points"):
+            d.cmds.append(f"SWE:POIN {int(s['points'])}")
+        if d.changed("detector"):
+            d.cmds.append("DET:FUNC:AUTO ON" if s["detector"] == "AUTO" else f"DET:FUNC {s['detector']}")
+        d.word("trace_mode", "DISP:WIND:TRAC:MODE")
+        if d.changed("count"):
+            d.cmds.append(f"SWE:COUN {int(s['count'])}")
+        return self._send(d)
 
     # -- measurement -------------------------------------------------------
     def abort(self):
@@ -571,20 +701,34 @@ class FswVsa:
         return {k: self._qf(q) for (k, *_), q in zip(RESULTS, qs)}
 
     def _read_trace(self):
-        raw = self.inst.query_binary_values(f"TRAC{CONST_WIN}:DATA? TRACE1", datatype="f",
+        win = CONST_WIN if self.app == "vsa" else SPEC_WIN
+        raw = self.inst.query_binary_values(f"TRAC{win}:DATA? TRACE1", datatype="f",
                                             is_big_endian=False, container=np.array)
         return np.asarray(raw)
 
     def _result(self, raw, t0, t1, t2, mode) -> dict:
+        if self.app == "spec":
+            return self._spec_result(raw, t0, t1, t2, mode)
         raw = raw.astype(np.float64)
         n = raw.size // 2 * 2
         i, q = raw[0:n:2], raw[1:n:2]
         ok = np.isfinite(i) & np.isfinite(q) & (np.abs(i) < 1e30) & (np.abs(q) < 1e30)
-        res = {"i": i[ok], "q": q[ok], "t": time.time(), "mode": mode}
+        res = {"i": i[ok], "q": q[ok], "t": time.time(), "mode": mode, "app": "vsa"}
         res.update({k: (float("nan") if v is None else v) for k, v in self._read_results().items()})
         t3 = time.perf_counter()
         res.update(sweep_time=t3 - t0, t_acq=t1 - t0, t_trace=t2 - t1, t_res=t3 - t2)
         return res
+
+    def _spec_result(self, raw, t0, t1, t2, mode) -> dict:
+        # x axis and RBW in one round trip (they may have been changed on the FSW itself)
+        parts = [self._num(x) for x in self.query("FREQ:STAR?;:FREQ:STOP?;:BWID:RES?").split(";")]
+        start, stop, rbw = (parts + [None, None, None])[:3]
+        lvl = raw.astype(np.float64)
+        lvl[np.abs(lvl) >= 1e30] = np.nan
+        f = np.linspace(start or 0.0, stop or float(lvl.size), lvl.size)
+        t3 = time.perf_counter()
+        return {"app": "spec", "f": f, "p": lvl, "rbw": rbw, "t": time.time(), "mode": mode,
+                "sweep_time": t3 - t0, "t_acq": t1 - t0, "t_trace": t2 - t1, "t_res": t3 - t2}
 
     # Continuous mode: the FSW sweeps back-to-back on its own (INIT:CONT ON) and we
     # just pick up the latest completed result. No per-sweep handshake.
@@ -657,17 +801,42 @@ class DemoFsw:
                   "result_len": 1000, "sweep_count": 1, "equalizer": False,
                   "signal_type": "CONT", "pattern_sig": False,
                   "burst": False, "pattern": False, "trig_source": "IMM"}
+        self.spec = {"center": 2.4e9, "span": 40e6, "ref_level": 0.0, "range": 100.0,
+                     "att_auto": True, "att": 10.0, "preamp": False,
+                     "rbw_auto": True, "rbw": 100e3, "vbw_auto": True, "vbw": 100e3,
+                     "swt_auto": True, "swt": 0.01, "points": 1001, "detector": "AUTO",
+                     "trace_mode": "WRIT", "count": 0}
+        self.app = "vsa"
+
+    def select_app(self, app):
+        self.app = app
+
+    @staticmethod
+    def _apply(target, s):
+        cmds = []
+        for k, v in s.items():
+            if v is not None and v != target.get(k):
+                target[k] = v
+                cmds.append(f"{k} = {v}")
+        return cmds, [], []
 
     def read_settings(self):
+        self.app = "vsa"
         return dict(self.s)
 
     def apply_settings(self, s, prev=None):
-        cmds = []
-        for k, v in s.items():
-            if v is not None and v != self.s.get(k):
-                self.s[k] = v
-                cmds.append(f"{k} = {v}")
-        return cmds, [], []
+        self.app = "vsa"
+        return self._apply(self.s, s)
+
+    def read_spec_settings(self):
+        self.app = "spec"
+        if self.spec["rbw_auto"]:
+            self.spec["rbw"] = self.spec["span"] / 400
+        return dict(self.spec)
+
+    def apply_spec_settings(self, s, prev=None):
+        self.app = "spec"
+        return self._apply(self.spec, s)
 
     def preset_layout(self):
         pass
@@ -675,9 +844,9 @@ class DemoFsw:
     def set_display_update(self, on):
         pass
 
-    def auto_level(self):
+    def auto_level(self, app="vsa"):
         time.sleep(0.3)
-        self.s["ref_level"] = -12.0
+        (self.s if app == "vsa" else self.spec)["ref_level"] = -12.0
 
     continuous = False
     _next = 0.0
@@ -713,6 +882,8 @@ class DemoFsw:
         return r
 
     def _gen(self):
+        if self.app == "spec":
+            return self._gen_spec()
         n = int(self.s["result_len"] or 1000)
         pts = ideal_points(self.s["modulation"] or "QPSK")
         sym = pts[self.rng.integers(len(pts), size=n)]
@@ -726,7 +897,23 @@ class DemoFsw:
                 "mer": 10 * math.log10(sig / err), "evm": 100 * math.sqrt(err / sig),
                 "power": self.s["ref_level"] - 8 + self.rng.normal(0, 0.03),
                 "cfe": self.cfe, "srerr": self.rng.normal(0, 0.5),
-                "iqoff": -45 + self.rng.normal(0, 0.5), "t_trace": 0.0, "t_res": 0.0}
+                "iqoff": -45 + self.rng.normal(0, 0.5), "t_trace": 0.0, "t_res": 0.0,
+                "app": "vsa"}
+
+    def _gen_spec(self):
+        sp = self.spec
+        n = int(sp["points"] or 1001)
+        f = np.linspace(sp["center"] - sp["span"] / 2, sp["center"] + sp["span"] / 2, n)
+        sr, a = self.s["symbol_rate"], self.s["tfil_alpha"] or 0.35
+        x = np.abs(f - self.s["center"] - self.cfe) / (sr / 2)        # RRC-like signal shape
+        shape = np.where(x <= 1 - a, 1.0,
+                         np.where(x <= 1 + a, 0.5 * (1 + np.cos(np.pi * (x - 1 + a) / (2 * a))), 0))
+        rbw = sp["rbw"] or 100e3
+        sig_dbm_hz = self.s["ref_level"] - 8 - 10 * math.log10(sr)
+        lin = 10 ** ((sig_dbm_hz + 10 * math.log10(rbw)) / 10) * shape + 10 ** ((-150 + 10 * math.log10(rbw)) / 10)
+        p = 10 * np.log10(lin) + self.rng.normal(0, 0.6, n)
+        return {"app": "spec", "f": f, "p": p, "rbw": rbw, "t": time.time(),
+                "t_trace": 0.0, "t_res": 0.0}
 
     def close(self):
         pass
@@ -855,6 +1042,53 @@ class SIEdit(QtWidgets.QLineEdit):
         self.setText(fmt_si(v, self.unit, 10))
 
 
+def wget(wdg):
+    """Value of a settings widget (used by the Spectrum settings)."""
+    if isinstance(wdg, SIEdit):
+        return wdg.value()
+    if isinstance(wdg, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+        return wdg.value()
+    if isinstance(wdg, QtWidgets.QCheckBox):
+        return wdg.isChecked()
+    if isinstance(wdg, QtWidgets.QComboBox):
+        d = wdg.currentData()
+        return d if d is not None else wdg.currentText().strip()
+    raise TypeError(type(wdg))
+
+
+def wset(wdg, v):
+    if isinstance(wdg, SIEdit):
+        wdg.setValue(v)
+    elif isinstance(wdg, QtWidgets.QSpinBox):
+        wdg.setValue(int(v))
+    elif isinstance(wdg, QtWidgets.QDoubleSpinBox):
+        wdg.setValue(float(v))
+    elif isinstance(wdg, QtWidgets.QCheckBox):
+        wdg.setChecked(bool(v))
+    elif isinstance(wdg, QtWidgets.QComboBox):
+        idx = wdg.findData(v)
+        if idx < 0:
+            idx = wdg.findText(str(v), QtCore.Qt.MatchFixedString)
+        if idx < 0:
+            wdg.addItem(str(v), v)
+            idx = wdg.count() - 1
+        wdg.setCurrentIndex(idx)
+
+
+def combo(items) -> QtWidgets.QComboBox:
+    c = QtWidgets.QComboBox()
+    for label, data in items:
+        c.addItem(label, data)
+    return c
+
+
+def with_auto(wdg, auto: QtWidgets.QCheckBox) -> QtWidgets.QHBoxLayout:
+    row = QtWidgets.QHBoxLayout()
+    row.addWidget(wdg, 1)
+    row.addWidget(auto)
+    return row
+
+
 class Tile(QtWidgets.QFrame):
     def __init__(self, title: str, color: str):
         super().__init__()
@@ -903,6 +1137,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connected = False
         self.supported: set[str] = set()
         self.last_read: dict = {}          # last settings read from the FSW (Apply sends the diff)
+        self.spec_supported: set[str] = set()
+        self.last_read_spec: dict = {}
+        self._spec_xrange = None
         self._warned_missing: set[str] = set()
         self.persist: deque = deque(maxlen=1)
         self.trend = {k: deque(maxlen=600) for k, *_ in RESULTS}
@@ -979,10 +1216,10 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.connect_btn)
         f.addRow(self.idn_label)
         f.addRow(self.disp_upd)
-        lv.addWidget(g)
+        conn_group = g
 
         # frequency & level
-        self.g_level = g = QtWidgets.QGroupBox("Frequency & Level")
+        self.g_level = g = QtWidgets.QGroupBox("Frequency && Level")
         f = QtWidgets.QFormLayout(g)
         self.w["center"] = SIEdit("Hz", "e.g. 2.4 GHz")
         self.w["ref_level"] = QtWidgets.QDoubleSpinBox()
@@ -1107,11 +1344,32 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addLayout(btns)
         lv.addStretch(1)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidget(left)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(340)
-        split.addWidget(scroll)
+        # left column: connection (shared) + settings of the active tab
+        self.settings_stack = QtWidgets.QStackedWidget()
+        for page in (left, self._build_spec_settings()):
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidget(page)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            self.settings_stack.addWidget(scroll)
+        left_col = QtWidgets.QWidget()
+        lc = QtWidgets.QVBoxLayout(left_col)
+        lc.setContentsMargins(0, 0, 0, 0)
+        lc.addWidget(conn_group)
+        lc.addWidget(self.settings_stack, 1)
+        left_col.setMinimumWidth(380)
+        split.addWidget(left_col)
+
+        # right column: run controls (shared) + tabs
+        right_col = QtWidgets.QWidget()
+        rc = QtWidgets.QVBoxLayout(right_col)
+        rc.setContentsMargins(0, 0, 0, 0)
+        self.run_bar = QtWidgets.QHBoxLayout()
+        rc.addLayout(self.run_bar)
+        self.tabs = QtWidgets.QTabWidget()
+        rc.addWidget(self.tabs, 1)
+        split.addWidget(right_col)
+        vsa_page = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
         # ---------------- centre: constellation
         mid = QtWidgets.QWidget()
@@ -1152,9 +1410,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_btn.clicked.connect(self.on_reset)
         self.csv_chk = QtWidgets.QCheckBox("Log CSV")
         self.csv_chk.toggled.connect(self.on_csv)
-        for wdg in (self.run_btn, self.mode_combo, self.interval_spin, self.single_btn,
-                    self.persist_spin, self.autoscale,
-                    self.reset_btn, self.csv_chk):
+        for wdg in (self.run_btn, self.mode_combo, self.interval_spin, self.single_btn):
+            self.run_bar.addWidget(wdg)
+        self.run_bar.addStretch(1)
+        for wdg in (self.persist_spin, self.autoscale, self.reset_btn, self.csv_chk):
             bar.addWidget(wdg)
         bar.addStretch(1)
         mv.addLayout(bar)
@@ -1164,6 +1423,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.const_plot.showGrid(x=True, y=True, alpha=0.25)
         self.const_plot.setLabel("bottom", "I")
         self.const_plot.setLabel("left", "Q")
+        for ax in ("left", "bottom"):
+            self.const_plot.getAxis(ax).enableAutoSIPrefix(False)   # no "(x0.001)" scaling
         self.const_plot.addLine(x=0, pen=pg.mkPen("#3a424c"))
         self.const_plot.addLine(y=0, pen=pg.mkPen("#3a424c"))
         # A bare ScatterPlotItem (pixmap fragments) is several times faster than
@@ -1174,7 +1435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.const_plot.getPlotItem().setMenuEnabled(False)
         self.const_plot.setRange(xRange=(-1.5, 1.5), yRange=(-1.5, 1.5))
         mv.addWidget(self.const_plot, 1)
-        split.addWidget(mid)
+        vsa_page.addWidget(mid)
 
         # ---------------- right: results
         right = QtWidgets.QWidget()
@@ -1209,8 +1470,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trend_curve = self.trend_plot.plot([], [], pen=pg.mkPen("#4fd18b", width=2))
         rv.addWidget(self.trend_plot, 1)
         right.setMinimumWidth(330)
-        split.addWidget(right)
-        split.setSizes([360, 820, 380])
+        vsa_page.addWidget(right)
+        vsa_page.setSizes([820, 380])
+        self.tabs.addTab(vsa_page, "VSA (K70)")
+        self.tabs.addTab(self._build_spec_page(), "Spectrum")
+        self.tabs.currentChanged.connect(self.on_tab)
+        split.setSizes([390, 1170])
 
         # ---------------- bottom: log
         self.log = QtWidgets.QPlainTextEdit()
@@ -1233,6 +1498,209 @@ class MainWindow(QtWidgets.QMainWindow):
             QComboBox:disabled,QCheckBox:disabled{color:#4d5560;}
         """)
 
+    # ------------------------------------------------------ spectrum tab
+    def _build_spec_settings(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(4, 4, 4, 4)
+        ws = self.ws = {}
+
+        self.g_spec_freq = g = QtWidgets.QGroupBox("Frequency")
+        f = QtWidgets.QFormLayout(g)
+        ws["center"] = SIEdit("Hz", "e.g. 2.4 GHz")
+        ws["span"] = SIEdit("Hz", "e.g. 40 MHz")
+        self.spec_from_vsa = QtWidgets.QPushButton("Center / span from VSA signal")
+        self.spec_from_vsa.setToolTip("Center = VSA center frequency, span = 2 × occupied bandwidth\n"
+                                      "(symbol rate × (1 + alpha)); also sets the channel bandwidth")
+        self.spec_from_vsa.clicked.connect(self.on_spec_from_vsa)
+        f.addRow("Center", ws["center"])
+        f.addRow("Span", ws["span"])
+        f.addRow(self.spec_from_vsa)
+        lv.addWidget(g)
+
+        self.g_spec_level = g = QtWidgets.QGroupBox("Level")
+        f = QtWidgets.QFormLayout(g)
+        ws["ref_level"] = QtWidgets.QDoubleSpinBox()
+        ws["ref_level"].setRange(-130, 30)
+        ws["ref_level"].setDecimals(2)
+        ws["ref_level"].setSuffix(" dBm")
+        ws["range"] = QtWidgets.QDoubleSpinBox()
+        ws["range"].setRange(1, 200)
+        ws["range"].setDecimals(0)
+        ws["range"].setSuffix(" dB")
+        ws["att_auto"] = QtWidgets.QCheckBox("Auto")
+        ws["att"] = QtWidgets.QDoubleSpinBox()
+        ws["att"].setRange(0, 79)
+        ws["att"].setDecimals(0)
+        ws["att"].setSuffix(" dB")
+        ws["preamp"] = QtWidgets.QCheckBox("Preamplifier (B24)")
+        self.spec_autolevel_btn = QtWidgets.QPushButton("Auto Level")
+        self.spec_autolevel_btn.clicked.connect(self.on_autolevel)
+        f.addRow("Ref level", ws["ref_level"])
+        f.addRow("Display range", ws["range"])
+        f.addRow("Attenuation", with_auto(ws["att"], ws["att_auto"]))
+        f.addRow(ws["preamp"])
+        f.addRow(self.spec_autolevel_btn)
+        lv.addWidget(g)
+
+        self.g_spec_bw = g = QtWidgets.QGroupBox("Bandwidth / Sweep / Trace")
+        f = QtWidgets.QFormLayout(g)
+        for key, unit, ex in (("rbw", "Hz", "e.g. 100k"), ("vbw", "Hz", "e.g. 300k"), ("swt", "s", "e.g. 10m")):
+            ws[key] = SIEdit(unit, ex)
+            ws[f"{key}_auto"] = QtWidgets.QCheckBox("Auto")
+        ws["points"] = QtWidgets.QSpinBox()
+        ws["points"].setRange(101, 100001)
+        ws["points"].setSingleStep(500)
+        ws["detector"] = combo(DETECTORS)
+        ws["trace_mode"] = combo(TRACE_MODES)
+        ws["count"] = QtWidgets.QSpinBox()
+        ws["count"].setRange(0, 32767)
+        ws["count"].setToolTip("Sweep / average count (used by Average, Max hold in single sweep)")
+        f.addRow("RBW", with_auto(ws["rbw"], ws["rbw_auto"]))
+        f.addRow("VBW", with_auto(ws["vbw"], ws["vbw_auto"]))
+        f.addRow("Sweep time", with_auto(ws["swt"], ws["swt_auto"]))
+        f.addRow("Sweep points", ws["points"])
+        f.addRow("Detector", ws["detector"])
+        f.addRow("Trace mode", ws["trace_mode"])
+        f.addRow("Sweep/avg count", ws["count"])
+        lv.addWidget(g)
+        for key in ("att", "rbw", "vbw", "swt"):
+            ws[f"{key}_auto"].toggled.connect(self._update_spec_dependencies)
+
+        g = QtWidgets.QGroupBox("Channel power (computed here)")
+        f = QtWidgets.QFormLayout(g)
+        self.chan_bw = SIEdit("Hz", "e.g. 13.5M")
+        self.chan_bw.setToolTip("Integration bandwidth around the center frequency.\n"
+                                "Computed from the trace; use the RMS detector for correct results.")
+        f.addRow("Channel BW", self.chan_bw)
+        lv.addWidget(g)
+
+        btns = QtWidgets.QGridLayout()
+        self.spec_apply_btn = QtWidgets.QPushButton("Apply ▶ FSW")
+        self.spec_apply_btn.setStyleSheet("font-weight:700;")
+        self.spec_read_btn = QtWidgets.QPushButton("Read ◀ FSW")
+        self.spec_apply_btn.clicked.connect(self.on_apply)
+        self.spec_read_btn.clicked.connect(self.on_read)
+        btns.addWidget(self.spec_apply_btn, 0, 0)
+        btns.addWidget(self.spec_read_btn, 0, 1)
+        lv.addLayout(btns)
+        lv.addStretch(1)
+        return page
+
+    def _build_spec_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.spec_plot = pg.PlotWidget(title="Spectrum (FSW Spectrum channel, trace 1)")
+        self.spec_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.spec_plot.setLabel("bottom", "Frequency", units="Hz")
+        self.spec_plot.setLabel("left", "Level", units="dBm")
+        self.spec_plot.getPlotItem().setMenuEnabled(False)
+        self.spec_curve = self.spec_plot.plot([], [], pen=pg.mkPen("#ffc400", width=1))
+        self.spec_peak = pg.ScatterPlotItem(size=9, symbol="t", pen=None, brush=pg.mkBrush("#ff6b6b"))
+        self.spec_plot.addItem(self.spec_peak)
+        self.spec_chan = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(88, 166, 255, 30),
+                                             pen=pg.mkPen(88, 166, 255, 120))
+        self.spec_plot.addItem(self.spec_chan)
+        self.spec_chan.hide()
+        page.addWidget(self.spec_plot)
+
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(4, 4, 4, 4)
+        self.spec_tiles = {
+            "peak_f": Tile("Peak frequency", "#f0883e"),
+            "peak_p": Tile("Peak level", "#58a6ff"),
+            "chp":    Tile("Channel power", "#4fd18b"),
+        }
+        for t in self.spec_tiles.values():
+            t.sub.setText("")
+            rv.addWidget(t)
+        self.spec_rbw_label = QtWidgets.QLabel("RBW —")
+        self.spec_rbw_label.setStyleSheet("color:#8a96a3;")
+        rv.addWidget(self.spec_rbw_label)
+        rv.addStretch(1)
+        right.setMinimumWidth(300)
+        page.addWidget(right)
+        page.setSizes([880, 320])
+        return page
+
+    def _update_spec_dependencies(self, *_):
+        for key in ("att", "rbw", "vbw", "swt"):
+            self.ws[key].setEnabled(key in self.spec_supported and not self.ws[f"{key}_auto"].isChecked())
+
+    def populate_spec(self, s: dict):
+        self.spec_supported = {k for k, v in s.items() if v is not None}
+        for key, wdg in self.ws.items():
+            wdg.setEnabled(key in self.spec_supported)
+            if s.get(key) is not None:
+                wset(wdg, s[key])
+        self._update_spec_dependencies()
+        self.last_read_spec = self.collect_spec()
+        if s.get("ref_level") is not None and s.get("range"):
+            self.spec_plot.setYRange(s["ref_level"] - s["range"], s["ref_level"], padding=0)
+        missing = sorted(set(s) - self.spec_supported)
+        if missing:
+            self.logmsg(f"Spectrum: not available (disabled): {', '.join(missing)}", "warn")
+
+    def collect_spec(self) -> dict:
+        return {k: wget(w) for k, w in self.ws.items() if k in self.spec_supported}
+
+    def on_spec_from_vsa(self):
+        v = self.last_read
+        sr = v.get("symbol_rate")
+        if not sr or v.get("center") is None:
+            self.logmsg("Read the VSA settings first (VSA tab)", "warn")
+            return
+        obw = sr * (1 + (v.get("tfil_alpha") or 0.35))
+        self.ws["center"].setValue(v["center"])
+        self.ws["span"].setValue(2 * obw)
+        self.chan_bw.setValue(obw)
+        self.logmsg("Center / span taken from the VSA settings - press Apply to send them")
+
+    def _draw_spec(self, r: dict):
+        f, p = r["f"], r["p"]
+        self.spec_curve.setData(f, p, connect="finite")
+        if f.size and (self._spec_xrange is None or self._spec_xrange != (f[0], f[-1])):
+            self._spec_xrange = (f[0], f[-1])
+            self.spec_plot.setXRange(f[0], f[-1], padding=0)
+        if not np.isfinite(p).any():
+            return
+        k = int(np.nanargmax(p))
+        self.spec_peak.setData([f[k]], [p[k]])
+        self.spec_tiles["peak_f"].value.setText(fmt_si(f[k], "Hz", 9))
+        self.spec_tiles["peak_p"].value.setText(f"{p[k]:.2f} dBm")
+        rbw = r.get("rbw")
+        self.spec_rbw_label.setText(f"RBW {fmt_si(rbw, 'Hz', 4)}    {f.size} points" if rbw else "RBW —")
+        # Channel power: integrate the trace over the channel, scaled from the RBW
+        # (Gaussian filter, noise bandwidth ≈ 1.065 × RBW) to the bin spacing.
+        try:
+            cbw = self.chan_bw.value()
+        except ValueError:
+            cbw = None
+        if cbw and rbw and f.size > 1:
+            fc = 0.5 * (f[0] + f[-1])
+            sel = (np.abs(f - fc) <= cbw / 2) & np.isfinite(p)
+            self.spec_chan.setRegion((fc - cbw / 2, fc + cbw / 2))
+            self.spec_chan.show()
+            if sel.any():
+                df = (f[-1] - f[0]) / (f.size - 1)
+                mw = np.sum(10 ** (p[sel] / 10)) * df / (1.065 * rbw)
+                self.spec_tiles["chp"].value.setText(f"{10 * math.log10(mw):.2f} dBm")
+                self.spec_tiles["chp"].sub.setText(f"in {fmt_si(cbw, 'Hz', 6)}  (RMS detector recommended)")
+        else:
+            self.spec_chan.hide()
+            self.spec_tiles["chp"].value.setText("—")
+            self.spec_tiles["chp"].sub.setText("set a channel BW")
+
+    def app(self) -> str:
+        return "spec" if self.tabs.currentIndex() == 1 else "vsa"
+
+    def on_tab(self, idx):
+        self.settings_stack.setCurrentIndex(idx)
+        self.last_rx = None
+        if self.connected:
+            self.logmsg("FSW channel: " + ("Spectrum" if idx == 1 else "VSA (K70)"))
+            self.on_read()              # also switches the FSW to that channel
+
     # ------------------------------------------------------------ helpers
     def logmsg(self, text: str, level: str = "info"):
         color = {"info": "#c9d1d9", "ok": "#4fd18b", "warn": "#f0b03e", "err": "#ff6b6b"}[level]
@@ -1243,7 +1711,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_connected(self, on: bool):
         self.connected = on
         for wdg in (self.g_level, self.g_sig, self.g_cap, self.g_dem, self.apply_btn, self.read_btn,
-                    self.layout_btn, self.run_btn, self.single_btn):
+                    self.layout_btn, self.run_btn, self.single_btn, self.g_spec_freq,
+                    self.g_spec_level, self.g_spec_bw, self.spec_apply_btn, self.spec_read_btn):
             wdg.setEnabled(on)
         self.connect_btn.setText("Disconnect" if on else "Connect")
         self.ip_edit.setEnabled(not on)
@@ -1393,9 +1862,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.submit("disconnect", job)
 
     def on_read(self):
-        self.worker.submit("read", lambda: self.worker.dev.read_settings())
+        if self.app() == "spec":
+            self.worker.submit("read_spec", lambda: self.worker.dev.read_spec_settings())
+        else:
+            self.worker.submit("read", lambda: self.worker.dev.read_settings())
 
     def on_apply(self):
+        if self.app() == "spec":
+            try:
+                s = self.collect_spec()
+            except ValueError as e:
+                QtWidgets.QMessageBox.warning(self, "Invalid value", f"Could not parse a field: {e}")
+                return
+            prev = dict(self.last_read_spec)
+            self.worker.submit("apply_spec", lambda: self.worker.dev.apply_spec_settings(s, prev))
+            return
         try:
             s = self.collect()
         except ValueError as e:
@@ -1406,7 +1887,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_autolevel(self):
         self.logmsg("Auto level running…")
-        self.worker.submit("autolevel", lambda: self.worker.dev.auto_level())
+        app = self.app()
+        self.worker.submit("autolevel", lambda: self.worker.dev.auto_level(app))
 
     def on_layout(self):
         self.worker.submit("layout", lambda: self.worker.dev.preset_layout())
@@ -1433,6 +1915,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _speed_hints(self):
         """Warn about settings that make every live update slow."""
+        if self.app() != "vsa":
+            return
         s = self.last_read
         if self.worker.mode == "sync" and (s.get("sweep_count") or 0) > 1:
             self.logmsg(f"Statistic count = {s['sweep_count']}: every update waits for "
@@ -1493,7 +1977,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif tag == "read":
             self.populate(result)
             self.logmsg("Settings read from FSW", "ok")
-        elif tag == "apply":
+        elif tag == "read_spec":
+            self.populate_spec(result)
+            self.logmsg("Spectrum settings read from FSW", "ok")
+        elif tag in ("apply", "apply_spec"):
             cmds, errors, notes = result
             for n in notes:
                 self.logmsg(n, "warn")
@@ -1529,9 +2016,34 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw(self, r: dict):
         t_draw = time.perf_counter()
         now = r["t"]
+        self.sweeps += 1
+        if r.get("app") == "spec":
+            self._draw_spec(r)
+            npts = r["f"].size
+        else:
+            self._draw_vsa(r)
+            npts = r["i"].size
+        if self.last_rx is not None:
+            dt = now - self.last_rx
+            if dt > 0:
+                self.rate = 0.8 * self.rate + 0.2 / dt if self.rate else 1 / dt
+        self.last_rx = now
+        ms = lambda k: r.get(k, 0) * 1e3
+        draw = (time.perf_counter() - t_draw) * 1e3
+        what = "results" if r.get("app") != "spec" else "axis"
+        if r.get("mode") == "cont":
+            detail = (f"Continuous   read: trace {ms('t_trace'):.0f} · {what} {ms('t_res'):.0f}"
+                      f" · draw {draw:.0f} ms")
+        else:
+            detail = (f"Single   last: {ms('sweep_time'):.0f} ms  (FSW sweep {ms('t_acq'):.0f}"
+                      f" · trace {ms('t_trace'):.0f} · {what} {ms('t_res'):.0f} · draw {draw:.0f} ms)")
+        self.status.showMessage(f"Updates: {self.sweeps}    Rate: {self.rate:.1f} /s    "
+                                f"Points: {npts}    {detail}")
+
+    def _draw_vsa(self, r: dict):
+        now = r["t"]
         if self.t_start is None:
             self.t_start = now
-        self.sweeps += 1
 
         # constellation
         i, q = r["i"], r["q"]
@@ -1569,22 +2081,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.csv_writer.writerow([_dt.datetime.fromtimestamp(now).isoformat(timespec="milliseconds")]
                                      + [f"{r.get(k, float('nan')):.6g}" for k, *_ in RESULTS])
             self.csv_file.flush()
-
-        if self.last_rx is not None:
-            dt = now - self.last_rx
-            if dt > 0:
-                self.rate = 0.8 * self.rate + 0.2 / dt if self.rate else 1 / dt
-        self.last_rx = now
-        ms = lambda k: r.get(k, 0) * 1e3
-        draw = (time.perf_counter() - t_draw) * 1e3
-        if r.get("mode") == "cont":
-            detail = (f"Continuous   read: trace {ms('t_trace'):.0f} · results {ms('t_res'):.0f}"
-                      f" · draw {draw:.0f} ms")
-        else:
-            detail = (f"Single   last: {ms('sweep_time'):.0f} ms  (FSW sweep {ms('t_acq'):.0f}"
-                      f" · trace {ms('t_trace'):.0f} · results {ms('t_res'):.0f} · draw {draw:.0f} ms)")
-        self.status.showMessage(f"Updates: {self.sweeps}    Rate: {self.rate:.1f} /s    "
-                                f"Points: {i.size}    {detail}")
 
     def _redraw_trend(self, *_):
         k = self.trend_sel.currentData()
