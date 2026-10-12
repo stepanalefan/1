@@ -49,8 +49,15 @@ SCPI notes (FSW-K70)
 
 Live update speed
 -----------------
-* Sweeps are started with 'INIT:IMM;*OPC' and completion is polled via *ESR?,
-  so Stop / Apply interrupt a running sweep (ABOR) immediately.
+* Two run modes (toolbar):
+    Continuous (default) - INIT:CONT ON, the FSW sweeps back-to-back by itself and
+        the script reads the latest trace/results every poll interval. A trace that
+        is identical to the previous one means "no new sweep yet" and is skipped.
+    Single sweeps (synced) - the script triggers every sweep ('INIT:IMM;*OPC'),
+        waits for it (*ESR? bit 0) and reads it: trace and numbers always come from
+        the same complete sweep. Slower; best for CSV logging / statistics.
+* Settings jobs (Apply, Read, Auto level) briefly pause the continuous sweep,
+  because *OPC? is not reliable while the FSW sweeps continuously.
 * The status bar shows where the time goes (FSW sweep / trace / results / draw).
 * Biggest FSW-side factors: Statistic count (set 1 for live view), capture length
   much longer than result length, and FSW screen update during remote.
@@ -167,7 +174,7 @@ def mod_commands(name: str) -> list[str]:
     if n == "QPSK":
         return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM NORM"]
     if n == "OQPSK":
-        return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM OQPSK"]
+        return ["DDEM:FORM OQPS"]          # Offset QPSK is its own format, not a QPSK sub-format
     if n == "pi/4-DQPSK":
         return ["DDEM:FORM QPSK", "DDEM:QPSK:FORM DPI4"]
     if n == "MSK":
@@ -222,6 +229,8 @@ class FswVsa:
         self.timeout_ms = timeout_ms
         self._unsupported: set[str] = set()   # queries the firmware does not know (-113)
         self._batch_results = True            # fetch all results in one round trip
+        self.continuous = False               # FSW sweeping in INIT:CONT ON mode
+        self._last_raw = None                 # last trace, to detect "no new sweep yet"
         if resource.upper().endswith("::SOCKET"):
             self.inst.read_termination = "\n"
             self.inst.write_termination = "\n"
@@ -264,19 +273,20 @@ class FswVsa:
     def _probe(self, cmd: str):
         """Query a setting that may be unknown or not available in the current state.
 
-        '<cmd>;*OPC?' always produces an answer: '<value>;1' if the query worked and
-        just '1' if it failed. So an unavailable setting costs one round trip instead
-        of a full VISA timeout (the original script waited 5 s for each of them)."""
+        '<cmd>;*STB?' always produces an answer: '<value>;<stb>' if the query worked
+        and just '<stb>' if it failed. So an unavailable setting costs one round trip
+        instead of a full VISA timeout (the original script waited 5 s for each).
+        *STB? (unlike *OPC?) answers at once, even while a sweep is running."""
         if cmd in self._unsupported:
             return None
         try:
-            resp = self.query(f"{cmd};*OPC?")
+            resp = self.query(f"{cmd};*STB?")
         except Exception:
             self._unsupported.add(cmd)
             self._clear_io()
             return None
         head, sep, tail = resp.rpartition(";")
-        if sep and tail.strip() == "1":
+        if sep and tail.strip().lstrip("+").isdigit():
             return head.strip()
         try:   # remember only "undefined header", not "not available right now"
             if any(e.lstrip("+").startswith("-113") for e in self.errors()):
@@ -358,10 +368,10 @@ class FswVsa:
         if not form:
             return None
         form = form.upper()
+        if form.startswith("OQPS"):
+            return "OQPSK"
         if form.startswith("QPSK"):
             sub = (self._qs("DDEM:QPSK:FORM?") or "").upper()
-            if sub.startswith("OQ"):
-                return "OQPSK"
             if sub.startswith("DPI4"):
                 return "pi/4-DQPSK"
             if sub.startswith("NORM"):
@@ -560,24 +570,62 @@ class FswVsa:
             self._batch_results = False                   # fall back to one query each
         return {k: self._qf(q) for (k, *_), q in zip(RESULTS, qs)}
 
+    def _read_trace(self):
+        raw = self.inst.query_binary_values(f"TRAC{CONST_WIN}:DATA? TRACE1", datatype="f",
+                                            is_big_endian=False, container=np.array)
+        return np.asarray(raw)
+
+    def _result(self, raw, t0, t1, t2, mode) -> dict:
+        raw = raw.astype(np.float64)
+        n = raw.size // 2 * 2
+        i, q = raw[0:n:2], raw[1:n:2]
+        ok = np.isfinite(i) & np.isfinite(q) & (np.abs(i) < 1e30) & (np.abs(q) < 1e30)
+        res = {"i": i[ok], "q": q[ok], "t": time.time(), "mode": mode}
+        res.update({k: (float("nan") if v is None else v) for k, v in self._read_results().items()})
+        t3 = time.perf_counter()
+        res.update(sweep_time=t3 - t0, t_acq=t1 - t0, t_trace=t2 - t1, t_res=t3 - t2)
+        return res
+
+    # Continuous mode: the FSW sweeps back-to-back on its own (INIT:CONT ON) and we
+    # just pick up the latest completed result. No per-sweep handshake.
+    def start_continuous(self):
+        self.write("INIT:CONT ON")
+        self.write("INIT:IMM")                 # (re)start the continuous sweep
+        self.continuous = True
+        self._last_raw = None
+
+    def stop_continuous(self):
+        self.continuous = False
+        try:
+            self.write("INIT:CONT OFF")
+        finally:
+            self.abort()
+
+    def fetch(self):
+        """Latest result of the continuous sweep, or None if no new sweep finished
+        since the last call (identical trace data)."""
+        t0 = time.perf_counter()
+        raw = self._read_trace()
+        key = raw.tobytes()
+        if key == self._last_raw:
+            return None
+        self._last_raw = key
+        t2 = time.perf_counter()
+        return self._result(raw, t0, t0, t2, "cont")
+
+    # Synchronized single sweep: INIT:IMM, wait for completion, read. Every result
+    # is guaranteed to come from one fresh sweep (trace and numbers consistent).
     def measure(self, should_abort=lambda: False):
+        if self.continuous:
+            self.stop_continuous()
         t0 = time.perf_counter()
         self.write("*CLS;:INIT:IMM;*OPC")                  # one single sweep, non-blocking
         if not self._wait_sweep(should_abort):
             return None                                    # aborted by the GUI
         t1 = time.perf_counter()
-        raw = self.inst.query_binary_values(f"TRAC{CONST_WIN}:DATA? TRACE1", datatype="f",
-                                            is_big_endian=False, container=np.array)
-        raw = np.asarray(raw, dtype=np.float64)
-        n = raw.size // 2 * 2
-        i, q = raw[0:n:2], raw[1:n:2]
-        ok = np.isfinite(i) & np.isfinite(q) & (np.abs(i) < 1e30) & (np.abs(q) < 1e30)
+        raw = self._read_trace()
         t2 = time.perf_counter()
-        res = {"i": i[ok], "q": q[ok], "t": time.time()}
-        res.update({k: (float("nan") if v is None else v) for k, v in self._read_results().items()})
-        t3 = time.perf_counter()
-        res.update(sweep_time=t3 - t0, t_acq=t1 - t0, t_trace=t2 - t1, t_res=t3 - t2)
-        return res
+        return self._result(raw, t0, t1, t2, "sync")
 
     def close(self):
         try:
@@ -631,7 +679,40 @@ class DemoFsw:
         time.sleep(0.3)
         self.s["ref_level"] = -12.0
 
+    continuous = False
+    _next = 0.0
+
+    def start_continuous(self):
+        self.continuous = True
+        self._next = time.perf_counter() + self._sweep_s()
+
+    def stop_continuous(self):
+        self.continuous = False
+
+    def _sweep_s(self):
+        n = int(self.s["result_len"] or 1000)
+        return 0.04 + min(0.3, (self.s["capture_len"] or n) / (self.s["symbol_rate"] or 1e6))
+
+    def fetch(self):
+        now = time.perf_counter()
+        if now < self._next:
+            return None
+        self._next = now + self._sweep_s()
+        r = self._gen()
+        r.update(mode="cont", sweep_time=0.0, t_acq=0.0)
+        return r
+
     def measure(self, should_abort=lambda: False):
+        self.continuous = False
+        t0 = time.perf_counter()
+        time.sleep(self._sweep_s())
+        if should_abort():
+            return None
+        r = self._gen()
+        r.update(mode="sync", sweep_time=time.perf_counter() - t0, t_acq=time.perf_counter() - t0)
+        return r
+
+    def _gen(self):
         n = int(self.s["result_len"] or 1000)
         pts = ideal_points(self.s["modulation"] or "QPSK")
         sym = pts[self.rng.integers(len(pts), size=n)]
@@ -641,17 +722,11 @@ class DemoFsw:
         rx = sym + sigma * (self.rng.normal(size=n) + 1j * self.rng.normal(size=n))
         err = np.mean(np.abs(rx - sym) ** 2)
         sig = np.mean(np.abs(sym) ** 2)
-        t0 = time.perf_counter()
-        time.sleep(0.04 + min(0.3, (self.s["capture_len"] or n) / (self.s["symbol_rate"] or 1e6)))
-        if should_abort():
-            return None
-        t_acq = time.perf_counter() - t0
         return {"i": rx.real, "q": rx.imag, "t": time.time(),
                 "mer": 10 * math.log10(sig / err), "evm": 100 * math.sqrt(err / sig),
                 "power": self.s["ref_level"] - 8 + self.rng.normal(0, 0.03),
                 "cfe": self.cfe, "srerr": self.rng.normal(0, 0.5),
-                "iqoff": -45 + self.rng.normal(0, 0.5),
-                "sweep_time": t_acq, "t_acq": t_acq, "t_trace": 0.0, "t_res": 0.0}
+                "iqoff": -45 + self.rng.normal(0, 0.5), "t_trace": 0.0, "t_res": 0.0}
 
     def close(self):
         pass
@@ -672,6 +747,9 @@ class Worker(QtCore.QObject):
         self.running = False
         self.single = False
         self.quit = False
+        self.mode = "cont"                # "cont" = FSW runs continuous, "sync" = single sweeps
+        self.interval = 0.1               # s between fetches in continuous mode
+        self._next_fetch = 0.0
         self._gui_ready = threading.Event()
         self._gui_ready.set()
 
@@ -680,6 +758,10 @@ class Worker(QtCore.QObject):
 
     def ack(self):
         self._gui_ready.set()
+
+    def _pause_continuous(self):
+        if self.dev is not None and getattr(self.dev, "continuous", False):
+            self.dev.stop_continuous()
 
     @QtCore.pyqtSlot()
     def loop(self):
@@ -690,35 +772,70 @@ class Worker(QtCore.QObject):
                 tag = None
             if tag is not None:
                 try:
+                    # Settings changes / reads use *OPC?, which is only reliable while the
+                    # FSW is not sweeping continuously -> pause; the loop resumes it.
+                    self._pause_continuous()
                     self.job_done.emit(tag, fn())
                 except Exception as e:
                     self.failed.emit(tag, f"{type(e).__name__}: {e}")
                 continue
-            if self.dev is not None and (self.running or self.single) and self._gui_ready.is_set():
-                run_mode, was_single = self.running, self.single
-                self.single = False
-
-                def should_abort():
-                    # Stop pressed, window closing, or a job (Apply, Read...) waiting:
-                    # abort the sweep instead of making the user wait for it.
-                    return (self.quit or (run_mode and not self.running and not was_single)
-                            or not self.jobs.empty())
+            dev = self.dev
+            if dev is None:
+                time.sleep(0.01)
+                continue
+            try:
+                if self.running and self.mode == "cont" and not self.single:
+                    self._step_continuous(dev)
+                elif self.running or self.single:
+                    self._step_single(dev)
+                else:
+                    self._pause_continuous()      # Stop pressed
+                    time.sleep(0.01)
+            except Exception as e:
+                self.running = self.single = False
                 try:
-                    r = self.dev.measure(should_abort)
-                    if r is None:                 # aborted
-                        if was_single and not self.quit:
-                            self.single = True    # redo the single sweep after the job
-                        continue
-                    self._gui_ready.clear()       # back-pressure: wait until GUI drew it
-                    self.measured.emit(r)
-                except Exception as e:
-                    self.running = False
-                    clear = getattr(self.dev, "_clear_io", None)
+                    dev.continuous = False
+                    clear = getattr(dev, "_clear_io", None)
                     if clear:
                         clear()                   # never leave a stale answer in the buffer
-                    self.failed.emit("measure", f"{type(e).__name__}: {e}")
-            else:
-                time.sleep(0.01)
+                except Exception:
+                    pass
+                self.failed.emit("measure", f"{type(e).__name__}: {e}")
+
+    def _step_continuous(self, dev):
+        now = time.perf_counter()
+        if not dev.continuous:
+            dev.start_continuous()
+            self._next_fetch = now + self.interval
+            return
+        if not self._gui_ready.is_set() or now < self._next_fetch:
+            time.sleep(0.005)
+            return
+        self._next_fetch = now + self.interval
+        r = dev.fetch()
+        if r is not None:                         # None = FSW has no new sweep yet
+            self._gui_ready.clear()               # back-pressure: wait until GUI drew it
+            self.measured.emit(r)
+
+    def _step_single(self, dev):
+        if not self._gui_ready.is_set():
+            time.sleep(0.005)
+            return
+        run_mode, was_single = self.running, self.single
+        self.single = False
+
+        def should_abort():
+            # Stop pressed, mode switched, window closing, or a job (Apply, Read...)
+            # waiting: abort the sweep instead of making the user wait for it.
+            return (self.quit or not self.jobs.empty()
+                    or (run_mode and not was_single and (not self.running or self.mode != "sync")))
+        r = dev.measure(should_abort)
+        if r is None:                             # aborted
+            if was_single and not self.quit:
+                self.single = True                # redo the single sweep after the job
+            return
+        self._gui_ready.clear()
+        self.measured.emit(r)
 
 
 # --------------------------------------------------------------------------- #
@@ -1004,7 +1121,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_btn = QtWidgets.QPushButton("▶ Run")
         self.run_btn.setCheckable(True)
         self.run_btn.toggled.connect(self.on_run)
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItem("Continuous", "cont")
+        self.mode_combo.addItem("Single sweeps (synced)", "sync")
+        self.mode_combo.setToolTip(
+            "Continuous: FSW runs INIT:CONT ON and sweeps back-to-back on its own;\n"
+            "the script picks up the latest result every poll interval (fastest, live).\n\n"
+            "Single sweeps: the script triggers each sweep (INIT:IMM) and waits for it.\n"
+            "Slower, but every value/trace is from one complete fresh sweep (best for CSV logging).")
+        self.mode_combo.currentIndexChanged.connect(self.on_mode)
+        self.interval_spin = QtWidgets.QSpinBox()
+        self.interval_spin.setRange(20, 5000)
+        self.interval_spin.setSingleStep(50)
+        self.interval_spin.setValue(100)
+        self.interval_spin.setPrefix("Poll: ")
+        self.interval_spin.setSuffix(" ms")
+        self.interval_spin.setToolTip("Continuous mode: how often the latest result is read from the FSW")
+        self.interval_spin.valueChanged.connect(lambda v: setattr(self.worker, "interval", v / 1000))
         self.single_btn = QtWidgets.QPushButton("Single")
+        self.single_btn.setToolTip("One synchronized sweep (stops continuous mode)")
         self.single_btn.clicked.connect(self.on_single)
         self.persist_spin = QtWidgets.QSpinBox()
         self.persist_spin.setRange(1, 50)
@@ -1017,7 +1152,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_btn.clicked.connect(self.on_reset)
         self.csv_chk = QtWidgets.QCheckBox("Log CSV")
         self.csv_chk.toggled.connect(self.on_csv)
-        for wdg in (self.run_btn, self.single_btn, self.persist_spin, self.autoscale,
+        for wdg in (self.run_btn, self.mode_combo, self.interval_spin, self.single_btn,
+                    self.persist_spin, self.autoscale,
                     self.reset_btn, self.csv_chk):
             bar.addWidget(wdg)
         bar.addStretch(1)
@@ -1279,8 +1415,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.connected:
             self.worker.submit("display", lambda: self.worker.dev.set_display_update(on))
 
+    def on_mode(self, *_):
+        mode = self.mode_combo.currentData()
+        self.worker.mode = mode
+        self.interval_spin.setEnabled(mode == "cont")
+        if self.worker.running:
+            self.logmsg("Mode: " + self.mode_combo.currentText())
+            self._speed_hints()
+
     def on_run(self, on):
         self.run_btn.setText("■ Stop" if on else "▶ Run")
+        self.single_btn.setEnabled(self.connected and not on)
         self.worker.running = on
         if on:
             self.last_rx = None
@@ -1289,7 +1434,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _speed_hints(self):
         """Warn about settings that make every live update slow."""
         s = self.last_read
-        if (s.get("sweep_count") or 0) > 1:
+        if self.worker.mode == "sync" and (s.get("sweep_count") or 0) > 1:
             self.logmsg(f"Statistic count = {s['sweep_count']}: every update waits for "
                         f"{s['sweep_count']} result ranges. Set it to 1 for a fast live view.", "warn")
         cap, res = s.get("capture_len"), s.get("result_len")
@@ -1431,10 +1576,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.rate = 0.8 * self.rate + 0.2 / dt if self.rate else 1 / dt
         self.last_rx = now
         ms = lambda k: r.get(k, 0) * 1e3
-        self.status.showMessage(
-            f"Sweeps: {self.sweeps}    Rate: {self.rate:.1f} /s    Points: {i.size}    "
-            f"Last: {ms('sweep_time'):.0f} ms  (FSW sweep {ms('t_acq'):.0f} · trace {ms('t_trace'):.0f}"
-            f" · results {ms('t_res'):.0f} · draw {(time.perf_counter() - t_draw) * 1e3:.0f} ms)")
+        draw = (time.perf_counter() - t_draw) * 1e3
+        if r.get("mode") == "cont":
+            detail = (f"Continuous   read: trace {ms('t_trace'):.0f} · results {ms('t_res'):.0f}"
+                      f" · draw {draw:.0f} ms")
+        else:
+            detail = (f"Single   last: {ms('sweep_time'):.0f} ms  (FSW sweep {ms('t_acq'):.0f}"
+                      f" · trace {ms('t_trace'):.0f} · results {ms('t_res'):.0f} · draw {draw:.0f} ms)")
+        self.status.showMessage(f"Updates: {self.sweeps}    Rate: {self.rate:.1f} /s    "
+                                f"Points: {i.size}    {detail}")
 
     def _redraw_trend(self, *_):
         k = self.trend_sel.currentData()
