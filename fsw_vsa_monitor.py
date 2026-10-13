@@ -81,6 +81,7 @@ import argparse
 import csv
 import datetime as _dt
 import math
+import os
 import queue
 import re
 import sys
@@ -91,7 +92,7 @@ from collections import deque
 import numpy as np
 
 try:
-    from PyQt5 import QtCore, QtWidgets
+    from PyQt5 import QtCore, QtGui, QtWidgets
     import pyqtgraph as pg
 except ImportError as _e:  # pragma: no cover
     sys.exit(f"Missing GUI dependency ({_e}). Run:  pip install PyQt5 pyqtgraph numpy")
@@ -2146,6 +2147,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 # --------------------------------------------------------------------------- #
+APP_ID = "FSW.VSAMonitor.Bench.1"      # any unique string: Company.Product.SubProduct.Version
+ICON_FILE = "app.ico"
+
+
+def resource_path(name: str) -> str:
+    """Path of a bundled file: works for 'python script.py' and for a PyInstaller
+    EXE (one-file builds unpack into sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+def set_windows_app_id():
+    """Without this, Windows groups the process under python.exe / pythonw.exe and
+    the taskbar shows the Python icon instead of ours. Call before any window exists."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description="R&S FSW VSA (K70) live monitor")
     ap.add_argument("--ip", help="instrument IP / hostname or full VISA resource string")
@@ -2154,9 +2178,19 @@ def main():
     ap.add_argument("--demo", action="store_true", help="simulated instrument, no hardware needed")
     args = ap.parse_args()
 
+    set_windows_app_id()
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    icon = QtGui.QIcon(resource_path(ICON_FILE))
+    if not icon.isNull():
+        app.setWindowIcon(icon)           # title bar, taskbar, Alt+Tab, all dialogs
     win = MainWindow(args)
+    if not icon.isNull():
+        # System tray (notification area) icon - Windows shows nothing there by default.
+        win.tray = QtWidgets.QSystemTrayIcon(icon, win)
+        win.tray.setToolTip("FSW VSA Monitor + Bench")
+        win.tray.activated.connect(lambda *_: (win.showNormal(), win.raise_(), win.activateWindow()))
+        win.tray.show()
     win.show()
     sys.exit(app.exec_())
 
