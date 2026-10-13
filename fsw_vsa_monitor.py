@@ -25,9 +25,13 @@ Features
   channel power. Switching tabs switches the FSW channel (only the selected one
   measures).
 
+* Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
+  scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
+  daily CSV log, plus HMP4040 control (USB / LAN) with timed power cycling.
+
 Install
 -------
-    pip install numpy pyqtgraph PyQt5 pyvisa pyvisa-py
+    pip install numpy pyqtgraph PyQt5 pyvisa pyvisa-py pyserial
 
     (pyvisa-py is a pure-Python VISA backend. If NI-VISA or R&S VISA is installed,
      it is used automatically and pyvisa-py is just the fallback.)
@@ -96,6 +100,13 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover - demo mode still works
     pyvisa = None
+
+try:  # Bench tab (176-channel voltage monitor + HMP4040), file next to this script
+    import bench_monitor
+    _BENCH_ERR = None
+except Exception as _e:  # pragma: no cover
+    bench_monitor = None
+    _BENCH_ERR = f"{type(_e).__name__}: {_e}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1132,7 +1143,7 @@ class RunningStat:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
-        self.setWindowTitle("FSW VSA Monitor (K70)")
+        self.setWindowTitle("FSW VSA Monitor (K70) + Bench")
         self.resize(1560, 940)
         self.connected = False
         self.supported: set[str] = set()
@@ -1168,8 +1179,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ip_edit.setText(args.ip)
         if args.protocol:
             self.proto.setCurrentIndex({"hislip": 0, "vxi11": 1, "socket": 2}[args.protocol])
+        if self.bench:
+            self.bench.log.connect(self.logmsg)
+        else:
+            self.logmsg(f"Bench tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
+                        f"Put it in the same folder as this script.", "warn")
         if args.demo:
             self.proto.setCurrentIndex(3)
+            if self.bench:
+                self.bench.demo_chk.setChecked(True)
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
 
@@ -1189,7 +1207,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.w: dict[str, QtWidgets.QWidget] = {}
 
         # connection
-        g = QtWidgets.QGroupBox("Connection (LAN)")
+        g = QtWidgets.QGroupBox("FSW connection (LAN)")
         f = QtWidgets.QFormLayout(g)
         self.ip_edit = QtWidgets.QLineEdit("192.168.0.10")
         self.ip_edit.setToolTip("IP / hostname, or a full VISA resource string "
@@ -1346,7 +1364,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # left column: connection (shared) + settings of the active tab
         self.settings_stack = QtWidgets.QStackedWidget()
-        for page in (left, self._build_spec_settings()):
+        self.bench = bench_monitor.BenchTab(self) if bench_monitor else None
+        pages = [left, self._build_spec_settings()]
+        if self.bench:
+            pages.append(self.bench.settings_panel)
+        for page in pages:
             scroll = QtWidgets.QScrollArea()
             scroll.setWidget(page)
             scroll.setWidgetResizable(True)
@@ -1355,6 +1377,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_col = QtWidgets.QWidget()
         lc = QtWidgets.QVBoxLayout(left_col)
         lc.setContentsMargins(0, 0, 0, 0)
+        self.conn_group = conn_group
         lc.addWidget(conn_group)
         lc.addWidget(self.settings_stack, 1)
         left_col.setMinimumWidth(380)
@@ -1364,8 +1387,10 @@ class MainWindow(QtWidgets.QMainWindow):
         right_col = QtWidgets.QWidget()
         rc = QtWidgets.QVBoxLayout(right_col)
         rc.setContentsMargins(0, 0, 0, 0)
-        self.run_bar = QtWidgets.QHBoxLayout()
-        rc.addLayout(self.run_bar)
+        self.run_bar_w = QtWidgets.QWidget()
+        self.run_bar = QtWidgets.QHBoxLayout(self.run_bar_w)
+        self.run_bar.setContentsMargins(0, 0, 0, 0)
+        rc.addWidget(self.run_bar_w)
         self.tabs = QtWidgets.QTabWidget()
         rc.addWidget(self.tabs, 1)
         split.addWidget(right_col)
@@ -1474,6 +1499,8 @@ class MainWindow(QtWidgets.QMainWindow):
         vsa_page.setSizes([820, 380])
         self.tabs.addTab(vsa_page, "VSA (K70)")
         self.tabs.addTab(self._build_spec_page(), "Spectrum")
+        if self.bench:
+            self.tabs.addTab(self.bench.page, "Bench: 176 ch + HMP4040")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([390, 1170])
 
@@ -1692,10 +1719,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_tiles["chp"].sub.setText("set a channel BW")
 
     def app(self) -> str:
-        return "spec" if self.tabs.currentIndex() == 1 else "vsa"
+        return {0: "vsa", 1: "spec"}.get(self.tabs.currentIndex(), "bench")
 
     def on_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
+        fsw_tab = idx in (0, 1)
+        # The bench has its own instruments: hide the FSW connection / run controls there.
+        # (A running FSW measurement just continues in the background.)
+        self.conn_group.setVisible(fsw_tab)
+        self.run_bar_w.setVisible(fsw_tab)
+        if not fsw_tab:
+            return
         self.last_rx = None
         if self.connected:
             self.logmsg("FSW channel: " + ("Spectrum" if idx == 1 else "VSA (K70)"))
@@ -2092,6 +2126,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trend_curve.setData([], [])
 
     def closeEvent(self, ev):
+        if self.bench:
+            if not self.bench.confirm_close(self):
+                ev.ignore()
+                return
+            self.bench.shutdown()
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()
