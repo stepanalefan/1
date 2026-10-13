@@ -284,41 +284,67 @@ class SlcanBackend:
         self._wlock = threading.Lock()
         self.s = serial.Serial(port, 115200, timeout=0.05, write_timeout=0.5)
         try:
-            self._write("C\r")             # channel may still be open after a crash
-            time.sleep(0.1)
+            self.log = []                    # raw replies, shown in the GUI log on errors
+            # Flush any half-received command (standard slcan practice), then close the
+            # channel in case it was left open by a previous run.
+            self._write("\r\r\r")
+            time.sleep(0.05)
+            self._write("C\r")
+            time.sleep(0.15)
             self.s.reset_input_buffer()
-            version = self._cmd("V", want_text=True)
-            if self._cmd(code) is None:
-                raise RuntimeError(f"adapter did not accept bitrate command {code}")
+            st, version = self._cmd("V")
+            version = version if st == "ok" else ""
+            st, raw = self._cmd(code)
+            if st == "err":                  # e.g. channel still open: close again and retry once
+                self._cmd("C")
+                st, raw = self._cmd(code)
+            if st == "err":
+                raise RuntimeError(f"adapter rejected bitrate command {code} (replied BEL). "
+                                   f"Replug the CANable and retry. Replies: {self.log}")
+            if st == "timeout" and not self.s.in_waiting and not raw:
+                # some slcan firmwares do not confirm S/O at all - continue and see if frames arrive
+                pass
             # canable-fw: M1 = silent mode. Firmwares without it answer BEL - harmless.
-            mode_ok = self._cmd("M1" if listen_only else "M0") is not None
-            if self._cmd("O") is None:
-                raise RuntimeError("adapter did not accept open command 'O'")
+            mode_ok = self._cmd("M1" if listen_only else "M0")[0] == "ok"
+            st, raw = self._cmd("O")
+            if st == "err":
+                raise RuntimeError(f"adapter rejected open command 'O' (replied BEL). Replies: {self.log}")
         except Exception:
             self.s.close()
             raise
         lo = ("listen-only" if mode_ok else "listen-only NOT supported by firmware") if listen_only else "normal"
         self.info = f"slcan {port}, {bitrate // 1000} kbit/s, {lo}" + (f", fw {version}" if version else "")
+        silent = [e for e in self.log if "->timeout" in e and not e.startswith("V")]
+        if silent:
+            self.info += f" (not confirmed by adapter: {', '.join(silent)})"
 
     def _write(self, text: str):
         with self._wlock:
             self.s.write(text.encode("ascii"))
 
-    def _cmd(self, cmd: str, want_text=False, timeout=0.5):
-        """Send a command, wait for CR (ok) / BEL (error). Returns reply text or None."""
+    def _cmd(self, cmd: str, timeout=0.5):
+        """Send a command, wait for CR (ok) / BEL (error).
+        Returns ("ok", text) / ("err", text) / ("timeout", text received so far)."""
         self._write(cmd + "\r")
         reply = bytearray()
         deadline = time.monotonic() + timeout
+        status = "timeout"
         while time.monotonic() < deadline:
             b = self.s.read(1)
             if not b:
                 continue
             if b == b"\x07":
-                return None
+                status = "err"
+                break
             if b == b"\r":
-                return reply.decode("ascii", "replace")
+                if not reply and cmd == "V":
+                    continue                 # stray CR from a previous command
+                status = "ok"
+                break
             reply += b
-        return "" if want_text else None
+        text = reply.decode("ascii", "replace")
+        self.log.append(f"{cmd}->{status}" + (f" {text!r}" if text else ""))
+        return status, text
 
     def recv(self) -> list[Frame]:
         chunk = self.s.read(self.s.in_waiting or 1)
