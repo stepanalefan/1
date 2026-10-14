@@ -47,6 +47,8 @@ Views
             python-can, SavvyCAN can open it). Open log... loads such a file.
 * Transmit - single frames or periodic, standard or extended ID, RTR.
 
+Commands / scripts: see can_commands.py (left panel, stored in can_commands.json).
+
 Install:  pip install PyQt5 pyserial
           pip install python-can gs_usb pyusb   (only for candleLight / SocketCAN)
 """
@@ -67,6 +69,8 @@ import time
 from collections import deque
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+from can_commands import CommandPanel, ScriptPanel, Store
 
 try:
     import serial
@@ -876,7 +880,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
         self.setWindowTitle("CAN sniffer — CANable (CAN 2.0A/B)")
-        self.resize(1400, 900)
+        self.resize(1650, 950)
         self.worker: CanWorker | None = None
         self.bitrate = DEFAULT_BITRATE
         self.raw: deque[Frame] = deque(maxlen=RAW_MAX)
@@ -1065,7 +1069,23 @@ class SnifferWindow(QtWidgets.QMainWindow):
         split.setStretchFactor(0, 1)
         split.setSizes([650, 210])
         root.addWidget(split, 1)
-        self.setCentralWidget(central)
+
+        # left: command library + block scripts
+        self.store = Store(os.path.join(script_dir(), "can_commands.json"))
+        self.cmd_panel = CommandPanel(self.store, self)
+        self.script_panel = ScriptPanel(self.store, self.cmd_panel, self)
+        left = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        left.addWidget(self.cmd_panel)
+        left.addWidget(self.script_panel)
+        left.setSizes([380, 480])
+        outer = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        outer.addWidget(left)
+        outer.addWidget(central)
+        outer.setStretchFactor(1, 1)
+        outer.setSizes([430, 1170])
+        self.setCentralWidget(outer)
+        if self.store.error:
+            QtCore.QTimer.singleShot(0, lambda: self.logmsg(self.store.error, "err"))
         self.refresh_ports()
 
     def _select_iface(self, key):
@@ -1151,6 +1171,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         if w is None:
             return
         self.tx_cyc.setChecked(False)
+        self.script_panel.stop("stopped (disconnected)")
         w.stop()
         self.logmsg("disconnected")
 
@@ -1276,6 +1297,30 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.tx_dlc.setValue(f.dlc)
         self.tx_data.setText(f.data_str())
 
+    # ------------------------------------------- hooks for can_commands ---
+    FRAME = Frame
+
+    def selected_frames(self) -> list[Frame]:
+        if self.tabs.currentIndex() == 0:
+            rows = sorted({i.row() for i in self.trace_view.selectionModel().selectedRows()})
+            return [self.trace.rows[r] for r in rows if r < len(self.trace.rows)]
+        rows = sorted({i.row() for i in self.mon_view.selectionModel().selectedRows()})
+        return [self.mon.entry(r).frame for r in rows if r < len(self.mon.keys)]
+
+    def tx_panel_frame(self) -> Frame:
+        return self._tx_frame()
+
+    def send_frame(self, f: Frame) -> bool:
+        if self.worker is None or self.worker.backend is None:
+            self.logmsg("not connected", "warn")
+            return False
+        try:
+            self.worker.send(f)
+            return True
+        except Exception as e:
+            self.logmsg(f"send failed: {type(e).__name__}: {e}", "err")
+            return False
+
     # ---------------------------------------------------------- transmit ---
     def _tx_frame(self) -> Frame:
         txt = self.tx_id.text().strip().upper().removeprefix("0X")
@@ -1291,15 +1336,12 @@ class SnifferWindow(QtWidgets.QMainWindow):
         return Frame(0, can_id, ext, False, None, parse_hex_bytes(self.tx_data.text()))
 
     def send_once(self) -> bool:
-        if self.worker is None or self.worker.backend is None:
-            self.logmsg("not connected", "warn")
-            return False
         try:
-            self.worker.send(self._tx_frame())
-            return True
+            f = self._tx_frame()
         except Exception as e:
-            self.logmsg(f"send failed: {type(e).__name__}: {e}", "err")
+            self.logmsg(f"bad frame: {e}", "err")
             return False
+        return self.send_frame(f)
 
     def toggle_periodic(self, on):
         if on:
@@ -1406,6 +1448,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         self.periodic.stop()
+        self.script_panel.stop("stopped (window closed)")
         if self.worker is not None:
             self.worker.stop()
         if self.rec_file is not None:
