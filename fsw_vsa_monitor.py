@@ -1114,11 +1114,12 @@ class Tile(QtWidgets.QFrame):
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.setStyleSheet("Tile{background:#181c22;border:1px solid #2a3038;border-radius:8px;}")
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 5, 12, 5)
+        lay.setSpacing(2)
         t = QtWidgets.QLabel(title)
         t.setStyleSheet("color:#8a96a3;font-size:12px;font-weight:600;")
         self.value = QtWidgets.QLabel("—")
-        self.value.setStyleSheet(f"color:{color};font-size:30px;font-weight:700;")
+        self.value.setStyleSheet(f"color:{color};font-size:26px;font-weight:700;")
         self.sub = QtWidgets.QLabel("mean —   min —   max —")
         self.sub.setStyleSheet("color:#7c8793;font-size:11px;")
         for w in (t, self.value, self.sub):
@@ -1517,22 +1518,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trend_plot.setLabel("bottom", "time", units="s")
         self.trend_curve = self.trend_plot.plot([], [], pen=pg.mkPen("#4fd18b", width=2))
         rv.addWidget(self.trend_plot, 1)
-        right.setMinimumWidth(330)
+        right.setMinimumWidth(270)
         vsa_page.addWidget(right)
         vsa_page.setSizes([820, 380])
-        self.tabs.addTab(vsa_page, "VSA (K70)")
-        self.tabs.addTab(self._build_spec_page(), "Spectrum")
+        # Every page sits in its own scroll area: a page that needs more room than the
+        # window has gets scrollbars instead of forcing the whole window (and the other
+        # tabs) wider than the screen.
+        def page(w):
+            sa = QtWidgets.QScrollArea()
+            sa.setWidget(w)
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QtWidgets.QFrame.NoFrame)
+            return sa
+
+        self.tabs.addTab(page(vsa_page), "VSA (K70)")
+        self.tabs.addTab(page(self._build_spec_page()), "Spectrum")
         if self.bench:
-            self.tabs.addTab(self.bench.page, "Bench: 176 ch + HMP4040")
+            self.tabs.addTab(page(self.bench.page), "Bench: 176 ch + HMP4040")
         if self.can_win:
-            self.tabs.addTab(self.can_win, "CAN (CANable)")
+            self.tabs.addTab(page(self.can_win), "CAN (CANable)")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([390, 1170])
 
         # ---------------- bottom: log
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(130)
+        self.log.setMaximumHeight(100)
         self.log.setStyleSheet("font-family:Consolas,monospace;font-size:11px;")
         root.addWidget(self.log)
         self.status = self.statusBar()
@@ -1749,7 +1760,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
         fsw_tab = idx in (0, 1)
-        self.left_col.setVisible(self.tabs.widget(idx) is not self.can_win)
+        can_tab = self.can_win is not None and self.tabs.widget(idx).widget() is self.can_win
+        self.left_col.setVisible(not can_tab)
+        self.log.setVisible(not can_tab)      # the CAN tab has its own log
         # The bench has its own instruments: hide the FSW connection / run controls there.
         # (A running FSW measurement just continues in the background.)
         self.conn_group.setVisible(fsw_tab)

@@ -922,8 +922,14 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
         # connection bar
         conn = QtWidgets.QGroupBox("Adapter")
-        h = QtWidgets.QHBoxLayout(conn)
+        cv = QtWidgets.QVBoxLayout(conn)       # two rows: fits ~1100 px wide windows
+        h = QtWidgets.QHBoxLayout()
+        h2 = QtWidgets.QHBoxLayout()
+        cv.addLayout(h)
+        cv.addLayout(h2)
         self.iface_cb = QtWidgets.QComboBox()
+        self.iface_cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.iface_cb.setMinimumContentsLength(22)    # long names are elided, not widening the page
         for key, label in INTERFACES:
             self.iface_cb.addItem(label, key)
         self.iface_cb.currentIndexChanged.connect(self.refresh_ports)
@@ -933,7 +939,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.port_cb.currentIndexChanged.connect(self._port_desc)
         self.port_desc = QtWidgets.QLabel()
         self.port_desc.setStyleSheet("color:#8a96a3")
-        self.port_desc.setMinimumWidth(200)
+        self.port_desc.setMinimumWidth(120)
         refresh = QtWidgets.QPushButton("⟳")
         refresh.setToolTip("Rescan ports / devices")
         refresh.setFixedWidth(34)
@@ -953,10 +959,12 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.status = QtWidgets.QLabel("● disconnected")
         self.status.setStyleSheet("color:#8a96a3")
         for w in (QtWidgets.QLabel("Interface"), self.iface_cb, QtWidgets.QLabel("Port"), self.port_cb,
-                  refresh, self.port_desc, QtWidgets.QLabel("Bitrate"), self.br_cb, self.listen_chk,
-                  self.conn_btn):
+                  refresh, self.port_desc):
             h.addWidget(w)
-        h.addWidget(self.status, 1)
+        h.addStretch(1)
+        for w in (QtWidgets.QLabel("Bitrate"), self.br_cb, self.listen_chk, self.conn_btn):
+            h2.addWidget(w)
+        h2.addWidget(self.status, 1)
         root.addWidget(conn)
 
         # view toolbar
@@ -987,10 +995,13 @@ class SnifferWindow(QtWidgets.QMainWindow):
         save.clicked.connect(self.save_trace)
         load = QtWidgets.QPushButton("Open log…")
         load.clicked.connect(self.open_log)
-        bar.addWidget(QtWidgets.QLabel("Filter"))
-        bar.addWidget(self.filter_ed, 1)
+        frow = QtWidgets.QHBoxLayout()           # filter on its own row keeps the page narrow
+        frow.addWidget(QtWidgets.QLabel("Filter"))
+        frow.addWidget(self.filter_ed, 1)
+        root.addLayout(frow)
         for w in (self.pause_btn, self.auto_chk, self.time_cb, clear, self.rec_btn, save, load):
             bar.addWidget(w)
+        bar.addStretch(1)
         root.addLayout(bar)
 
         # views
@@ -1052,7 +1063,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
             lbl.setFont(_mono())
             self.st_lbl[k] = lbl
             sg.addRow(k, lbl)
-        st.setMinimumWidth(220)
+        st.setMinimumWidth(170)
 
         self.logbox = QtWidgets.QPlainTextEdit()
         self.logbox.setReadOnly(True)
