@@ -109,6 +109,13 @@ except Exception as _e:  # pragma: no cover
     bench_monitor = None
     _BENCH_ERR = f"{type(_e).__name__}: {_e}"
 
+try:  # CAN tab (CANable sniffer), canable_analyzer.py + can_commands.py next to this script
+    import canable_analyzer
+    _CAN_ERR = None
+except Exception as _e:  # pragma: no cover
+    canable_analyzer = None
+    _CAN_ERR = f"{type(_e).__name__}: {_e}"
+
 
 # --------------------------------------------------------------------------- #
 #  Constants                                                                   #
@@ -1185,8 +1192,14 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.logmsg(f"Bench tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
+        if not self.can_win:
+            self.logmsg(f"CAN tab disabled - canable_analyzer.py / can_commands.py could not be "
+                        f"loaded ({_CAN_ERR}). Put them in the same folder as this script.", "warn")
         if args.demo:
             self.proto.setCurrentIndex(3)
+            if self.can_win:
+                self.can_win._select_iface("demo")
+                QtCore.QTimer.singleShot(300, self.can_win.toggle_connect)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
         if args.connect or args.demo:
@@ -1369,6 +1382,14 @@ class MainWindow(QtWidgets.QMainWindow):
         pages = [left, self._build_spec_settings()]
         if self.bench:
             pages.append(self.bench.settings_panel)
+        self.can_win = None
+        if canable_analyzer:
+            # The sniffer is a complete QMainWindow; embedded as a plain widget it keeps
+            # its own adapter bar, command library and log. No left settings column.
+            self.can_win = canable_analyzer.SnifferWindow(argparse.Namespace(
+                demo=False, port=None, interface=None, bitrate=None, connect=False))
+            self.can_win.setWindowFlags(QtCore.Qt.Widget)
+            pages.append(QtWidgets.QWidget())
         for page in pages:
             scroll = QtWidgets.QScrollArea()
             scroll.setWidget(page)
@@ -1383,6 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lc.addWidget(self.settings_stack, 1)
         left_col.setMinimumWidth(380)
         split.addWidget(left_col)
+        self.left_col = left_col
 
         # right column: run controls (shared) + tabs
         right_col = QtWidgets.QWidget()
@@ -1502,6 +1524,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_spec_page(), "Spectrum")
         if self.bench:
             self.tabs.addTab(self.bench.page, "Bench: 176 ch + HMP4040")
+        if self.can_win:
+            self.tabs.addTab(self.can_win, "CAN (CANable)")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([390, 1170])
 
@@ -1725,6 +1749,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
         fsw_tab = idx in (0, 1)
+        self.left_col.setVisible(self.tabs.widget(idx) is not self.can_win)
         # The bench has its own instruments: hide the FSW connection / run controls there.
         # (A running FSW measurement just continues in the background.)
         self.conn_group.setVisible(fsw_tab)
@@ -2132,6 +2157,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ev.ignore()
                 return
             self.bench.shutdown()
+        if self.can_win:
+            self.can_win.close()            # stops worker, script, recording
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()
