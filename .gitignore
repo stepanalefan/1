@@ -3,3 +3,5 @@ __pycache__/
 voltage_log_*.csv
 can_log_*.log
 can_trace_*
+dashboard.json
+dashboard.json.tmp

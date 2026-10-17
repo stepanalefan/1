@@ -891,6 +891,7 @@ class TelemetryTab(QtWidgets.QTabWidget):
         super().__init__()
         self.rx = Reassembler()
         self.views = {}                  # (unit, type) -> view
+        self.array_listeners = []        # callables(unit, type, data, ts) for every decoded array
         self.prefix_unit = {p: u for u, p, _ in UNITS if p is not None}
         for unit, prefix, arrays in UNITS:
             if not arrays:
@@ -922,5 +923,8 @@ class TelemetryTab(QtWidgets.QTabWidget):
                 continue
             base, t, data, ts = r
             view = self.views.get((self.prefix_unit.get(base >> 16), t))
+            unit = self.prefix_unit.get(base >> 16)
             if view is not None:
                 view.update_array(base, data, ts, self.rx.errors)
+            for cb in self.array_listeners:
+                cb(unit, t, data, ts)

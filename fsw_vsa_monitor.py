@@ -25,6 +25,9 @@ Features
   channel power. Switching tabs switches the FSW channel (only the selected one
   measures).
 
+* Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / CAN /
+  FSW / scan, constellation + MER/Power/CFE, voltages, telemetry watch list),
+  Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), Bench, CAN, Telemetry.
 * Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
   scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
   daily CSV log, plus HMP4040 control (USB / LAN) with timed power cycling.
@@ -108,6 +111,16 @@ try:  # Bench tab (176-channel voltage monitor + HMP4040), file next to this scr
 except Exception as _e:  # pragma: no cover
     bench_monitor = None
     _BENCH_ERR = f"{type(_e).__name__}: {_e}"
+
+try:  # SMW200A generator tab
+    import smw_generator
+except Exception:  # pragma: no cover
+    smw_generator = None
+
+try:  # Main (dashboard) tab
+    import dashboard
+except Exception:  # pragma: no cover
+    dashboard = None
 
 try:  # Telemetry tab (decodes unit arrays received on the CAN tab)
     import telemetry
@@ -1178,6 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._range = None
 
         self._build_ui()
+        self.on_tab(self.tabs.currentIndex())     # Main tab: no left column
         self._set_connected(False)
 
         self.worker_thread = QtCore.QThread(self)
@@ -1208,6 +1222,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(300, self.can_win.toggle_connect)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
+            if self.smw:
+                self.smw.proto.setCurrentIndex(3)
+                QtCore.QTimer.singleShot(400, self.smw.on_connect)
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
 
@@ -1541,14 +1558,28 @@ class MainWindow(QtWidgets.QMainWindow):
             sa.setFrameShape(QtWidgets.QFrame.NoFrame)
             return sa
 
-        self.tabs.addTab(page(vsa_page), "VSA (K70)")
-        self.tabs.addTab(page(self._build_spec_page()), "Spectrum")
+        # Spectrum Analyzer = VSA + Spectrum as sub-tabs (they drive the same FSW)
+        self.fsw_tabs = QtWidgets.QTabWidget()
+        self.fsw_tabs.addTab(page(vsa_page), "VSA (K70)")
+        self.fsw_tabs.addTab(page(self._build_spec_page()), "Spectrum")
+        self.fsw_tabs.currentChanged.connect(self.on_fsw_tab)
+        self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
+        if self.smw:
+            self.smw.log.connect(self.logmsg)
+        self.dash = dashboard.Dashboard(self) if dashboard else None
+        if self.dash:
+            self.tabs.addTab(page(self.dash), "Main")
+        self.tabs.addTab(self.fsw_tabs, "Spectrum Analyzer")
+        if self.smw:
+            self.tabs.addTab(page(self.smw), "SMW200A")
         if self.bench:
             self.tabs.addTab(page(self.bench.page), "Bench: 176 ch + HMP4040")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN (CANable)")
         if self.telem:
             self.tabs.addTab(page(self.telem), "Telemetry")
+        if self.telem and self.dash:
+            self.telem.array_listeners.append(self.dash.on_array)
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([390, 1170])
 
@@ -1767,21 +1798,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_tiles["chp"].sub.setText("set a channel BW")
 
     def app(self) -> str:
-        return {0: "vsa", 1: "spec"}.get(self.tabs.currentIndex(), "bench")
+        """FSW application of the Spectrum Analyzer sub-tab: 'vsa' or 'spec'."""
+        return "spec" if self.fsw_tabs.currentIndex() == 1 else "vsa"
 
     def on_tab(self, idx):
-        self.settings_stack.setCurrentIndex(idx)
-        fsw_tab = idx in (0, 1)
-        shown = self.tabs.widget(idx).widget()
-        can_tab = self.can_win is not None and shown is self.can_win
-        self.left_col.setVisible(not can_tab and shown is not self.telem)
-        self.log.setVisible(not can_tab)      # the CAN tab has its own log
-        # The bench has its own instruments: hide the FSW connection / run controls there.
-        # (A running FSW measurement just continues in the background.)
+        w = self.tabs.widget(idx)
+        shown = w.widget() if isinstance(w, QtWidgets.QScrollArea) else w
+        fsw_tab = shown is self.fsw_tabs
+        bench_tab = self.bench is not None and shown is self.bench.page
+        # Left settings column only for the FSW and the Bench; the others have their own.
+        self.left_col.setVisible(fsw_tab or bench_tab)
+        if fsw_tab:
+            self.settings_stack.setCurrentIndex(self.fsw_tabs.currentIndex())
+        elif bench_tab:
+            self.settings_stack.setCurrentIndex(2)
+        self.log.setVisible(not (self.can_win is not None and shown is self.can_win))   # CAN has its own
+        # FSW connection / run controls only on the Spectrum Analyzer tab
+        # (a running FSW measurement continues in the background).
         self.conn_group.setVisible(fsw_tab)
         self.run_bar_w.setVisible(fsw_tab)
-        if not fsw_tab:
-            return
+
+    def on_fsw_tab(self, idx):
+        self.settings_stack.setCurrentIndex(idx)
         self.last_rx = None
         if self.connected:
             self.logmsg("FSW channel: " + ("Spectrum" if idx == 1 else "VSA (K70)"))
@@ -2127,6 +2165,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 f"Points: {npts}    {detail}")
 
     def _draw_vsa(self, r: dict):
+        if self.dash:
+            self.dash.update_vsa(r)
         now = r["t"]
         if self.t_start is None:
             self.t_start = now
@@ -2178,6 +2218,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trend_curve.setData([], [])
 
     def closeEvent(self, ev):
+        if self.dash:
+            self.dash.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()
@@ -2185,6 +2227,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.bench.shutdown()
         if self.can_win:
             self.can_win.close()            # stops worker, script, recording
+        if self.smw:
+            self.smw.shutdown()
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()
