@@ -114,6 +114,8 @@ class Field:
             return ("no angle (0x80)", False) if v == -128 else (f"{v * 0.2:+.1f}°", False)
         if self.kind == "temp":
             return f"{v} °C", False
+        if self.kind == "dur":
+            return f"{v // 3600} h {v % 3600 // 60:02d} min {v % 60:02d} s  ({v / 86400:.1f} days)", False
         if self.kind == "mask":
             on = [str(i + 1) for i in range(self.bits[0] - self.bits[1] + 1) if v >> i & 1]
             return (("channels " + ", ".join(on) + " on") if on else "all off"), False
@@ -226,6 +228,64 @@ IOK_OSN = [
     Field(78, "angX2", "Angle angX at IOC issuance, option 2, step 0.2°", kind="ang"),
     Field(79, "angY2", "Angle angY at IOC issuance, option 2, step 0.2°", kind="ang"),
 ]
+
+
+def tlm_header(md_type, name, length):
+    return [
+        Field(0, "Marker", "Start of file marker", expect=0x04),
+        Field(1, "Type", f"Array type: {name}", expect=md_type),
+        Field(2, "Length", "Packet length in bytes excluding marker, type, length", size=2, expect=length),
+        Field(4, "AT", "Sender's address"),
+        Field(5, "TLM_EXP", "TLM output frame format version"),
+        _cnt(6, "TLM_CNT", "Cyclic counter of TLM frames of this type since power-on / reset (0 after 0xFFFF)"),
+    ]
+
+
+def _ep(addr, mask):
+    return f"  [EPROM addr {addr}, mask 0x{mask:X}]"
+
+
+_EPROM_CNT = " Read from EPROM at power-up / reset, written back once per Tzap EPROM."
+IOK_SOST = tlm_header(0xFA, "IOK SOST", 44) + [
+    Field(8, "Firmware_Ver", "FPGA firmware version" + _ep(0, 0x3), size=2),
+    Field(10, "Firmware_CRC", "Firmware checksum (p.4.1.2.3)" + _ep(0, 0xC), size=2),
+    Field(12, "Instruction_Ver", "softCPU instruction set version" + _ep(1, 0x3), size=2),
+    Field(14, "Instruction_CRC", "softCPU instruction set checksum (p.4.1.2.3)" + _ep(1, 0xC), size=2),
+    _cnt(16, "Cnt_config", "Counter of received valid CONFIG MD arrays / 'Save settings in CONFIG file' "
+         "commands (default 0x01)." + _EPROM_CNT + _ep(2, 0x3)),
+    _cnt(18, "Cnt_Alarm_Temp", "Temperature protection response counter." + _EPROM_CNT + _ep(2, 0xC)),
+    _cnt(20, "Cnt_Reset", "Reset counter on command 'Reset'." + _EPROM_CNT + _ep(3, 0x3)),
+    _cnt(22, "Cnt_Pwr_ON", "Counter of power-on cycles over the whole life of the UPNG." + _ep(3, 0xC)),
+    Field(24, "Work_Time", "Total operating time of the UPNG over its service life, 1 s per unit "
+          "(counted from power-on, regardless of mode)" + _ep(4, 0xF), size=4, kind="dur"),
+    Field(28, "Work_Time_Chnl_1", "Operating time of receiving channel 1, 1 s per unit" + _ep(5, 0xF),
+          size=3, kind="dur"),
+    Field(31, "Work_Time_Chnl_2", "Operating time of receiving channel 2, 1 s per unit" + _ep(6, 0xF),
+          size=3, kind="dur"),
+    Field(34, "Work_Time_Chnl_3", "Operating time of receiving channel 3, 1 s per unit" + _ep(7, 0xF),
+          size=3, kind="dur"),
+    Field(37, "Work_Time_Chnl_4", "Operating time of receiving channel 4, 1 s per unit" + _ep(8, 0xF),
+          size=3, kind="dur"),
+    Field(40, "Work_Time_Cynt_1", "Operating time of the main synthesizer, 1 s per unit" + _ep(9, 0xF),
+          size=4, kind="dur"),
+    Field(44, "Work_Time_Cynt_2", "Operating time of the backup synthesizer, 1 s per unit" + _ep(10, 0xF),
+          size=4, kind="dur"),
+]
+
+# IOK DOP: header + 40 records x 3 bytes (one every 25 ms)
+DOP_RECORDS, DOP_STEP_MS = 40, 25
+DOP_COLS = [  # name, byte in record, (hi, lo), tooltip
+    ("Corr_peak_f", 0, (7, 7), "Convolution peak exceeded threshold (packet detection): 1 = CBD detected (see byte #5 CONFIG)"),
+    ("Ch_Inv", 0, (6, 4), "Channel inversion flags, channels 2-3-4 relative to 1: 1 = inverted"),
+    ("Freq_sync", 0, (2, 2), "Frequency synchronization: 1 = achieved"),
+    ("Bit_err", 0, (1, 1), "1 = at least one BCH block in the CBD has errors"),
+    ("Err_rev", 0, (0, 0), "1 = all erroneous BCH blocks fixed, 0 = correction impossible"),
+    ("Ph_sync", 1, (7, 4), "Channel phase synchronization flags (bits = channels 4321): 1 = phase error minimized"),
+    ("Rx_on", 1, (3, 3), "1 = active state, 0 = passive state"),
+    ("Bit_sync", 1, (2, 0), "Bit synchronization reference index (0..7)"),
+    ("Conv_peak", 2, None, "Magnitude of the convolution peak, -80..80; negative = phase inversion"),
+]
+
 WARN_ENUM = {("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
@@ -272,7 +332,7 @@ class FieldView(QtWidgets.QWidget):
     """Table: Byte | Bits | Designation | Value | Meaning | Description."""
     COLS = ["Byte", "Bits", "Designation", "Value", "Meaning", "Description"]
 
-    def __init__(self, md_type, name, size, fields):
+    def __init__(self, md_type, name, size, fields, notes=""):
         super().__init__()
         self.md_type, self.name, self.size, self.fields = md_type, name, size, fields
         self.prev: list | None = None
@@ -304,14 +364,15 @@ class FieldView(QtWidgets.QWidget):
                 self.table.setItem(r, c, it)
             self.table.item(r, 5).setToolTip(f.desc)
         h = self.table.horizontalHeader()
-        for c, w in enumerate((60, 50, 150, 140, 260)):
+        for c, w in enumerate((60, 50, 170, 185, 250)):
             self.table.setColumnWidth(c, w)
         h.setStretchLastSection(True)
         v.addWidget(self.table, 1)
-        note = QtWidgets.QLabel(NOTES)
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#6e7681;font-size:11px;")
-        v.addWidget(note)
+        if notes:
+            note = QtWidgets.QLabel(notes)
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#6e7681;font-size:11px;")
+            v.addWidget(note)
         self.hl = QtCore.QTimer(self, singleShot=True, interval=1500, timeout=self._clear_hl)
 
     def update_array(self, base, data, ts, errors):
@@ -366,10 +427,89 @@ class RawView(QtWidgets.QWidget):
         self.dump.setPlainText(hexdump(data))
 
 
+class DopView(QtWidgets.QWidget):
+    """IOK DOP: header fields + 40 records (25 ms apart) as a table and a Conv_peak plot."""
+
+    def __init__(self, md_type, name, size):
+        super().__init__()
+        self.md_type, self.name, self.size = md_type, name, size
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.head = FieldView(md_type, name, size, tlm_header(md_type, name, size - 4), notes="")
+        self.head.table.setMaximumHeight(QtGui.QFontMetrics(_mono()).height() * 9 + 40)
+        v.addWidget(self.head)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        cols = ["#", "t, ms"] + [c[0] for c in DOP_COLS]
+        self.table = QtWidgets.QTableWidget(DOP_RECORDS, len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        for c, (_, _, _, tip) in enumerate(DOP_COLS):
+            self.table.horizontalHeaderItem(c + 2).setToolTip(tip)
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setDefaultSectionSize(QtGui.QFontMetrics(_mono()).height() + 4)
+        mono = _mono()
+        for r in range(DOP_RECORDS):
+            for c in range(len(cols)):
+                it = QtWidgets.QTableWidgetItem(str(r) if c == 0 else str(r * DOP_STEP_MS) if c == 1 else "—")
+                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                it.setFont(mono)
+                self.table.setItem(r, c, it)
+        self.table.resizeColumnsToContents()
+        split.addWidget(self.table)
+        self.plot = None
+        try:
+            import pyqtgraph as pg
+            self.plot = pg.PlotWidget(title="Conv_peak over the last second")
+            self.plot.showGrid(x=True, y=True, alpha=0.25)
+            self.plot.setLabel("bottom", "t, ms")
+            self.plot.setYRange(-80, 80)
+            self.plot.addLine(y=0, pen=pg.mkPen("#3a424c"))
+            self.curve = self.plot.plot([], [], pen=pg.mkPen("#ffc400", width=2), symbol="o",
+                                        symbolSize=5, symbolBrush="#ffc400", symbolPen=None)
+            split.addWidget(self.plot)
+        except Exception:
+            pass
+        split.setSizes([700, 500])
+        v.addWidget(split, 1)
+        note = QtWidgets.QLabel("Records are stored every 25 ms (40 per array). Hover the column headers "
+                                "for the meaning of each flag.")
+        note.setStyleSheet("color:#6e7681;font-size:11px;")
+        v.addWidget(note)
+
+    @property
+    def count(self):
+        return self.head.count
+
+    def update_array(self, base, data, ts, errors):
+        self.head.update_array(base, data, ts, errors)
+        peaks = []
+        for r in range(DOP_RECORDS):
+            rec = data[8 + 3 * r: 11 + 3 * r]
+            for c, (name, bi, bits, _) in enumerate(DOP_COLS):
+                it = self.table.item(r, c + 2)
+                if len(rec) < 3:
+                    it.setText("—")
+                    continue
+                b = rec[bi]
+                if bits is None:                      # Conv_peak, INT8
+                    val = b - 256 if b > 127 else b
+                    peaks.append(val)
+                    it.setText(str(val))
+                    it.setForeground(C_WARN if abs(val) > 80 else QtGui.QBrush())
+                    continue
+                hi, lo = bits
+                val = (b >> lo) & ((1 << (hi - lo + 1)) - 1)
+                it.setText(f"0b{val:0{hi - lo + 1}b}" if name in ("Ch_Inv", "Ph_sync") else str(val))
+                it.setForeground(C_WARN if name == "Bit_err" and val else
+                                 C_DIM if val == 0 else QtGui.QBrush())
+        if self.plot is not None:
+            self.curve.setData([i * DOP_STEP_MS for i in range(len(peaks))], peaks)
+
+
 class TelemetryTab(QtWidgets.QTabWidget):
     """Top-level Telemetry tab: BOS / UPNG / AFAR."""
 
-    LAYOUTS = {0xFC: IOK_OSN}
+    LAYOUTS = {0xFC: IOK_OSN, 0xFA: IOK_SOST}
 
     def __init__(self):
         super().__init__()
@@ -384,8 +524,12 @@ class TelemetryTab(QtWidgets.QTabWidget):
                 continue
             sub = QtWidgets.QTabWidget()
             for t, name, size in MD_ARRAYS:
-                view = (FieldView(t, name, size, self.LAYOUTS[t]) if t in self.LAYOUTS
-                        else RawView(t, name, size))
+                if t in self.LAYOUTS:
+                    view = FieldView(t, name, size, self.LAYOUTS[t], notes=NOTES if t == 0xFC else "")
+                elif t == 0xFB:
+                    view = DopView(t, name, size)
+                else:
+                    view = RawView(t, name, size)
                 self.views[t] = view
                 sub.addTab(view, f"{name} (0x{t:02X})")
             self.addTab(sub, unit)

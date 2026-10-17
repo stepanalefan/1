@@ -451,6 +451,9 @@ class DemoBackend:
         self._doors = 0
         self._upng = bytearray.fromhex("04FC4C002A00A000 10ED20038FFF1080 8020FE007B030626 6101F40A85066301 00000000ED000000 0000000000000000 0000006709000000 0001000000000000 000017E1040C2122 00000600CB06F602")   # captured UPNG IOK OSN array
         self._upng_next = time.time() + 1.0
+        self._sost = bytearray.fromhex("04FA2C002A000000 0E004AAB11002B95 06003B0004002C01 "
+                                       "F5370F00B9CB08AE DB080BF3083D6C08 00FF080047C50100")
+        self._dop_cnt = 0
         # id, ext, period s, next due
         self._sched = [[0x0C0, False, 0.010, 0], [0x1A0, False, 0.020, 0], [0x3E8, False, 0.100, 0],
                        [0x2F0, False, 0.050, 0], [0x18FEF100, True, 0.100, 0],
@@ -493,8 +496,21 @@ class DemoBackend:
                 self._cnt += 1
                 out.append(Frame(e[3], e[0], e[1], False, None, self._payload(e[0], t)))
                 e[3] += e[2]
-        if now >= self._upng_next:               # UPNG IOK OSN every 4 s, 10 segments
+        if now >= self._upng_next:               # UPNG IOK OSN / SOST / DOP every 4 s
             self._upng_next += 4.0
+            wt = int.from_bytes(self._sost[24:28], "little") + 4             # Work_Time += 4 s
+            self._sost[24:28] = wt.to_bytes(4, "little")
+            self._dop_cnt += 1
+            dop = bytearray.fromhex("04FB7C002A00") + self._dop_cnt.to_bytes(2, "little")
+            for k in range(40):                                                # synthetic records
+                pk = int(70 * math.sin(t * 3 + k / 6))
+                dop += bytes([0x80 | 0x04 | (0x01 if k % 9 == 0 else 0), 0xF8 | k % 8, pk & 0xFF])
+            for typ, arr in ((0xFA, self._sost), (0xFB, dop)):
+                n = len(arr) // 8
+                for i in range(n):
+                    seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | i
+                    out.append(Frame(now + 0.2 + i * 0.01, 0x1A860000 | seg << 8 | typ, True, False,
+                                     None, bytes(arr[8 * i:8 * i + 8])))
             a = self._upng
             cnt = int.from_bytes(a[6:8], "little") + 1
             a[6:8] = (cnt & 0xFFFF).to_bytes(2, "little")
