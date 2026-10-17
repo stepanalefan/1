@@ -1234,8 +1234,12 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        root.addWidget(split, 1)
+        # Top-level tabs span the whole window, so the tab bar never moves; the settings
+        # columns live inside the Spectrum Analyzer and Bench pages.
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        root.addWidget(self.tabs, 1)
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)      # Spectrum Analyzer page
 
         # ---------------- left: settings (scrollable)
         left = QtWidgets.QWidget()
@@ -1403,8 +1407,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_stack = QtWidgets.QStackedWidget()
         self.bench = bench_monitor.BenchTab(self) if bench_monitor else None
         pages = [left, self._build_spec_settings()]
-        if self.bench:
-            pages.append(self.bench.settings_panel)
         self.can_win = None
         if canable_analyzer:
             # The sniffer is a complete QMainWindow; embedded as a plain widget it keeps
@@ -1412,12 +1414,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.can_win = canable_analyzer.SnifferWindow(argparse.Namespace(
                 demo=False, port=None, interface=None, bitrate=None, connect=False))
             self.can_win.setWindowFlags(QtCore.Qt.Widget)
-            pages.append(QtWidgets.QWidget())
         self.telem = None
         if telemetry and self.can_win:
             self.telem = telemetry.TelemetryTab()
             self.can_win.frame_listeners.append(self.telem.on_frames)
-            pages.append(QtWidgets.QWidget())
         for page in pages:
             scroll = QtWidgets.QScrollArea()
             scroll.setWidget(page)
@@ -1430,7 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_group = conn_group
         lc.addWidget(conn_group)
         lc.addWidget(self.settings_stack, 1)
-        left_col.setMinimumWidth(380)
+        left_col.setMinimumWidth(410)
         split.addWidget(left_col)
         self.left_col = left_col
 
@@ -1442,8 +1442,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_bar = QtWidgets.QHBoxLayout(self.run_bar_w)
         self.run_bar.setContentsMargins(0, 0, 0, 0)
         rc.addWidget(self.run_bar_w)
-        self.tabs = QtWidgets.QTabWidget()
-        rc.addWidget(self.tabs, 1)
         split.addWidget(right_col)
         vsa_page = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
@@ -1569,11 +1567,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dash = dashboard.Dashboard(self) if dashboard else None
         if self.dash:
             self.tabs.addTab(page(self.dash), "Main")
-        self.tabs.addTab(self.fsw_tabs, "Spectrum Analyzer")
+        rc.addWidget(self.fsw_tabs, 1)
+        self.tabs.addTab(split, "Spectrum Analyzer")
         if self.smw:
             self.tabs.addTab(page(self.smw), "SMW200A")
         if self.bench:
-            self.tabs.addTab(page(self.bench.page), "Bench: 176 ch + HMP4040")
+            bench_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            bscroll = QtWidgets.QScrollArea()
+            bscroll.setWidget(self.bench.settings_panel)
+            bscroll.setWidgetResizable(True)
+            bscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            bscroll.setMinimumWidth(380)
+            bench_split.addWidget(bscroll)
+            bench_split.addWidget(page(self.bench.page))
+            bench_split.setSizes([390, 1170])
+            self.tabs.addTab(bench_split, "Bench: 176 ch + HMP4040")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN (CANable)")
         if self.telem:
@@ -1581,7 +1589,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.telem and self.dash:
             self.telem.array_listeners.append(self.dash.on_array)
         self.tabs.currentChanged.connect(self.on_tab)
-        split.setSizes([390, 1170])
+        split.setSizes([420, 1140])
 
         # ---------------- bottom: log
         self.log = QtWidgets.QPlainTextEdit()
@@ -1602,6 +1610,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton:checked{background:#1f6f43;border-color:#2ea043;}
             QPushButton:disabled,QLineEdit:disabled,QSpinBox:disabled,QDoubleSpinBox:disabled,
             QComboBox:disabled,QCheckBox:disabled{color:#4d5560;}
+            QTabWidget::tab-bar{alignment:left;left:0px;}
+            QTabBar{qproperty-expanding:0;qproperty-usesScrollButtons:1;}
+            QTabBar::tab{background:#161b22;border:1px solid #2a3038;padding:5px 14px;margin-right:2px;}
+            QTabBar::tab:selected{background:#21262d;color:#ffffff;border-bottom:2px solid #58a6ff;}
         """)
 
     # ------------------------------------------------------ spectrum tab
@@ -1804,19 +1816,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tab(self, idx):
         w = self.tabs.widget(idx)
         shown = w.widget() if isinstance(w, QtWidgets.QScrollArea) else w
-        fsw_tab = shown is self.fsw_tabs
-        bench_tab = self.bench is not None and shown is self.bench.page
-        # Left settings column only for the FSW and the Bench; the others have their own.
-        self.left_col.setVisible(fsw_tab or bench_tab)
-        if fsw_tab:
-            self.settings_stack.setCurrentIndex(self.fsw_tabs.currentIndex())
-        elif bench_tab:
-            self.settings_stack.setCurrentIndex(2)
         self.log.setVisible(not (self.can_win is not None and shown is self.can_win))   # CAN has its own
-        # FSW connection / run controls only on the Spectrum Analyzer tab
-        # (a running FSW measurement continues in the background).
-        self.conn_group.setVisible(fsw_tab)
-        self.run_bar_w.setVisible(fsw_tab)
 
     def on_fsw_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
@@ -2138,6 +2138,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.ack()
 
     def _draw(self, r: dict):
+        if self.dash:
+            self.dash.on_measurement(r)
         t_draw = time.perf_counter()
         now = r["t"]
         self.sweeps += 1

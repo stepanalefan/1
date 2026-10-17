@@ -41,13 +41,74 @@ def _app_dir() -> str:
 
 STORE_FILE = os.path.join(_app_dir(), "dashboard.json")
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
-STEP_COLORS = {"hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
+STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
                "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9"}
 SMW_KEYS = [  # key, label
     ("freq", "Frequency, Hz"), ("level", "Level, dBm"), ("format", "Modulation"), ("srate", "Symbol rate, Hz"),
     ("filter", "Filter"), ("fparam", "Filter alpha / BT"), ("dm", "Baseband DM on"),
     ("mod_all", "Modulation on"), ("rf", "RF output on"),
 ]
+
+
+def parse_si(text: str) -> float:
+    t = text.strip().replace(" ", "").replace(",", ".")
+    for u in ("sym/s", "sps", "hz", "dbm", "db", "s"):
+        if t.lower().endswith(u) and len(t) > len(u):
+            t = t[:-len(u)]
+            break
+    pre = {"T": 1e12, "G": 1e9, "M": 1e6, "k": 1e3, "K": 1e3, "m": 1e-3, "u": 1e-6}
+    if t and t[-1] in pre:
+        return float(t[:-1]) * pre[t[-1]]
+    return float(t)
+
+
+def fsw_params(host, app: str):
+    """(key, label, kind, choices) of the FSW settings a sequence step can set.
+    kind: hz (SI number), f (float), i (int), b (on/off), c (choice)."""
+    hm = sys.modules[type(host).__module__]
+    if app == "vsa":
+        return [
+            ("center", "Center frequency, Hz", "hz", None),
+            ("ref_level", "Ref level, dBm", "f", None),
+            ("att_auto", "Attenuation auto", "b", None),
+            ("att", "Attenuation, dB", "f", None),
+            ("preamp", "Preamplifier", "b", None),
+            ("modulation", "Modulation", "c", [(m, m) for m in hm.MODULATIONS]),
+            ("symbol_rate", "Symbol rate, sym/s", "hz", None),
+            ("prat", "Oversampling (sample rate = SR × N)", "c", [(o, int(o)) for o in hm.OVERSAMPLING]),
+            ("tfil_state", "Tx filter on", "b", None),
+            ("tfil_name", "Tx filter type", "c", [(t, t) for t in hm.TX_FILTERS]),
+            ("tfil_alpha", "Tx filter alpha / BT", "f", None),
+            ("mfil_auto", "Meas filter auto (matched)", "b", None),
+            ("rlen_auto", "Capture length auto", "b", None),
+            ("capture_len", "Capture length, symbols", "i", None),
+            ("result_len", "Result length, symbols", "i", None),
+            ("sweep_count", "Statistic count", "i", None),
+            ("equalizer", "Equalizer", "b", None),
+            ("signal_type", "Signal type", "c", list(hm.SIGNAL_TYPES)),
+            ("burst", "Burst search", "b", None),
+            ("pattern", "Pattern search", "b", None),
+            ("trig_source", "Trigger source", "c", [(t, t) for t in hm.TRIGGERS]),
+        ]
+    return [
+        ("center", "Center frequency, Hz", "hz", None),
+        ("span", "Span, Hz", "hz", None),
+        ("ref_level", "Ref level, dBm", "f", None),
+        ("range", "Display range, dB", "f", None),
+        ("att_auto", "Attenuation auto", "b", None),
+        ("att", "Attenuation, dB", "f", None),
+        ("preamp", "Preamplifier", "b", None),
+        ("rbw_auto", "RBW auto", "b", None),
+        ("rbw", "RBW, Hz", "hz", None),
+        ("vbw_auto", "VBW auto", "b", None),
+        ("vbw", "VBW, Hz", "hz", None),
+        ("swt_auto", "Sweep time auto", "b", None),
+        ("swt", "Sweep time, s", "hz", None),
+        ("points", "Sweep points", "i", None),
+        ("detector", "Detector", "c", list(hm.DETECTORS)),
+        ("trace_mode", "Trace mode", "c", list(hm.TRACE_MODES)),
+        ("count", "Sweep / average count", "i", None),
+    ]
 
 
 def parse_channels(text: str) -> list[int]:
@@ -87,8 +148,9 @@ def check_steps(steps) -> str:
 class Token:
     """Completion flag for a job handed to a device worker thread."""
 
-    def __init__(self, what):
-        self.what, self.done, self.error = what, False, None
+    def __init__(self, what, timeout=None):
+        self.what, self.done, self.error, self.msg = what, False, None, ""
+        self.deadline = time.monotonic() + timeout if timeout else None
 
 
 def run_in(worker_submit, fn, what) -> Token:
@@ -109,12 +171,12 @@ def run_in(worker_submit, fn, what) -> Token:
 #  Step editor dialog                                                          #
 # --------------------------------------------------------------------------- #
 class StepDialog(QtWidgets.QDialog):
-    def __init__(self, parent, step: dict, can_cmds: list):
+    def __init__(self, parent, step: dict, can_cmds: list, host=None):
         super().__init__(parent)
         self.step = dict(step)
         op = step["op"]
         self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "can": "CAN command",
-                             "wait": "Pause", "fsw": "FSW", "scan": "Voltage scan", "repeat": "Repeat",
+                             "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "scan": "Voltage scan", "repeat": "Repeat",
                              "log": "Log message"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
@@ -188,9 +250,52 @@ class StepDialog(QtWidgets.QDialog):
             self.ms.setSuffix(" ms")
             self.ms.setValue(step.get("ms", 1000))
             f.addRow("Pause", self.ms)
+        elif op == "fsw_set":
+            self.app = QtWidgets.QComboBox()
+            self.app.addItem("VSA (K70)", "vsa")
+            self.app.addItem("Spectrum", "spec")
+            f.addRow("FSW application", self.app)
+            self.pages = QtWidgets.QStackedWidget()
+            self.fields = {}
+            for app in ("vsa", "spec"):
+                pw = QtWidgets.QWidget()
+                pf = QtWidgets.QFormLayout(pw)
+                pf.setContentsMargins(0, 0, 0, 0)
+                cur = step.get("params", {}) if step.get("app", "vsa") == app else {}
+                for key, label, kind, choices in fsw_params(host, app):
+                    use = QtWidgets.QCheckBox(label)
+                    use.setChecked(key in cur)
+                    v = cur.get(key)
+                    if kind == "b":
+                        wdg = QtWidgets.QComboBox()
+                        wdg.addItems(["ON", "OFF"])
+                        wdg.setCurrentIndex(0 if v is None or v else 1)
+                    elif kind == "c":
+                        wdg = QtWidgets.QComboBox()
+                        for lbl, data in choices:
+                            wdg.addItem(lbl, data)
+                        wdg.setCurrentIndex(max(0, wdg.findData(v)))
+                    elif kind == "i":
+                        wdg = QtWidgets.QSpinBox()
+                        wdg.setRange(0, 100_000_000)
+                        wdg.setValue(int(v) if v is not None else 0)
+                    else:
+                        wdg = QtWidgets.QLineEdit("" if v is None else f"{v:.10g}")
+                        wdg.setPlaceholderText("e.g. 2.4G, 10M, 100k" if kind == "hz" else "")
+                    pf.addRow(use, wdg)
+                    self.fields[(app, key)] = (use, wdg, kind)
+                sc = QtWidgets.QScrollArea()
+                sc.setWidget(pw)
+                sc.setWidgetResizable(True)
+                sc.setMinimumSize(460, 420)
+                self.pages.addWidget(sc)
+            self.app.currentIndexChanged.connect(self.pages.setCurrentIndex)
+            self.app.setCurrentIndex(0 if step.get("app", "vsa") == "vsa" else 1)
+            f.addRow(self.pages)
+            f.addRow(QtWidgets.QLabel("Only ticked parameters are sent; the rest stay as they are."))
         elif op in ("fsw", "scan"):
             self.action = QtWidgets.QComboBox()
-            acts = (["run", "stop", "single"] if op == "fsw" else ["start", "stop"])
+            acts = (["run", "stop", "single", "autolevel"] if op == "fsw" else ["start", "stop"])
             self.action.addItems(acts)
             self.action.setCurrentText(step.get("action", acts[0]))
             f.addRow("Action", self.action)
@@ -236,6 +341,24 @@ class StepDialog(QtWidgets.QDialog):
                 s["cmd"] = self.cmd.currentData()
             elif op == "wait":
                 s["ms"] = self.ms.value()
+            elif op == "fsw_set":
+                app = self.app.currentData()
+                s["app"], s["params"] = app, {}
+                for (a, key), (use, wdg, kind) in self.fields.items():
+                    if a != app or not use.isChecked():
+                        continue
+                    if kind == "b":
+                        s["params"][key] = wdg.currentIndex() == 0
+                    elif kind == "c":
+                        s["params"][key] = wdg.currentData()
+                    elif kind == "i":
+                        s["params"][key] = wdg.value()
+                    elif kind == "hz":
+                        s["params"][key] = parse_si(wdg.text())
+                    else:
+                        s["params"][key] = float(wdg.text().replace(",", "."))
+                if not s["params"]:
+                    raise ValueError("select at least one parameter")
             elif op in ("fsw", "scan"):
                 s["action"] = self.action.currentText()
             elif op == "repeat":
@@ -352,12 +475,12 @@ class Dashboard(QtWidgets.QWidget):
         sv.addWidget(self.list, 1)
         add = QtWidgets.QGridLayout()
         for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
-                                        ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ Scan", "scan"),
-                                        ("+ Repeat", "repeat"), ("+ Log", "log"))):
+                                        ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW settings", "fsw_set"),
+                                        ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};")
             b.clicked.connect(lambda _, op=op: self.add_step(op))
-            add.addWidget(b, k // 4, k % 4)
+            add.addWidget(b, k // 3, k % 3)
         sv.addLayout(add)
         ed = QtWidgets.QHBoxLayout()
         for text, fn in (("▲", lambda: self.move(-1)), ("▼", lambda: self.move(1)), ("Copy", self.duplicate),
@@ -702,7 +825,25 @@ class Dashboard(QtWidgets.QWidget):
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
         if op == "fsw":
-            return f"〰 FSW   {s['action']}"
+            return "〰 FSW   " + {"single": "single measurement (wait for result)",
+                                  "autolevel": "auto level"}.get(s["action"], s["action"])
+        if op == "fsw_set":
+            parts = []
+            for key, label, kind, _ in fsw_params(self.host, s["app"]):
+                if key not in s["params"]:
+                    continue
+                v = s["params"][key]
+                name = label.split(",")[0].split(" (")[0]
+                if kind == "hz":
+                    parts.append(f"{name} {fmt_hz(v) if 'Hz' in label or 'sym' in label else f'{v:g}'}")
+                elif kind == "b":
+                    parts.append(f"{name} {'ON' if v else 'OFF'}")
+                elif key == "prat":
+                    sr = s["params"].get("symbol_rate")
+                    parts.append(f"OVS ×{v}" + (f" (sample rate {fmt_hz(sr * v)})" if sr else ""))
+                else:
+                    parts.append(f"{name} {v:g}" if isinstance(v, float) else f"{name} {v}")
+            return f"〰 FSW {'VSA' if s['app'] == 'vsa' else 'Spectrum'}   " + ", ".join(parts)
         if op == "scan":
             return f"⎍ Voltage scan {s['action']}"
         if op == "repeat":
@@ -749,9 +890,10 @@ class Dashboard(QtWidgets.QWidget):
                 return
         defaults = {"hmp": {"ch": {"1": {"v": 16.0, "i": 1.0, "on": True}}, "master": True},
                     "smw": {"freq": 2.4e9, "level": -30.0, "rf": True}, "wait": {"ms": 1000},
-                    "fsw": {"action": "run"}, "scan": {"action": "start"}, "repeat": {"count": 3},
+                    "fsw": {"action": "run"}, "scan": {"action": "start"},
+                    "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
                     "log": {"text": ""}, "can": {}}
-        dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds())
+        dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         rows = self._sel()
@@ -765,7 +907,7 @@ class Dashboard(QtWidgets.QWidget):
         rows = self._sel()
         if self.running or len(rows) != 1 or self.steps[rows[0]]["op"] == "end":
             return
-        dlg = StepDialog(self, self.steps[rows[0]], self._can_cmds())
+        dlg = StepDialog(self, self.steps[rows[0]], self._can_cmds(), self.host)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.steps[rows[0]] = dlg.step
             self.save()
@@ -883,11 +1025,19 @@ class Dashboard(QtWidgets.QWidget):
             return
         if self.pending is not None:                 # device step still executing
             if not self.pending.done:
+                if self.pending.deadline and time.monotonic() > self.pending.deadline:
+                    self._await_meas = None
+                    return self._fail(f"{self.pending.what}: timeout")
                 self.runner.start(20)
                 return
             tok, self.pending = self.pending, None
             if tok.error:
                 return self._fail(f"{tok.what}: {tok.error}")
+            msg = tok.msg or getattr(getattr(tok, "msg_from", None), "msg", "")
+            if msg:
+                self.log(f"[sequence] {msg}", "ok")
+            if tok.what.startswith("FSW") and self.host.connected:
+                self.host.on_read()                  # show what the FSW now uses
             self.pc += 1
         if time.monotonic() < self.wait_until:
             left = self.wait_until - time.monotonic()
@@ -971,15 +1121,48 @@ class Dashboard(QtWidgets.QWidget):
                 raise RuntimeError("FSW not connected")
             if s["action"] == "single":
                 h.run_btn.setChecked(False)
+                tok = Token("FSW single measurement", timeout=max(30.0, h.timeout_spin.value() * 2))
+                self._await_meas = (tok, time.time())
                 h.on_single()
-            else:
-                h.run_btn.setChecked(s["action"] == "run")
+                return tok
+            if s["action"] == "autolevel":
+                app = h.app()
+                return run_in(lambda job: h.worker.submit("seq", job),
+                              lambda: h.worker.dev.auto_level(app), "FSW auto level")
+            h.run_btn.setChecked(s["action"] == "run")
+        elif op == "fsw_set":
+            if not h.connected:
+                raise RuntimeError("FSW not connected")
+            app, params = s["app"], dict(s["params"])
+            h.fsw_tabs.setCurrentIndex(0 if app == "vsa" else 1)     # GUI follows the FSW channel
+            known = h.last_read if app == "vsa" else h.last_read_spec
+            prev = {k: v for k, v in known.items() if k not in params}   # dependencies only
+            box = Token(f"FSW {app.upper()} settings")
+
+            def job():
+                dev = h.worker.dev
+                fn = dev.apply_settings if app == "vsa" else dev.apply_spec_settings
+                cmds, errors, notes = fn(params, prev)
+                if errors:
+                    raise RuntimeError("; ".join(errors))
+                box.msg = "FSW: " + ("; ".join(cmds) or "nothing to change") + \
+                          ("  (" + "; ".join(notes) + ")" if notes else "")
+            tok = run_in(lambda j: h.worker.submit("seq", j), job, box.what)
+            tok.msg_from = box
+            return tok
         elif op == "scan":
             b = getattr(h, "bench", None)
             if not b or not b._scan_ok:
                 raise RuntimeError("multiplexer / 34405A not connected")
             b.run_btn.setChecked(s["action"] == "start")
         return None
+
+    def on_measurement(self, r: dict):
+        """Called by the main window for every drawn FSW result (completes 'single' steps)."""
+        aw = getattr(self, "_await_meas", None)
+        if aw and r.get("mode") == "sync" and r.get("t", 0) >= aw[1]:
+            aw[0].done = True
+            self._await_meas = None
 
     def shutdown(self):
         if self.running:
