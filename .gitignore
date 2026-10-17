@@ -5,3 +5,6 @@ can_log_*.log
 can_trace_*
 dashboard.json
 dashboard.json.tmp
+build/
+dist/
+*.spec
