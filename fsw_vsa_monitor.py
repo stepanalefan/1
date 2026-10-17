@@ -109,6 +109,11 @@ except Exception as _e:  # pragma: no cover
     bench_monitor = None
     _BENCH_ERR = f"{type(_e).__name__}: {_e}"
 
+try:  # Telemetry tab (decodes unit arrays received on the CAN tab)
+    import telemetry
+except Exception:  # pragma: no cover
+    telemetry = None
+
 try:  # CAN tab (CANable sniffer), canable_analyzer.py + can_commands.py next to this script
     import canable_analyzer
     _CAN_ERR = None
@@ -1391,6 +1396,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 demo=False, port=None, interface=None, bitrate=None, connect=False))
             self.can_win.setWindowFlags(QtCore.Qt.Widget)
             pages.append(QtWidgets.QWidget())
+        self.telem = None
+        if telemetry and self.can_win:
+            self.telem = telemetry.TelemetryTab()
+            self.can_win.frame_listeners.append(self.telem.on_frames)
+            pages.append(QtWidgets.QWidget())
         for page in pages:
             scroll = QtWidgets.QScrollArea()
             scroll.setWidget(page)
@@ -1537,6 +1547,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(page(self.bench.page), "Bench: 176 ch + HMP4040")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN (CANable)")
+        if self.telem:
+            self.tabs.addTab(page(self.telem), "Telemetry")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([390, 1170])
 
@@ -1760,8 +1772,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
         fsw_tab = idx in (0, 1)
-        can_tab = self.can_win is not None and self.tabs.widget(idx).widget() is self.can_win
-        self.left_col.setVisible(not can_tab)
+        shown = self.tabs.widget(idx).widget()
+        can_tab = self.can_win is not None and shown is self.can_win
+        self.left_col.setVisible(not can_tab and shown is not self.telem)
         self.log.setVisible(not can_tab)      # the CAN tab has its own log
         # The bench has its own instruments: hide the FSW connection / run controls there.
         # (A running FSW measurement just continues in the background.)

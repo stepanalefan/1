@@ -449,6 +449,8 @@ class DemoBackend:
         self._rpm = 800.0
         self._speed = 0.0
         self._doors = 0
+        self._upng = bytearray.fromhex("04FC4C002A00A000 10ED20038FFF1080 8020FE007B030626 6101F40A85066301 00000000ED000000 0000000000000000 0000006709000000 0001000000000000 000017E1040C2122 00000600CB06F602")   # captured UPNG IOK OSN array
+        self._upng_next = time.time() + 1.0
         # id, ext, period s, next due
         self._sched = [[0x0C0, False, 0.010, 0], [0x1A0, False, 0.020, 0], [0x3E8, False, 0.100, 0],
                        [0x2F0, False, 0.050, 0], [0x18FEF100, True, 0.100, 0],
@@ -491,6 +493,17 @@ class DemoBackend:
                 self._cnt += 1
                 out.append(Frame(e[3], e[0], e[1], False, None, self._payload(e[0], t)))
                 e[3] += e[2]
+        if now >= self._upng_next:               # UPNG IOK OSN every 4 s, 10 segments
+            self._upng_next += 4.0
+            a = self._upng
+            cnt = int.from_bytes(a[6:8], "little") + 1
+            a[6:8] = (cnt & 0xFFFF).to_bytes(2, "little")
+            a[70] = 30 + int(4 * math.sin(t / 30)) & 0xFF                    # Temp1
+            a[9] ^= 0x80 if random.random() < 0.2 else 0                       # band flips now and then
+            for i in range(10):
+                seg = 0x00 if i == 0 else (0x80 if i == 9 else 0x40) | i
+                out.append(Frame(now + i * 0.01, 0x1A860000 | seg << 8 | 0xFC, True, False, None,
+                                 a[8 * i:8 * i + 8]))
         with self._lock:
             out += self._pending
             self._pending = []
@@ -882,6 +895,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("CAN sniffer — CANable (CAN 2.0A/B)")
         self.resize(1650, 950)
         self.worker: CanWorker | None = None
+        self.frame_listeners = []                # callables(list[Frame]) fed with every frame
         self.bitrate = DEFAULT_BITRATE
         self.raw: deque[Frame] = deque(maxlen=RAW_MAX)
         self.last_ts: dict[tuple, float] = {}
@@ -1205,6 +1219,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
             self.ingest(frames)
 
     def ingest(self, frames: list[Frame], live=True):
+        for cb in self.frame_listeners:          # e.g. the Telemetry tab
+            cb(frames)
         for f in frames:
             self.seq += 1
             f.seq = self.seq
