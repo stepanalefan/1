@@ -98,7 +98,8 @@ class Field:
     / mask (channel bits) / res (reserve)."""
 
     def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None,
-                 compare=None, limit=None, scale=1.0, offset=0.0, unit=""):
+                 compare=None, limit=None, scale=1.0, offset=0.0, unit="", rng=None):
+        self.rng = rng                  # (lo, hi): warn outside
         self.byte, self.name, self.desc = byte, name, desc
         self.scale, self.offset, self.unit = scale, offset, unit    # kind "lin"/"slin": v*scale+offset
         self.limit = limit              # warn when abs(value) > limit
@@ -172,6 +173,8 @@ class Field:
             return f"{mv / 1000:.4f} V  ({mv:.3f} mV)", False
         if self.kind == "period":
             return ("disabled", False) if v == 0 else (f"every {v} s", False)
+        if self.rng and not self.rng[0] <= v <= self.rng[1]:
+            return f"outside 0x{self.rng[0]:02X}…0x{self.rng[1]:02X}", True
         if self.limit is not None and abs(v) > self.limit:
             return f"outside ±{self.limit}", True
         if self.kind == "byte":
@@ -587,8 +590,28 @@ AFAR_OSN = tlm_header(0xFC, "IOK OSN (AFAR)", 180, tm="TM") + [
     for k, (ln, j) in enumerate((ln, j) for ln in (1, 2, 3, 4) for j in (1, 2))] + [
     Field(97 + 8 * (ln - 1) + (e - 1), f"PT_{ln}{e}", f"Power consumption of emitter {e} of line {ln}: "
           f"P = v × 1.2 / 256 W", kind="lin", scale=1.2 / 256, unit="W")
-    for ln in range(1, 7) for e in range(1, 9)] + [
-    Field(145 + i, f"byte {145 + i}", "not described yet (next table parts)", kind="byte") for i in range(39)]
+    for ln in range(1, 9) for e in range(1, 9)] + [
+    Field(161, "Timer_SNR", "Session mode timer: set to 'Time_SNR' from CONFIG at SR on, then -1 per second "
+          "to zero; 0 in DZhR", kind="dur"),
+] + [Field(162 + i, f"Temp{9 + i}", f"Temperature sensor {9 + i}, degrees" + (" (FPGA)" if i == 4 else ""),
+           kind="temp") for i in range(5)] + [
+    Field(167, "Adrss_TD2", "Temperature sensor 9..12 that caused automatic shutdown (trigger, bit 0 = sensor 9)",
+          bits=(7, 4), kind="trig"),
+    Field(167, "Temp_mode2", "Automatic shutdown on sensors 9..12 (bit 0 = sensor 9, 0b1111 = any)",
+          bits=(3, 0), kind="tmode"),
+    Field(168, "CRC_MD_Techn", "Checksum of the MD_TECHN array (p.4.1.2.5)", size=2),
+    Field(170, "Conf_Page_Num", "Active page of the EPROM IOK_CONFIG, changes with each 'Save settings in "
+          "CONFIG file'", bits=(3, 0), rng=(0x07, 0x0B)),
+    Field(170, "reserve", "reserve (not in the table)", bits=(7, 4), kind="res"),
+    Field(171, "Stat_Page_Num", "Active page of the EPROM IOK_STATE, changes with each 'Data Parking'",
+          rng=(0x0C, 0xC9)),
+    Field(172, "Wr_Config_Error", "ROM write error IOK_CONFIG (1: no page could be written, active page "
+          "unchanged)", bits=(0, 0), enum={0: "no errors", 1: "COULD NOT WRITE ANY PAGE"}),
+    Field(172, "Wr_Stat_Error", "ROM write error IOK_STATE (1: no page could be written, active page unchanged)",
+          bits=(1, 1), enum={0: "no errors", 1: "COULD NOT WRITE ANY PAGE"}),
+    Field(172, "reserve", "reserve", bits=(7, 2), kind="res"),
+    Field(173, "reserve", "Reserve", size=11, kind="res"),
+]
 AFAR_OSN_NOTES = (
     "(1) set at the start of each SR, all 0 before the first SR; 'SR with all emitters' = all bits 1.  "
     "(2) set by quick SR on, reset by quick SR off / power-on.  (3) BKU angles valid when both differ from "
@@ -597,7 +620,7 @@ AFAR_OSN_NOTES = (
     "'Set telemetry output period'.  (9) initial value 0x7F.  Temperatures and currents are technological "
     "parameters, not controlled by the control unit.")
 
-WARN_ENUM = WARN_ENUM_BOS | {("BPU_AFAR_err", 1), ("Stat_10MHz", 0), ("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
+WARN_ENUM = WARN_ENUM_BOS | {("Wr_Config_Error", 1), ("Wr_Stat_Error", 1), ("BPU_AFAR_err", 1), ("Stat_10MHz", 0), ("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
          "Angle options 1 and 2 differing by more than 2° indicates problems in the channels.")
