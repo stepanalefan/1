@@ -74,8 +74,10 @@ class Field:
     inside one byte. kind: u / i (signed) / bits / ang (INT8, 0.2 deg, 0x80 = none)
     / mask (channel bits) / res (reserve)."""
 
-    def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None):
+    def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None,
+                 compare=None):
         self.byte, self.name, self.desc = byte, name, desc
+        self.compare = compare          # (byte, name): value must equal that field (CRC check)
         self.size, self.bits, self.kind, self.enum, self.expect = size, bits, kind, enum or {}, expect
 
     def pos(self) -> tuple[str, str]:
@@ -102,7 +104,7 @@ class Field:
         if self.bits:
             w = self.bits[0] - self.bits[1] + 1
             return f"0b{v:0{w}b}"
-        if self.kind == "ang":
+        if self.kind in ("ang", "byte"):
             return f"0x{v & 0xFF:02X}"
         if self.kind in ("i", "temp"):
             return f"{v}"
@@ -114,6 +116,8 @@ class Field:
             return ("no angle (0x80)", False) if v == -128 else (f"{v * 0.2:+.1f}°", False)
         if self.kind == "temp":
             return f"{v} °C", False
+        if self.kind == "byte":
+            return (f"{v:3d}   '{chr(v)}'" if 32 <= v < 127 else f"{v:3d}"), False
         if self.kind == "dur":
             return f"{v // 3600} h {v % 3600 // 60:02d} min {v % 60:02d} s  ({v / 86400:.1f} days)", False
         if self.kind == "mask":
@@ -286,6 +290,21 @@ DOP_COLS = [  # name, byte in record, (hi, lo), tooltip
     ("Conv_peak", 2, None, "Magnitude of the convolution peak, -80..80; negative = phase inversion"),
 ]
 
+IOC_CONFIG = tlm_header(0xF9, "IOC CONFIG", 36) + [   # table says Length 28, capture + bytes 8-39 give 36
+    Field(8 + i, f"CONFIG[{i}]", f"MD CONFIG byte {i} (clause 4.1.2.1)", kind="byte") for i in range(32)]
+
+IOC_FAILURE = tlm_header(0xF8, "IOC FAILURE", 12)
+IOC_FAILURE[-1] = Field(6, "TLM_CNT", "This TLM type has no cyclic frame counter, constant 0x0000",
+                        size=2, expect=0)
+IOC_FAILURE += [
+    Field(8, "CRC1_MEM", "CRC of the program read from main memory", size=2),
+    Field(10, "CRC1_CALC", "CRC of the program calculated for main memory", size=2,
+          compare=(8, "CRC1_MEM")),
+    Field(12, "CRC2_MEM", "CRC of the program read from backup memory", size=2),
+    Field(14, "CRC2_CALC", "CRC of the program calculated for the backup memory", size=2,
+          compare=(12, "CRC2_MEM")),
+]
+
 WARN_ENUM = {("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
@@ -388,6 +407,10 @@ class FieldView(QtWidgets.QWidget):
                 continue
             text, warn = f.meaning(v)
             warn = warn or (f.name, v) in WARN_ENUM
+            if f.compare and f.byte + f.size <= len(data):
+                ref = int.from_bytes(data[f.compare[0]:f.compare[0] + f.size], "little")
+                text, warn = ((f"= {f.compare[1]}", False) if ref == v else
+                              (f"MISMATCH with {f.compare[1]} (0x{ref:04X})", True))
             val_it.setText(f.value_str(v))
             mean_it.setText(text)
             mean_it.setForeground(C_WARN if warn else QtGui.QBrush())
@@ -509,7 +532,7 @@ class DopView(QtWidgets.QWidget):
 class TelemetryTab(QtWidgets.QTabWidget):
     """Top-level Telemetry tab: BOS / UPNG / AFAR."""
 
-    LAYOUTS = {0xFC: IOK_OSN, 0xFA: IOK_SOST}
+    LAYOUTS = {0xFC: IOK_OSN, 0xFA: IOK_SOST, 0xF9: IOC_CONFIG, 0xF8: IOC_FAILURE}
 
     def __init__(self):
         super().__init__()

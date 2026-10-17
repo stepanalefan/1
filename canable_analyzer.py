@@ -454,6 +454,9 @@ class DemoBackend:
         self._sost = bytearray.fromhex("04FA2C002A000000 0E004AAB11002B95 06003B0004002C01 "
                                        "F5370F00B9CB08AE DB080BF3083D6C08 00FF080047C50100")
         self._dop_cnt = 0
+        self._cfg = bytearray.fromhex("04F924002A000000 34200 3A4FF023210".replace(" ", "") +
+                                      "0400040400000036 461090EBDE730D1D 5B22538149 4E5487".replace(" ", ""))
+        self._fail = bytearray.fromhex("04F80C002A000000 3C9A3C9A71E171E1".replace(" ", ""))
         # id, ext, period s, next due
         self._sched = [[0x0C0, False, 0.010, 0], [0x1A0, False, 0.020, 0], [0x3E8, False, 0.100, 0],
                        [0x2F0, False, 0.050, 0], [0x18FEF100, True, 0.100, 0],
@@ -505,7 +508,9 @@ class DemoBackend:
             for k in range(40):                                                # synthetic records
                 pk = int(70 * math.sin(t * 3 + k / 6))
                 dop += bytes([0x80 | 0x04 | (0x01 if k % 9 == 0 else 0), 0xF8 | k % 8, pk & 0xFF])
-            for typ, arr in ((0xFA, self._sost), (0xFB, dop)):
+            cc = int.from_bytes(self._cfg[6:8], "little") + 1
+            self._cfg[6:8] = (cc & 0xFFFF).to_bytes(2, "little")
+            for typ, arr in ((0xFA, self._sost), (0xFB, dop), (0xF9, self._cfg), (0xF8, self._fail)):
                 n = len(arr) // 8
                 for i in range(n):
                     seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | i
