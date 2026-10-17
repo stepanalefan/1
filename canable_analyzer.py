@@ -454,6 +454,11 @@ class DemoBackend:
         self._sost = bytearray.fromhex("04FA2C002A000000 0E004AAB11002B95 06003B0004002C01 "
                                        "F5370F00B9CB08AE DB080BF3083D6C08 00FF080047C50100")
         self._dop_cnt = 0
+        self._bos = bytearray.fromhex(                 # captured BOS IOK OSN (ID 0x1A46xxFC)
+            "04FC640029001800 1B00000000010000 0000000000000000 563D030F00000000 0000000000000000 "
+            "0000000000808080 8000000000000000 0000000000000000 0000000000000000 0000000000000100 "
+            "0001000000000100 1F201C0080E50000 0000000000000000".replace(" ", ""))
+        self._bos_next = time.time() + 0.5
         self._cfg = bytearray.fromhex("04F924002A000000 34200 3A4FF023210".replace(" ", "") +
                                       "0400040400000036 461090EBDE730D1D 5B22538149 4E5487".replace(" ", ""))
         self._fail = bytearray.fromhex("04F80C002A000000 3C9A3C9A71E171E1".replace(" ", ""))
@@ -499,6 +504,16 @@ class DemoBackend:
                 self._cnt += 1
                 out.append(Frame(e[3], e[0], e[1], False, None, self._payload(e[0], t)))
                 e[3] += e[2]
+        if now >= self._bos_next:                # BOS IOK OSN every ~2.2 s
+            self._bos_next += 2.2
+            b = self._bos
+            b[6:8] = ((int.from_bytes(b[6:8], "little") + 1) & 0xFFFF).to_bytes(2, "little")
+            b[8:12] = (int.from_bytes(b[8:12], "little") + 2).to_bytes(4, "little")   # BOS_Time
+            b[88] = 30 + int(3 * math.sin(t / 20)) & 0xFF                           # Temp_DT1
+            for i in range(13):
+                seg = 0x00 if i == 0 else (0x80 if i == 12 else 0x40) | i
+                out.append(Frame(now + i * 0.007, 0x1A460000 | seg << 8 | 0xFC, True, False, None,
+                                 bytes(b[8 * i:8 * i + 8])))
         if now >= self._upng_next:               # UPNG IOK OSN / SOST / DOP every 4 s
             self._upng_next += 4.0
             wt = int.from_bytes(self._sost[24:28], "little") + 4             # Work_Time += 4 s

@@ -31,7 +31,21 @@ MD_ARRAYS = [  # type, name, size
     (0xF9, "IOC CONFIG", 40),
     (0xF8, "IOC FAILURE", 16),
 ]
-MD_TYPES = {t for t, _, _ in MD_ARRAYS}
+BOS_ARRAYS = [  # MD_BOS table
+    (0xFC, "IOK OSN", 104),
+    (0xFA, "IOK CONFIG", 144),
+    (0xFD, "IOK SOST", 48),
+    (0xFB, "IOK DOP", 16),
+    (0xF9, "IOK ARCHIVE", 272),
+]
+# unit, CAN ID prefix (bits 28-16 of the 29-bit ID), arrays. Arrays are routed by
+# prefix AND type: the BOS and the UPNG both send type 0xFC.
+UNITS = [
+    ("BOS", 0x1A46, BOS_ARRAYS),
+    ("UPNG", 0x1A86, MD_ARRAYS),
+    ("AFAR", None, []),
+]
+MD_TYPES = {t for _, _, arrays in UNITS for t, _, _ in arrays}
 
 
 class Reassembler:
@@ -75,8 +89,9 @@ class Field:
     / mask (channel bits) / res (reserve)."""
 
     def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None,
-                 compare=None):
+                 compare=None, limit=None):
         self.byte, self.name, self.desc = byte, name, desc
+        self.limit = limit              # warn when abs(value) > limit
         self.compare = compare          # (byte, name): value must equal that field (CRC check)
         self.size, self.bits, self.kind, self.enum, self.expect = size, bits, kind, enum or {}, expect
 
@@ -94,7 +109,7 @@ class Field:
         if self.bits:
             hi, lo = self.bits
             v = (v >> lo) & ((1 << (hi - lo + 1)) - 1)
-        if self.kind in ("i", "ang", "temp"):
+        if self.kind in ("i", "ang", "temp", "talarm"):
             n = 8 * self.size
             if v >= 1 << (n - 1):
                 v -= 1 << n
@@ -106,7 +121,7 @@ class Field:
             return f"0b{v:0{w}b}"
         if self.kind in ("ang", "byte"):
             return f"0x{v & 0xFF:02X}"
-        if self.kind in ("i", "temp"):
+        if self.kind in ("i", "temp", "talarm"):
             return f"{v}"
         return f"0x{v:0{2 * self.size}X}  ({v})" if self.size > 1 or v > 9 else f"0x{v:02X}"
 
@@ -116,6 +131,18 @@ class Field:
             return ("no angle (0x80)", False) if v == -128 else (f"{v * 0.2:+.1f}°", False)
         if self.kind == "temp":
             return f"{v} °C", False
+        if self.kind == "talarm":
+            return ("not triggered (initial -128)", False) if v == -128 else (f"{v} °C at shutdown", True)
+        if self.kind == "trig":
+            hit = [str(i + 1) for i in range(4) if v >> i & 1]
+            return (("TRIGGERED: sensor " + ", ".join(hit)), True) if hit else ("normal", False)
+        if self.kind == "ms10":
+            ms = v * 10
+            return f"{ms // 3600000} h {ms // 60000 % 60:02d} min {ms // 1000 % 60:02d}.{ms % 1000:03d} s", False
+        if self.kind == "period":
+            return ("disabled", False) if v == 0 else (f"every {v} s", False)
+        if self.limit is not None and abs(v) > self.limit:
+            return f"outside ±{self.limit}", True
         if self.kind == "byte":
             return (f"{v:3d}   '{chr(v)}'" if 32 <= v < 127 else f"{v:3d}"), False
         if self.kind == "dur":
@@ -234,14 +261,15 @@ IOK_OSN = [
 ]
 
 
-def tlm_header(md_type, name, length):
+def tlm_header(md_type, name, length, tm="TLM"):
     return [
         Field(0, "Marker", "Start of file marker", expect=0x04),
         Field(1, "Type", f"Array type: {name}", expect=md_type),
         Field(2, "Length", "Packet length in bytes excluding marker, type, length", size=2, expect=length),
         Field(4, "AT", "Sender's address"),
-        Field(5, "TLM_EXP", "TLM output frame format version"),
-        _cnt(6, "TLM_CNT", "Cyclic counter of TLM frames of this type since power-on / reset (0 after 0xFFFF)"),
+        Field(5, f"{tm}_EXP", f"{tm} output frame format version"),
+        _cnt(6, f"{tm}_CNT" if tm == "TLM" else "TM_COUNT",
+             f"Cyclic counter of {tm} frames of this type since power-on / reset (0 after 0xFFFF)"),
     ]
 
 
@@ -305,7 +333,111 @@ IOC_FAILURE += [
           compare=(12, "CRC2_MEM")),
 ]
 
-WARN_ENUM = {("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
+_rst = " Reset on power-on / reset."
+BOS_OSN = tlm_header(0xFC, "IOK OSN (BOS)", 100, tm="TM") + [
+    Field(8, "BOS_Time", "BOS time (format see p.4.2.3.12)", size=4),
+    Field(12, "Cnt_1C", "Received pulse counter 1C." + _rst),
+    Field(13, "Cnt_Cmd_Time_BSHV", "Counter of received 'BSHV Time' commands." + _rst),
+    Field(14, "Itime_SNR", "Integer part of the time from 'Set transfer time in SR', 1 s per unit (1)", size=4),
+    Field(18, "Ftime_SNR", "Fractional part of the time from 'Set transfer time in SR', 10 ms per unit (1)"),
+    Field(19, "PulsNumb_10MHz", "Pulses of the external 10 MHz generator in the interval Tinterv10MHz", size=3),
+    Field(22, "Err_Ref_LO", "EG tuning code (external - internal EG pulse counters), should approach 0, "
+          "normal ±1000", size=2, kind="i", limit=1000),
+    Field(24, "Stat_10MHz", "External 10 MHz generator validity (checked every 1 s) (2)", bits=(0, 0),
+          enum={0: "no signal from the generator", 1: "norm"}),
+    Field(24, "Sour_10MHz", "Current 10 MHz reference oscillator source (3)", bits=(1, 1),
+          enum={0: "internal", 1: "external 10 MHz"}),
+    Field(24, "Random_mode", "Data randomization mode in SR", bits=(2, 2), enum={0: "no", 1: "yes"}),
+    Field(24, "Config_Type", "Current configuration", bits=(3, 3),
+          enum={0: "factory (from BOS software)", 1: "custom (from CONFIG file)"}),
+    Field(24, "Numb_BOS", "Number of the BOS kit issuing the IOC", bits=(4, 4),
+          enum={0: "first set", 1: "second set"}),
+    Field(24, "Mode", "Current operating mode of the BOS (4)", bits=(5, 5),
+          enum={0: "standby mode", 1: "session mode (SR)"}),
+    Field(24, "BPU_AFAR_err", "Error flag for automatic selection of the BPU kit", bits=(6, 6),
+          enum={0: "normal", 1: "BPU not selected"}),
+    Field(24, "reserve", "reserve", bits=(7, 7), kind="res"),
+    Field(25, "BPU_AFAR_Status", "Included BPU kit", bits=(1, 0),
+          enum={0: "both disabled", 1: "BPU1 included", 2: "BPU2 included", 3: "both sets included"}),
+    Field(25, "QuickOn_mode", "Quick-start control mode of SR in AFAR", bits=(3, 2),
+          enum={1: "QuickOn signal only", 2: "commands via CAN only", 3: "signal and command"}),
+    Field(25, "CAN_Mode", "Operating mode of the BOS according to CAN", bits=(5, 4),
+          enum={1: "via CAN1 bus", 2: "via CAN2 bus", 3: "on both CAN buses"}),
+    Field(25, "reserve", "reserve", bits=(7, 6), kind="res"),
+    Field(26, "Sour_Angle_Enable", "Current source of target designations used for the ZS", bits=(1, 0),
+          enum={0: "no reliable designations, source not selected", 1: "UPNG", 2: "BKU", 3: "BKU and UPNG"}),
+    Field(26, "Ang_Valid", "Target designation validity (angX, angY) (5)", bits=(3, 2),
+          enum={0: "invalid from both sources", 1: "BKU invalid, UPNG valid",
+                2: "BKU valid, UPNG invalid", 3: "valid from both sources"}),
+    Field(26, "reserve", "reserve", bits=(7, 4), kind="res"),
+    Field(27, "Temp_mode", "Automatic shutdown when the temperature is exceeded", bits=(3, 0),
+          enum={0: "auto power-off disabled", 1: "on sensor 1", 2: "on sensor 2", 4: "on sensor 3",
+                8: "on sensor 4", 15: "on any sensor"}),
+    Field(27, "Adrss_TD", "Temperature sensor that caused automatic shutdown (trigger, bit = sensor) (6)",
+          bits=(7, 4), kind="trig"),
+    Field(28, "Mode_SNR", "Sub-mode of the BOS in the SR (current / last) (7)",
+          enum={0x00: "no transmission since power-on", 0x40: "carrier transmission",
+                0xA1: "CBD transfer to UR", 0xA2: "preamble in SR at reception rate",
+                0xA3: "POOSSH in SR at reception rate", 0xA4: "KBD in SR at reception rate",
+                0xA5: "preamble in SR at delayed time", 0xA6: "POOSSH in SR at delayed time",
+                0xA7: "KBD in SR at delayed time"}),
+    Field(29, "Cnt_Alarm_Templ", "SR shutdowns by automatic temperature shutdown (8)"),
+    Field(30, "Cnt_All_SNR", "SR shutdowns because the SR duration ('Time SNR' in CONFIG) was exceeded (8)"),
+    Field(31, "Cnt_New_Cmd", "SR shutdowns on receipt of a new SR control command (8)"),
+    Field(32, "Cnt_Cmd_SNR_Off", "Forced SR shutdowns by the 'Turn on the JR' command (8)"),
+    Field(33, "Cnt_Ang_Err", "SR shutdowns on unacceptable angles angX/angY in 'Target designations' (9)"),
+    Field(34, "Last_Cmd_SNR", "Number of the last received SR control command"),
+    Field(35, "Last_Param_SNR", "Parameters of the last received SR control command", size=8),
+    Field(43, "Cnt_SNR_Cmd", "Logical SR counter for the current BOS enable." + _rst),
+    Field(44, "Cnt_SNR_Sgnl", "Physical SR counter (RF signal generated) for the current enable." + _rst + " (10)"),
+    Field(45, "AngX_UPNG", "angX from 'Target designation to the ZS from the UPNG' (format p.4.2.3.18) (11)"),
+    Field(46, "AngY_UPNG", "angY from 'Target designation to the ZS from the UPNG' (format p.4.2.3.18) (11)"),
+    Field(47, "AngX_BKU", "angX from 'Target designation to the ZS from the BKU' (format p.4.2.3.17) (11)"),
+    Field(48, "AngY_BKU", "angY from 'Target designation to the ZS from the BKU' (format p.4.2.3.17) (11)"),
+    Field(49, "Config_Nmb", "'User' configuration file number (from CONFIG, low byte)", size=2),
+    Field(51, "Config_Nmb_2", "Sub-number of the 'user' configuration file, +1 per valid CONFIG change (12)"),
+    _cnt(52, "Cnt_RX_KBD+", "Received KBD via IPPD-TMI in the current BOS session (all SRs)"),
+    _cnt(54, "Cnt_RX_KBD_IgnrL", "Ignored KBD via IPPD-TMI ('short' criterion)", size=1),
+    _cnt(55, "Cnt_RX_KBD_IgnrH", "Ignored KBD via IPPD-TMI ('long' criterion)", size=1),
+    _cnt(56, "Cnt_TX_KBD+", "Sent KBDs in the current BOS session (all SRs)." + _rst),
+    _cnt(58, "Cnt_TX_KBD_BB+", "Sent CBDs in the current BOS SR session"),
+    _cnt(60, "Cnt_UPNG_Ang", "Received 'Target designation to the ZS from the UPNG' commands"),
+    _cnt(62, "Cnt_BKU_Ang", "Received 'Target designation to the ZS from the BKU' commands." + _rst),
+    Field(64, "Last_Cmd", "Last received command (except cyclic BShV / target designation and SR control)."
+          + _rst),
+] + [Field(65 + i, f"byte {65 + i}", "NOT IN THE PROVIDED TABLES (bytes 65-72)", kind="byte")
+     for i in range(8)] + [
+    _cnt(73, "Cnt_Cmd_True", "Executed commands (except cyclic BShV / target designation and SR control)"),
+    _cnt(75, "Cnt_Cmd_False", "Ignored commands: invalid parameters / not in the BOS list", size=1),
+    _cnt(76, "Cnt_Req_KBD", "Non-zero KBD requests issued in BARL (reset by SR control command)", size=1),
+    Field(77, "Last_Nmb_KBD_Req", "Last non-zero number of requested CBDs ('Request CBD in BARL')"),
+    Field(78, "T_SNR+", "Total duration of operation in the SR, 10 ms per unit (13)", size=3, kind="ms10"),
+    Field(81, "T_SNR_BB+", "Total duration of work in the SR, 10 ms per unit (13)", size=3, kind="ms10"),
+    Field(84, "Period_FA", "Period of issuance of IOK CONFIG, 1 s per unit, 0 = disabled (14)", kind="period"),
+    Field(85, "Period_FC", "Period of issuance of IOK OSN, 1 s per unit, 0 = disabled (14)", kind="period"),
+    Field(86, "Period_FD", "Period of issuance of IOK SOST, 1 s per unit, 0 = disabled (14)", kind="period"),
+    Field(87, "Period_FB", "Period of issuance of IOK DOP, 1 s per unit, 0 = disabled (14)", kind="period"),
+    Field(88, "Temp_DT1", "Temperature sensor 1, degrees", kind="temp"),
+    Field(89, "Temp_DT2", "Temperature sensor 2, degrees", kind="temp"),
+    Field(90, "Temp_DT3", "Temperature sensor 3, degrees", kind="temp"),
+    Field(91, "Temp_DT4", "Temperature sensor 4, degrees (not used)", kind="temp"),
+    Field(92, "Temp_Alarm", "Temperature at the moment of automatic shutdown (trigger) (15)", kind="talarm"),
+    Field(93, "Point_Adrss", "Flash write pointer of IOK_ARCHIVE, in 16-byte steps (one SR entry)", size=2),
+    _cnt(95, "Cnt_BPU1", "Data received from BPU1 via feedback, +1 per second (changing = BPU1 works)", size=1),
+    _cnt(96, "Cnt_BPU2", "Data received from BPU2 via feedback, +1 per second (changing = BPU2 works)", size=1),
+    Field(97, "reserve", "Reserve, padding to a multiple of 8", size=7, kind="res"),
+]
+BOS_OSN_NOTES = (
+    "(1) set by 'Set transmission time in SR', 0 after power-on.  (2) checked every 1 s.  "
+    "(3) falls back to internal if the external 10 MHz is missing/lost.  (4) set while the SR is logically "
+    "on.  (5) UPNG validity from its command, BKU validity vs. CONFIG limits.  (6) trigger, cleared on "
+    "power-up.  (7) 0x00 after power-on; A2/A3/A4 become A5/A6/A7 with a delayed time.  (8) counted "
+    "while in logical SR.  (10) may grow faster than Cnt_SNR_Cmd in ImpRP mode.  (11) written whether "
+    "or not the angles are reliable.  (12) save CONFIG before the sub-number overflows.  (13) since "
+    "power-on, physical SR (RF radiated).  (14) from CONFIG / 'Set telemetry output period'.  "
+    "(15) -128 after power-on/reset.")
+
+WARN_ENUM = {("BPU_AFAR_err", 1), ("Stat_10MHz", 0), ("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
          "Angle options 1 and 2 differing by more than 2° indicates problems in the channels.")
@@ -530,38 +662,50 @@ class DopView(QtWidgets.QWidget):
 
 
 class TelemetryTab(QtWidgets.QTabWidget):
-    """Top-level Telemetry tab: BOS / UPNG / AFAR."""
+    """Top-level Telemetry tab: BOS / UPNG / AFAR, one sub-tab per array."""
 
-    LAYOUTS = {0xFC: IOK_OSN, 0xFA: IOK_SOST, 0xF9: IOC_CONFIG, 0xF8: IOC_FAILURE}
+    LAYOUTS = {  # (unit, type) -> (fields, notes)
+        ("UPNG", 0xFC): (IOK_OSN, NOTES),
+        ("UPNG", 0xFA): (IOK_SOST, ""),
+        ("UPNG", 0xF9): (IOC_CONFIG, ""),
+        ("UPNG", 0xF8): (IOC_FAILURE, ""),
+        ("BOS", 0xFC): (BOS_OSN, BOS_OSN_NOTES),
+    }
 
     def __init__(self):
         super().__init__()
         self.rx = Reassembler()
-        self.views = {}
-        for unit in ("BOS", "UPNG", "AFAR"):
-            if unit != "UPNG":
+        self.views = {}                  # (unit, type) -> view
+        self.prefix_unit = {p: u for u, p, _ in UNITS if p is not None}
+        for unit, prefix, arrays in UNITS:
+            if not arrays:
                 lbl = QtWidgets.QLabel(f"{unit}: telemetry not described yet.")
                 lbl.setAlignment(QtCore.Qt.AlignCenter)
                 lbl.setStyleSheet("color:#8a96a3;")
                 self.addTab(lbl, unit)
                 continue
             sub = QtWidgets.QTabWidget()
-            for t, name, size in MD_ARRAYS:
-                if t in self.LAYOUTS:
-                    view = FieldView(t, name, size, self.LAYOUTS[t], notes=NOTES if t == 0xFC else "")
-                elif t == 0xFB:
+            for t, name, size in arrays:
+                key = (unit, t)
+                if key in self.LAYOUTS:
+                    fields, notes = self.LAYOUTS[key]
+                    view = FieldView(t, name, size, fields, notes=notes)
+                elif key == ("UPNG", 0xFB):
                     view = DopView(t, name, size)
                 else:
                     view = RawView(t, name, size)
-                self.views[t] = view
+                self.views[key] = view
                 sub.addTab(view, f"{name} (0x{t:02X})")
-            self.addTab(sub, unit)
-        self.setCurrentIndex(1)
+            self.addTab(sub, f"{unit}  (ID 0x{prefix:04X}xxxx)")
+        self.setCurrentIndex(0)
 
     def on_frames(self, frames):
         """Listener for canable_analyzer.SnifferWindow.ingest()."""
         for f in frames:
             r = self.rx.feed(f)
-            if r is not None:
-                base, t, data, ts = r
-                self.views[t].update_array(base, data, ts, self.rx.errors)
+            if r is None:
+                continue
+            base, t, data, ts = r
+            view = self.views.get((self.prefix_unit.get(base >> 16), t))
+            if view is not None:
+                view.update_array(base, data, ts, self.rx.errors)
