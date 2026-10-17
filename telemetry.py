@@ -43,16 +43,24 @@ BOS_ARRAYS = [  # MD_BOS table
 UNITS = [
     ("BOS", 0x1A46, BOS_ARRAYS),
     ("UPNG", 0x1A86, MD_ARRAYS),
-    ("AFAR", None, []),
+    ("AFAR", 0x1AC6, [  # MD_AFAR table
+        (0xFC, "IOK OSN", 184),
+        (0xFD, "IOK SOST", 56),
+        (0xFA, "IOK CONFIG", 40),
+        (0xFB, "IOK FV", 80),
+    ]),
 ]
 MD_TYPES = {t for _, _, arrays in UNITS for t, _, _ in arrays}
 
 
 class Reassembler:
-    """Collects the 8-byte segments of an array; returns complete arrays."""
+    """Collects the 8-byte segments of an array; returns complete arrays.
+
+    Segment byte: bits 7-6 = 00 first / 01 middle / 10 last, bits 3-0 = segment number
+    modulo 16 (AFAR 184 B: 00, 41..4F, 40..45, 86). Segments must arrive in order."""
 
     def __init__(self):
-        self.parts: dict[int, dict[int, bytes]] = {}     # base id -> {index: data}
+        self.parts: dict[int, list[bytes]] = {}          # base id -> segments so far
         self.errors = 0
 
     def feed(self, f):
@@ -61,23 +69,24 @@ class Reassembler:
             return None
         base = f.can_id & ~0xFF00
         seg = (f.can_id >> 8) & 0xFF
-        kind, idx = seg >> 6, seg & 0x3F
+        kind, idx = seg >> 6, seg & 0x0F
         if kind == 0:                                  # first segment: start a new array
             if base in self.parts:
                 self.errors += 1                       # previous one never completed
-            self.parts[base] = {idx: f.data}
+            self.parts[base] = [f.data]
             return None
         buf = self.parts.get(base)
         if buf is None:
             return None                                # started before the capture began
-        buf[idx] = f.data
+        if idx != len(buf) % 16:                       # lost / out-of-order segment
+            self.errors += 1
+            del self.parts[base]
+            return None
+        buf.append(f.data)
         if kind != 2:
             return None
         del self.parts[base]
-        if sorted(buf) != list(range(idx + 1)):
-            self.errors += 1                           # a segment is missing
-            return None
-        return base, f.can_id & 0xFF, b"".join(buf[i] for i in range(idx + 1)), f.ts
+        return base, f.can_id & 0xFF, b"".join(buf), f.ts
 
 
 # --------------------------------------------------------------------------- #
@@ -89,8 +98,9 @@ class Field:
     / mask (channel bits) / res (reserve)."""
 
     def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None,
-                 compare=None, limit=None):
+                 compare=None, limit=None, scale=1.0, offset=0.0, unit=""):
         self.byte, self.name, self.desc = byte, name, desc
+        self.scale, self.offset, self.unit = scale, offset, unit    # kind "lin"/"slin": v*scale+offset
         self.limit = limit              # warn when abs(value) > limit
         self.compare = compare          # (byte, name): value must equal that field (CRC check)
         self.size, self.bits, self.kind, self.enum, self.expect = size, bits, kind, enum or {}, expect
@@ -109,7 +119,7 @@ class Field:
         if self.bits:
             hi, lo = self.bits
             v = (v >> lo) & ((1 << (hi - lo + 1)) - 1)
-        if self.kind in ("i", "ang", "temp", "talarm"):
+        if self.kind in ("i", "ang", "temp", "talarm", "slin", "talarm2"):
             n = 8 * self.size
             if v >= 1 << (n - 1):
                 v -= 1 << n
@@ -121,7 +131,9 @@ class Field:
             return f"0b{v:0{w}b}"
         if self.kind in ("ang", "byte"):
             return f"0x{v & 0xFF:02X}"
-        if self.kind in ("i", "temp", "talarm"):
+        if self.size >= 8:              # parameter blocks: bytes in transmission order
+            return " ".join(f"{b:02X}" for b in v.to_bytes(self.size, "little"))
+        if self.kind in ("i", "temp", "talarm", "slin", "talarm2"):
             return f"{v}"
         return f"0x{v:0{2 * self.size}X}  ({v})" if self.size > 1 or v > 9 else f"0x{v:02X}"
 
@@ -131,10 +143,26 @@ class Field:
             return ("no angle (0x80)", False) if v == -128 else (f"{v * 0.2:+.1f}°", False)
         if self.kind == "temp":
             return f"{v} °C", False
+        if self.kind == "mask8":
+            on = [str(i + 1) for i in range(8) if v >> i & 1]
+            return (("channels " + ", ".join(on) + " on") if on else "all channels off"), False
         if self.kind == "talarm":
             return ("not triggered (initial -128)", False) if v == -128 else (f"{v} °C at shutdown", True)
+        if self.kind in ("lin", "slin"):
+            return f"{v * self.scale + self.offset:.3f} {self.unit}".rstrip(), False
+        if self.kind == "talarm2":      # AFAR: trigger, T = v * 2 degC, initial 0x7F / 0x80
+            return (("not triggered (initial value)", False) if v in (127, -128)
+                    else (f"{2 * v} °C at shutdown", True))
+        if self.kind == "tmode":
+            if v == 0:
+                return "auto power-off disabled", False
+            if v == (1 << (self.bits[0] - self.bits[1] + 1)) - 1:
+                return "on any sensor", False
+            hit = [str(i + 1) for i in range(8) if v >> i & 1]
+            return "on sensor " + ", ".join(hit), False
         if self.kind == "trig":
-            hit = [str(i + 1) for i in range(4) if v >> i & 1]
+            w = self.bits[0] - self.bits[1] + 1 if self.bits else 8 * self.size
+            hit = [str(i + 1) for i in range(w) if v >> i & 1]
             return (("TRIGGERED: sensor " + ", ".join(hit)), True) if hit else ("normal", False)
         if self.kind == "ms10":
             ms = v * 10
@@ -489,6 +517,86 @@ BOS_DOP_NOTES = ("(1) bit 15 sign, bits 14..3 integer part, 2..0 fractional part
 WARN_ENUM_BOS = {("pll_lmk", 0), ("pll_jesd", 0), ("pll_all", 0), ("pll_lmx (DAC)", 0), ("pll_lmx (mod)", 0),
                  ("jesd_err", 0)}
 
+_rst2 = " Reset on power-on / reset."
+AFAR_OSN = tlm_header(0xFC, "IOK OSN (AFAR)", 180, tm="TM") + [
+    Field(8 + i, f"Sts_Izl_Lnr{i + 1}", f"Channel status in line {i + 1}, bit 0..7 = channel 1..8 "
+          f"(1 = on) (1)", kind="mask8") for i in range(8)] + [
+    Field(16, "Mode", "Current operating mode of the AFAR (2)", bits=(7, 7),
+          enum={0: "standby mode (DZhR)", 1: "session mode (SR)"}),
+    Field(16, "Config_Type", "Current configuration", bits=(6, 6),
+          enum={0: "factory (from SPO BPU)", 1: "custom (from CONFIG file)"}),
+    Field(16, "Numb_BPU", "Number of the BPU set issuing the IOC", bits=(5, 5),
+          enum={0: "first set", 1: "second set"}),
+    Field(16, "Sour_SNR_Cmd", "Allowed source of quick SR-inclusion commands", bits=(4, 4),
+          enum={0: "allowed by BOS (QuickOn)", 1: "allowed from BKU"}),
+    Field(16, "Power_Mode", "AFAR consumption mode", bits=(3, 3),
+          enum={0: "reduced consumption", 1: "normal consumption"}),
+    Field(16, "reserve", "reserve", bits=(2, 0), kind="res"),
+    Field(17, "reserve", "reserve", bits=(7, 6), kind="res"),
+    Field(17, "Sour_Angle_Enable", "Specified source of target designations for the ZS", bits=(5, 4),
+          enum={1: "UPNG", 2: "BKU", 3: "BKU or UPNG"}),
+    Field(17, "Ang_Valid", "Target designation validity (angX, angY) (3)", bits=(3, 2),
+          enum={0: "invalid from both sources", 1: "BKU invalid, UPNG valid",
+                2: "BKU valid, UPNG invalid", 3: "valid from both sources"}),
+    Field(17, "CAN_Mode", "Operating mode of the AFAR according to CAN", bits=(1, 0),
+          enum={1: "via CAN1 bus", 2: "via CAN2 bus", 3: "on both CAN buses"}),
+    Field(18, "Temp_mode", "Automatic shutdown when the temperature is exceeded (technological)",
+          bits=(7, 0), kind="tmode"),
+    Field(19, "Adrss_TD", "Temperature sensor that caused automatic shutdown (trigger, bit = sensor 1..8) (4)",
+          bits=(7, 0), kind="trig"),
+    _cnt(20, "Cnt_Alarm_Temp", "SR shutdowns by automatic temperature shutdown", size=1),
+    _cnt(21, "Cnt_Tout_SNR", "SR shutdowns because the SR duration ('Time SNR' in CONFIG) was exceeded", size=1),
+    _cnt(22, "Cnt_SNR", "SR counter in the current AFAR activation, +1 at the start of SR enable commands."
+         + _rst2, size=1),
+    Field(23, "AngX_UPNG", "angX from 'Target designation to the ZS from the UPNG' (format p.4.2.3.16) (5)"),
+    Field(24, "AngY_UPNG", "angY from 'Target designation to the ZS from the UPNG' (format p.4.2.3.16) (5)"),
+    Field(25, "AngX_BKU", "angX from 'Target designation to the ZS from the BKU' (format p.4.2.3.15) (5)"),
+    Field(26, "AngY_BKU", "angY from 'Target designation to the ZS from the BKU' (format p.4.2.3.15) (5)"),
+    Field(27, "Config_Nmb", "Number of the 'user' configuration file (from CONFIG)", size=2),
+    Field(29, "Config_Nmb_2", "Sub-number of the 'user' configuration file, +1 per valid CONFIG change (6)"),
+    _cnt(30, "Cnt_UPNG_Ang", "Received 'Target designation to the ZS from the UPNG' commands"),
+    _cnt(32, "Cnt_BKU_Ang", "Received 'Target designation to the ZS from the BKU' commands." + _rst2),
+    Field(34, "Last_Cmd", "Last received command (except cyclic target designation)." + _rst2),
+    Field(35, "Last_Cmd_Param", "Parameters of the last received command, bytes 0-7 (missing bytes = 0x00)."
+          + _rst2, size=8),
+    _cnt(43, "Cnt_Cmd_True", "Executed commands (except cyclic target designation)"),
+    _cnt(45, "Cnt_Cmd_False", "Ignored commands: invalid parameters / not in the allowed list", size=1),
+    Field(46, "T_TurnOn+", "Total operating time since the AESA was turned on, 1 s per unit", size=2, kind="dur"),
+    Field(48, "T_SNR+", "Total duration of operation in SR during this activation, 10 ms per unit (7)",
+          size=3, kind="ms10"),
+    Field(51, "Period_FA", "Period of issuance of IOK CONFIG, 1 s per unit, 0 = disabled (8)", kind="period"),
+    Field(52, "Period_FC", "Period of issuance of IOK OSN, 1 s per unit, 0 = disabled (8)", kind="period"),
+    Field(53, "Period_FD", "Period of issuance of IOK STATUS, 1 s per unit, 0 = disabled (8)", kind="period"),
+    Field(54, "Period_FB", "Period of issuance of IOK FV, 1 s per unit, 0 = disabled (8)", kind="period"),
+] + [Field(55 + i, f"Temp{i + 1}", f"Temperature sensor {i + 1}, T = value × 2 °C (technological)",
+           kind="slin", scale=2, unit="°C") for i in range(8)] + [
+    Field(63, "Temp_Alarm", "Temperature at automatic shutdown, T = value × 2 °C (trigger) (9)", kind="talarm2"),
+    _cnt(64, "Cnt_BPU1", "Data issued by the control unit via feedback, +1 per second (changing = unit works)",
+         size=1),
+] + [Field(65 + i, f"3VPA_{i + 1}_SENS", f"Current consumption of line {i + 1}: "
+           f"I = v × 19.075e-6 / 0.003 × 16 (unit 'mA' per table)", kind="slin",
+           scale=19.075e-6 / 0.003 * 16, unit="mA") for i in range(8)] + [
+    Field(73 + i, f"3VPA_{i + 1}", f"Internal +3.3 V of power supply {i + 1}: U = v × 0.0170898 V",
+          kind="lin", scale=0.0170898, unit="V") for i in range(8)] + [
+    Field(81 + i, f"5VP_{i + 1}", f"Internal +5 V of power supply {i + 1}: U = v × 0.0288086 V",
+          kind="lin", scale=0.0288086, unit="V") for i in range(4)] + [
+    Field(85 + i, f"5VN_{i + 1}", f"Internal -5 V of power supply {i + 1}: U = (v × 578.431 - 3.3 × 39000) / 20000 V",
+          kind="lin", scale=578.431 / 20000, offset=-3.3 * 39000 / 20000, unit="V") for i in range(4)] + [
+    Field(89 + k, f"5VP_{ln}{j}", f"Internal +5 V of line {k + 1}: U = v × 0.0244 V",
+          kind="lin", scale=0.0244, unit="V")
+    for k, (ln, j) in enumerate((ln, j) for ln in (1, 2, 3, 4) for j in (1, 2))] + [
+    Field(97 + 8 * (ln - 1) + (e - 1), f"PT_{ln}{e}", f"Power consumption of emitter {e} of line {ln}: "
+          f"P = v × 1.2 / 256 W", kind="lin", scale=1.2 / 256, unit="W")
+    for ln in range(1, 7) for e in range(1, 9)] + [
+    Field(145 + i, f"byte {145 + i}", "not described yet (next table parts)", kind="byte") for i in range(39)]
+AFAR_OSN_NOTES = (
+    "(1) set at the start of each SR, all 0 before the first SR; 'SR with all emitters' = all bits 1.  "
+    "(2) set by quick SR on, reset by quick SR off / power-on.  (3) BKU angles valid when both differ from "
+    "0x80.  (4) trigger, cleared at power-up and before SR on.  (5) written whether or not reliable.  "
+    "(6) save CONFIG before the sub-number overflows.  (7) physical SR (RF radiated).  (8) from CONFIG / "
+    "'Set telemetry output period'.  (9) initial value 0x7F.  Temperatures and currents are technological "
+    "parameters, not controlled by the control unit.")
+
 WARN_ENUM = WARN_ENUM_BOS | {("BPU_AFAR_err", 1), ("Stat_10MHz", 0), ("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
@@ -724,6 +832,7 @@ class TelemetryTab(QtWidgets.QTabWidget):
         ("BOS", 0xFC): (BOS_OSN, BOS_OSN_NOTES),
         ("BOS", 0xFD): (BOS_SOST, BOS_SOST_NOTES),
         ("BOS", 0xFB): (BOS_DOP, BOS_DOP_NOTES),
+        ("AFAR", 0xFC): (AFAR_OSN, AFAR_OSN_NOTES),
     }
 
     def __init__(self):
