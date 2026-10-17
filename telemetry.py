@@ -100,6 +100,7 @@ class Field:
     def __init__(self, byte, name, desc, size=1, bits=None, kind="u", enum=None, expect=None,
                  compare=None, limit=None, scale=1.0, offset=0.0, unit="", rng=None):
         self.rng = rng                  # (lo, hi): warn outside
+        self.low_part = None            # byte of the low 16 bits (counter split over two places)
         self.byte, self.name, self.desc = byte, name, desc
         self.scale, self.offset, self.unit = scale, offset, unit    # kind "lin"/"slin": v*scale+offset
         self.limit = limit              # warn when abs(value) > limit
@@ -620,6 +621,30 @@ AFAR_OSN_NOTES = (
     "'Set telemetry output period'.  (9) initial value 0x7F.  Temperatures and currents are technological "
     "parameters, not controlled by the control unit.")
 
+AFAR_SOST = tlm_header(0xFD, "IOK SOST (IOK CONDITION, AFAR)", 52, tm="TM") + [
+    Field(8, "Numb_BPU", "Number of the BPU set issuing the IOC", bits=(7, 7),
+          enum={0: "first set", 1: "second set"}),
+    Field(8, "reserve", "reserve", bits=(6, 0), kind="res"),
+    Field(9, "Soft_PLIS_Ver", "FPGA firmware version", size=2),
+    _cnt(11, "Cnt_Config_Save", "MD_CONFIG save counter in flash: +1 per 'Save settings in CONFIG file' (1)"),
+    _cnt(13, "Cnt_Data_Save_L", "Flash data store counter, low 16 bits; high bits at bytes 54-55 (2)"),
+    _cnt(15, "Cnt_Alarm_All_Temp", "Automatic shutdown counter by temperature, total for all sensors"),
+] + [_cnt(17 + 2 * i, f"Cnt_Alarm_All_DT{i + 1}",
+          f"Automatic shutdown counter by temperature on DT{i + 1} (technological) (3)") for i in range(8)] + [
+    _cnt(33, "Cnt_Turn_ON", "Power-on counter"),
+    _cnt(35, "Cnt_SNR_All", "SR counter", size=3),
+    Field(38, "Work_Time", "Total operating time of the BPU kit, all modes (DZhR + SR), 1 s per unit",
+          size=4, kind="dur"),
+    Field(42, "T_SNR_All", "Total duration of work in the SR, 10 ms per unit", size=4, kind="ms10"),
+] + [_cnt(46 + 2 * i, f"Cnt_Alarm_All_DT{9 + i}",
+          f"Automatic shutdown counter by temperature on DT{9 + i}") for i in range(4)] + [
+    _cnt(54, "Cnt_Data_Save_H", "Flash data store counter, high 16 bits (bits 31-16) (2)"),
+]
+AFAR_SOST[-1].low_part = 13
+AFAR_SOST_NOTES = ("(1) +1 per 'Save settings in CONFIG file'.  (2) +1 each time IOK_STATE is written to flash "
+                   "('Park Data', 'Change EPROM'); the value is split: low 16 bits at bytes 13-14, high 16 "
+                   "bits at 54-55.  (3) technological parameter, not controlled by the control unit.")
+
 WARN_ENUM = WARN_ENUM_BOS | {("Wr_Config_Error", 1), ("Wr_Stat_Error", 1), ("BPU_AFAR_err", 1), ("Stat_10MHz", 0), ("Flag_Alarm_Temp", 1), ("Cfg_CRC_nOK", 1), ("Sts_CRC_nOK", 1)}
 NOTES = ("*1  processing algorithm in Appendix A; 0x0000 at power-on / reset / disabled channel, "
          "last value in DZR mode.     *2  cleared on power cycle and reset.     "
@@ -722,6 +747,9 @@ class FieldView(QtWidgets.QWidget):
                 continue
             text, warn = f.meaning(v)
             warn = warn or (f.name, v) in WARN_ENUM
+            if f.low_part is not None and f.low_part + 2 <= len(data):
+                lo = int.from_bytes(data[f.low_part:f.low_part + 2], "little")
+                text = f"total (high·65536 + low) = {v << 16 | lo}"
             if f.compare and f.byte + f.size <= len(data):
                 ref = int.from_bytes(data[f.compare[0]:f.compare[0] + f.size], "little")
                 text, warn = ((f"= {f.compare[1]}", False) if ref == v else
@@ -856,6 +884,7 @@ class TelemetryTab(QtWidgets.QTabWidget):
         ("BOS", 0xFD): (BOS_SOST, BOS_SOST_NOTES),
         ("BOS", 0xFB): (BOS_DOP, BOS_DOP_NOTES),
         ("AFAR", 0xFC): (AFAR_OSN, AFAR_OSN_NOTES),
+        ("AFAR", 0xFD): (AFAR_SOST, AFAR_SOST_NOTES),
     }
 
     def __init__(self):

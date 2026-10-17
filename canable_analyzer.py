@@ -461,6 +461,8 @@ class DemoBackend:
         self._bos_next = time.time() + 0.5
         self._afar = bytearray.fromhex("04FCB4002B00BD00000000000000000008330000000000808080800000000000000011FC00000000000000000500D100000000000100000E0E0E0D0D07FFFF80D100000000000000FF000000000000000000000000333231320000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019171AFF1C0FC3BE0000000000000000000000000000")    # captured AFAR IOK OSN (ID 0x1AC6xxFC)
         self._afar_next = time.time() + 1.5
+        self._afar_sost = bytearray.fromhex("04FD34002B000000 0018A10000000000" + "00" * 16 +
+                                            "0000000000002201" + "00" * 16)
         self._bos_sost = bytearray.fromhex("04FD2C0029000000 8073680000030000 0004000000000000 "
                                            "0000000000000000 00000000F8090000 0300000003000000".replace(" ", ""))
         self._bos_dop = bytearray.fromhex("04FB1C0029000200 0FDF20B538214E00 0000000000000000 "
@@ -516,11 +518,14 @@ class DemoBackend:
             a[6:8] = ((int.from_bytes(a[6:8], "little") + 1) & 0xFFFF).to_bytes(2, "little")
             a[46:48] = ((int.from_bytes(a[46:48], "little") + 2) & 0xFFFF).to_bytes(2, "little")
             a[64] = (a[64] + 2) & 0xFF
-            n = len(a) // 8
-            for i in range(n):
-                seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | (i & 0x0F)
-                out.append(Frame(now + i * 0.005, 0x1AC60000 | seg << 8 | 0xFC, True, False, None,
-                                 bytes(a[8 * i:8 * i + 8])))
+            st = self._afar_sost
+            st[38:42] = (int.from_bytes(st[38:42], "little") + 2).to_bytes(4, "little")    # Work_Time
+            for typ, arr in ((0xFC, a), (0xFD, st)):
+                n = len(arr) // 8
+                for i in range(n):
+                    seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | (i & 0x0F)
+                    out.append(Frame(now + i * 0.005, 0x1AC60000 | seg << 8 | typ, True, False, None,
+                                     bytes(arr[8 * i:8 * i + 8])))
         if now >= self._bos_next:                # BOS IOK OSN every ~2.2 s
             self._bos_next += 2.2
             b = self._bos
