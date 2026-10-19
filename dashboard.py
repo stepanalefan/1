@@ -455,6 +455,33 @@ class Dashboard(QtWidgets.QWidget):
         grid.setColumnStretch(3, 1)
         lv.addWidget(g)
 
+        g = QtWidgets.QGroupBox("HMP4040 outputs")
+        hg = QtWidgets.QGridLayout(g)
+        hg.setVerticalSpacing(2)
+        for col, text in enumerate(("", "Ch", "Set", "Measured", "Power", "")):
+            lb = QtWidgets.QLabel(text)
+            lb.setStyleSheet(f"color:{C_DIM};")
+            hg.addWidget(lb, 0, col)
+        mono = QtGui.QFont("Consolas")
+        mono.setStyleHint(QtGui.QFont.Monospace)
+        self.hmp_rows = {}
+        for r, ch in enumerate((1, 2, 3, 4), start=1):
+            led = QtWidgets.QLabel("●")
+            led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
+            cells = [QtWidgets.QLabel("—") for _ in range(3)]
+            for c in cells:
+                c.setFont(mono)
+            mode = QtWidgets.QLabel("")
+            mode.setStyleSheet("font-weight:700;")
+            hg.addWidget(led, r, 0)
+            hg.addWidget(QtWidgets.QLabel(f"<b>CH{ch}</b>"), r, 1)
+            for k, c in enumerate(cells):
+                hg.addWidget(c, r, 2 + k)
+            hg.addWidget(mode, r, 5)
+            self.hmp_rows[ch] = (led, *cells, mode)
+        hg.setColumnStretch(3, 1)
+        lv.addWidget(g)
+
         g = QtWidgets.QGroupBox("Test sequence")
         sv = QtWidgets.QVBoxLayout(g)
         top = QtWidgets.QHBoxLayout()
@@ -644,6 +671,7 @@ class Dashboard(QtWidgets.QWidget):
             for name in ("34405A", "Arduino"):
                 self._set_status(name, "ok" if b._scan_ok else "off", b.scan_status.text(),
                                  "scanning" if b._scan_ok and b.run_btn.isChecked() else "")
+            self._refresh_hmp(b)
         smw = getattr(h, "smw", None)
         if smw:
             rf = smw.is_connected and smw.rf_btn.isChecked()
@@ -655,6 +683,31 @@ class Dashboard(QtWidgets.QWidget):
             self._set_status("CAN", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
         self._refresh_volt()
+
+    def _refresh_hmp(self, b):
+        """Per-channel HMP4040 state: LED green = output delivering (channel on + master on)."""
+        for ch, (led, set_l, meas_l, pwr_l, mode_l) in self.hmp_rows.items():
+            st = b.hmp_last_state.get(ch) if b._hmp_ok else None
+            if st is None:
+                led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
+                for lb in (set_l, meas_l, pwr_l):
+                    lb.setText("—")
+                mode_l.setText("")
+                continue
+            vset, iset, on = st
+            live = on and b._hmp_master
+            v, i = b.hmp_last_meas.get(ch, (0.0, 0.0))
+            color = C_OK if live else ("#f0b03e" if on else C_OFF)
+            led.setStyleSheet(f"color:{color};font-size:16px;")
+            set_l.setText(f"{vset:6.3f} V {iset:6.3f} A")
+            meas_l.setText(f"{v:6.3f} V {i:6.3f} A" if live else "—")
+            pwr_l.setText(f"{v * i:6.2f} W" if live else "—")
+            if live and iset > 0 and i >= 0.98 * iset and v < 0.98 * vset:   # current limit reached
+                mode_l.setText("CC")
+                mode_l.setStyleSheet(f"font-weight:700;color:{C_ERR};")
+            else:
+                mode_l.setText("ON" if live else ("armed" if on else "OFF"))
+                mode_l.setStyleSheet("font-weight:700;" + (f"color:{C_OK};" if live else f"color:{C_DIM};"))
 
     # ------------------------------------------------------- constellation
     def update_vsa(self, r: dict):

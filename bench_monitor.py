@@ -841,6 +841,8 @@ class BenchTab(QtCore.QObject):
         self.scan.timing.connect(self._on_scan_timing)
         self.scan.connected.connect(self._on_scan_connected)
         self.scan.stopped.connect(self._on_scan_stopped)
+        self.hmp_last_state = {}   # ch -> (Vset, Iset, on), read by the Main tab
+        self.hmp_last_meas = {}    # ch -> (V, I)
         self.hmp.telemetry.connect(self._on_telemetry)
         self.hmp.state.connect(self._on_hmp_state)
         self.hmp.connected.connect(self._on_hmp_connected)
@@ -1340,10 +1342,12 @@ class BenchTab(QtCore.QObject):
                 self.log.emit(f"HMP4040: {info}", "err")
 
     def _on_hmp_state(self, st: dict):
+        self.hmp_last_state.update(st)
         for ch, (v, i, on) in st.items():
             self.hmp_boxes[ch].set_state(v, i, on)
 
     def _on_telemetry(self, meas: dict, master: bool):
+        self.hmp_last_meas.update(meas)
         for ch, (v, i) in meas.items():
             self.hmp_boxes[ch].set_meas(v, i)
         self._show_master(master)
