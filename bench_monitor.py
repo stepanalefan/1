@@ -535,6 +535,42 @@ class DailyCsv:
             self.day = None
 
 
+class HmpCsv:
+    """hmp_log_YYYY-MM-DD.csv: one row per interval with master state and all 4 channels."""
+    HEADER = ["Time", "Master"] + [f"CH{c}_{k}" for c in HMP_CHANNELS
+                                   for k in ("On", "Vset_V", "Iset_A", "V_V", "I_A", "P_W")]
+
+    def __init__(self, folder: str):
+        self.folder = folder
+        self.f = None
+        self.day = None
+
+    def write(self, t: float, master: bool, state: dict, meas: dict):
+        day = time.strftime("%Y-%m-%d", time.localtime(t))
+        if day != self.day:
+            self.close()
+            path = os.path.join(self.folder, f"hmp_log_{day}.csv")
+            new = not os.path.isfile(path)
+            self.f = open(path, "a", newline="", encoding="utf-8")
+            self.w = csv.writer(self.f)
+            if new:
+                self.w.writerow(self.HEADER)
+            self.day = day
+        row = [time.strftime("%H:%M:%S", time.localtime(t)), int(master)]
+        for c in HMP_CHANNELS:
+            vs, is_, on = state.get(c, (float("nan"), float("nan"), False))
+            v, i = meas.get(c, (float("nan"), float("nan")))
+            row += [int(on), f"{vs:.3f}", f"{is_:.3f}", f"{v:.4f}", f"{i:.4f}", f"{v * i:.3f}"]
+        self.w.writerow(row)
+        self.f.flush()
+
+    def close(self):
+        if self.f:
+            self.f.close()
+            self.f = None
+            self.day = None
+
+
 class ScanWorker(_Worker):
     sample = QtCore.pyqtSignal(int, float, float)        # channel, time, voltage
     scan_done = QtCore.pyqtSignal(float, int)            # seconds, channels
@@ -843,6 +879,8 @@ class BenchTab(QtCore.QObject):
         self.scan.stopped.connect(self._on_scan_stopped)
         self.hmp_last_state = {}   # ch -> (Vset, Iset, on), read by the Main tab
         self.hmp_last_meas = {}    # ch -> (V, I)
+        self.hmp_csv: HmpCsv | None = None
+        self._hmp_next_log = 0.0
         self.hmp.telemetry.connect(self._on_telemetry)
         self.hmp.state.connect(self._on_hmp_state)
         self.hmp.connected.connect(self._on_hmp_connected)
@@ -855,6 +893,7 @@ class BenchTab(QtCore.QObject):
         self._set_scan_connected(False)
         self._set_hmp_connected(False)
         self._on_log_toggled(self.log_chk.isChecked())
+        self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._refresh)
@@ -945,6 +984,15 @@ class BenchTab(QtCore.QObject):
         self.folder_lbl.setWordWrap(True)
         self.folder_lbl.setStyleSheet("color:#8a96a3;font-size:11px;")
         f.addRow(self.log_chk)
+        self.hmp_log_chk = QtWidgets.QCheckBox("Write daily HMP4040 log")
+        self.hmp_log_chk.setToolTip("hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P "
+                                    "of all 4 channels, while the HMP4040 is connected")
+        self.hmp_log_chk.setChecked(True)
+        self.hmp_log_chk.toggled.connect(self._on_hmp_log_toggled)
+        self.hmp_log_int = _spin(0.5, 3600, 1, " s", 1.0)
+        self.hmp_log_int.setToolTip("Time between HMP log rows (the supply is read every 0.5 s)")
+        f.addRow(self.hmp_log_chk)
+        f.addRow("HMP log every", self.hmp_log_int)
         f.addRow(self.folder_btn, self.folder_lbl)
         load_btn = QtWidgets.QPushButton("Load CSV…")
         load_btn.setToolTip("Show an old voltage_log_*.csv in the plot")
@@ -1150,6 +1198,12 @@ class BenchTab(QtCore.QObject):
             self.skip_lbl.setText(f"{skipped} channel(s) named GND skipped" if skipped else "")
         self.scan.submit(lambda: self.scan.set_channels(chans))
 
+    def _on_hmp_log_toggled(self, on):
+        if self.hmp_csv:
+            self.hmp_csv.close()
+        self.hmp_csv = HmpCsv(self.log_folder) if on else None
+        self._hmp_next_log = 0.0
+
     def _on_log_toggled(self, on):
         folder = self.log_folder
         self.scan.submit(lambda: setattr(self.scan, "csv", DailyCsv(folder) if on else None))
@@ -1232,6 +1286,7 @@ class BenchTab(QtCore.QObject):
             self.log_folder = d
             self.folder_lbl.setText(d)
             self._on_log_toggled(self.log_chk.isChecked())
+            self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
 
     def on_hmp_channel(self, ch, v, i, on):
         self.hmp.submit(lambda: self.hmp.set_channel(ch, v, i, on))
@@ -1348,6 +1403,14 @@ class BenchTab(QtCore.QObject):
 
     def _on_telemetry(self, meas: dict, master: bool):
         self.hmp_last_meas.update(meas)
+        now = time.time()
+        if self.hmp_csv and now >= self._hmp_next_log:
+            self._hmp_next_log = now + self.hmp_log_int.value()
+            try:
+                self.hmp_csv.write(now, master, self.hmp_last_state, self.hmp_last_meas)
+            except OSError as e:
+                self.log.emit(f"HMP log stopped: {e}", "err")
+                self.hmp_log_chk.setChecked(False)
         for ch, (v, i) in meas.items():
             self.hmp_boxes[ch].set_meas(v, i)
         self._show_master(master)
@@ -1445,6 +1508,8 @@ class BenchTab(QtCore.QObject):
             time.sleep(0.02)                 # let a pending "power off" job run
         self.scan.shutdown()
         self.hmp.shutdown()
+        if self.hmp_csv:
+            self.hmp_csv.close()
 
 
 # --------------------------------------------------------------------------- #

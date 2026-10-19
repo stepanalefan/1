@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 voltage_log_*.csv
+hmp_log_*.csv
 can_log_*.log
 can_trace_*
 dashboard.json
