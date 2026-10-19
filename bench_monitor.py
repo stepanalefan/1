@@ -27,6 +27,7 @@ Hardware
 Files
 -----
 * channels.txt (next to this script): optional channel names, lines "17=VCC_CORE".
+  Channels named GND are skipped by the range scan.
   Names edited in the table are saved back to it.
 * voltage_log_YYYY-MM-DD.csv: one row per reading, same columns as before
   (time, channel, name, voltage), so old logs can still be loaded.
@@ -115,6 +116,13 @@ def load_channel_names(path: str) -> dict[int, str]:
     except FileNotFoundError:
         pass
     return names
+
+
+SKIP_NAMES = {"GND"}      # channels with these names (any case) are left out of range scans
+
+
+def is_skipped(name: str) -> bool:
+    return name.strip().upper() in SKIP_NAMES
 
 
 def save_channel_names(path: str, names: dict[int, str]):
@@ -913,6 +921,10 @@ class BenchTab(QtCore.QObject):
         self.settle.valueChanged.connect(lambda v: setattr(self.scan, "settle_s", v / 1000))
         f.addRow("Mode", self.mode)
         f.addRow("Channels", rng)
+        self.skip_lbl = QtWidgets.QLabel("")
+        self.skip_lbl.setStyleSheet("color:#8a96a3;")
+        self.skip_lbl.setToolTip("Channels named GND in channels.txt are not polled in range mode")
+        f.addRow("", self.skip_lbl)
         f.addRow("Manual ch.", self.manual_ch)
         f.addRow("Settle delay", self.settle)
         f.addRow(self.run_btn)
@@ -1066,6 +1078,7 @@ class BenchTab(QtCore.QObject):
                     it.setFont(mono)
                 self.table.setItem(ch, col, it)
             self.table.item(ch, 0).setForeground(QtGui.QBrush(_ch_color(ch)))
+            self._style_row(ch)
         hdr = self.table.horizontalHeader()
         for col, width in ((0, 40), (2, 72), (3, 74), (4, 74), (5, 74)):
             self.table.setColumnWidth(col, width)
@@ -1130,7 +1143,9 @@ class BenchTab(QtCore.QObject):
             chans = [self.manual_ch.value()]
         else:
             a, b = sorted((self.first_ch.value(), self.last_ch.value()))
-            chans = list(range(a, b + 1))
+            chans = [ch for ch in range(a, b + 1) if not is_skipped(self.names[ch])]
+            skipped = (b - a + 1) - len(chans)
+            self.skip_lbl.setText(f"{skipped} channel(s) named GND skipped" if skipped else "")
         self.scan.submit(lambda: self.scan.set_channels(chans))
 
     def _on_log_toggled(self, on):
@@ -1350,12 +1365,23 @@ class BenchTab(QtCore.QObject):
         if name == self.names[ch]:
             return
         self.names[ch] = name
+        self._style_row(ch)
+        self._push_channels()
         names = dict(self.names)
         self.scan.submit(lambda: setattr(self.scan, "names", names))
         try:
             save_channel_names(self.names_file, self.names)
         except OSError as e:
             self.log.emit(f"Could not save {self.names_file}: {e}", "err")
+
+    def _style_row(self, ch: int):
+        """Grey out channels that the range scan skips."""
+        grey = is_skipped(self.names[ch])
+        for col in range(1, 6):
+            it = self.table.item(ch, col)
+            if it is not None:
+                it.setForeground(QtGui.QBrush(QtGui.QColor("#666")) if grey else QtGui.QBrush())
+        self.table.item(ch, 1).setToolTip("Skipped by the range scan (named GND)" if grey else "")
 
     def _on_cell_double_clicked(self, row, col):
         if col != 1:
