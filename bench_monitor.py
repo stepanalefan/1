@@ -66,7 +66,8 @@ except ImportError:  # pragma: no cover
 #  Channel map (must match the Arduino sketch)                                 #
 # --------------------------------------------------------------------------- #
 N_CHANNELS = 176
-DIVIDER_RATIO = 133.0 / 33.0
+R_TOP, R_BOTTOM = 133.0, 33.0   # kOhm; mux reads the voltage across R_BOTTOM
+DIVIDER_RATIO = (R_TOP + R_BOTTOM) / R_BOTTOM   # = 5.03
 GROUPS = [  # first, last, label
     (0, 143, "0…5 V"),
     (144, 159, "−5…0 V"),
@@ -85,7 +86,9 @@ def group_of(ch: int) -> int:
 
 
 def convert(ch: int, raw: float) -> float:
-    """Multimeter reading -> channel voltage (same as the original program)."""
+    """Multimeter reading -> real channel voltage.
+    Mux 10 (ch 144-159): inverting op-amp, -3 V in gives +3 V at the mux.
+    Mux 11 (ch 160-175): 133k/33k divider, Vin = Vmux * (133+33)/33."""
     g = group_of(ch)
     if g == 1:
         return -raw
