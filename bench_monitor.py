@@ -219,6 +219,7 @@ class MuxScanner:
             raise RuntimeError("pyserial is not installed:  pip install pyserial")
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
+        self.t_switch = self.t_read = 0.0      # accumulated per scan, for the timing readout
         self.ard = serial.Serial(arduino_port, 115200, timeout=1.0, write_timeout=1.0)
         try:
             time.sleep(2.0)                    # most Arduinos reboot when the port opens
@@ -253,10 +254,15 @@ class MuxScanner:
             raise IOError(f"Arduino did not confirm channel {ch} (answer: {resp!r})")
 
     def measure(self, ch: int, settle_s: float = 0.0) -> float:
+        t0 = time.perf_counter()
         self.select(ch)
         if settle_s > 0:
             time.sleep(settle_s)
-        return float(self.dmm.query("READ?"))
+        t1 = time.perf_counter()
+        v = float(self.dmm.query("READ?"))
+        self.t_switch += t1 - t0
+        self.t_read += time.perf_counter() - t1
+        return v
 
     def close(self):
         for dev in (getattr(self, "ard", None), getattr(self, "dmm", None)):
@@ -524,6 +530,7 @@ class DailyCsv:
 class ScanWorker(_Worker):
     sample = QtCore.pyqtSignal(int, float, float)        # channel, time, voltage
     scan_done = QtCore.pyqtSignal(float, int)            # seconds, channels
+    timing = QtCore.pyqtSignal(float, float)             # s per channel: Arduino switch, DMM read
     connected = QtCore.pyqtSignal(bool, str)
     stopped = QtCore.pyqtSignal(str)                     # reason ("" = by user)
 
@@ -566,6 +573,10 @@ class ScanWorker(_Worker):
         if self._idx == 0:
             if self._scan_t0 is not None and len(self.channels) > 1:
                 self.scan_done.emit(time.perf_counter() - self._scan_t0, len(self.channels))
+                if hasattr(self.dev, "t_switch"):
+                    n = len(self.channels)
+                    self.timing.emit(self.dev.t_switch / n, self.dev.t_read / n)
+                    self.dev.t_switch = self.dev.t_read = 0.0
             self._scan_t0 = time.perf_counter()
         ch = self.channels[self._idx]
         self._idx += 1
@@ -819,6 +830,7 @@ class BenchTab(QtCore.QObject):
             w.log.connect(self.log)
         self.scan.sample.connect(self._on_sample)
         self.scan.scan_done.connect(self._on_scan_done)
+        self.scan.timing.connect(self._on_scan_timing)
         self.scan.connected.connect(self._on_scan_connected)
         self.scan.stopped.connect(self._on_scan_stopped)
         self.hmp.telemetry.connect(self._on_telemetry)
@@ -888,7 +900,7 @@ class BenchTab(QtCore.QObject):
         self.settle = QtWidgets.QSpinBox()
         self.settle.setRange(0, 5000)
         self.settle.setSuffix(" ms")
-        self.settle.setToolTip("Extra wait after switching, on top of the 5 ms in the Arduino sketch")
+        self.settle.setToolTip("Extra wait after switching, on top of the 1 ms in the Arduino sketch")
         self.run_btn = QtWidgets.QPushButton("▶ Start scan")
         self.run_btn.setCheckable(True)
         self.run_btn.toggled.connect(self.on_run)
@@ -1276,7 +1288,12 @@ class BenchTab(QtCore.QObject):
         self.cur_lbl.setText(f"Channel {ch}  ·  {self.names[ch]}  ·  {v:.4f} V")
 
     def _on_scan_done(self, secs, n):
-        self.scan_info.setText(f"Last scan: {n} ch in {secs:.1f} s  ({n / secs:.1f} ch/s)")
+        self._scan_text = f"Last scan: {n} ch in {secs:.1f} s  ({n / secs:.1f} ch/s)"
+        self.scan_info.setText(self._scan_text)
+
+    def _on_scan_timing(self, sw, rd):
+        self.scan_info.setText(f"{getattr(self, '_scan_text', '')}\n"
+                               f"per channel: switch {sw * 1000:.1f} ms · DMM {rd * 1000:.1f} ms")
 
     def _on_scan_connected(self, ok, info):
         self.scan_conn_btn.setEnabled(True)
