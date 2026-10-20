@@ -122,6 +122,11 @@ try:  # Main (dashboard) tab
 except Exception:  # pragma: no cover
     dashboard = None
 
+try:  # Logs tab (all CSV logs on one plot)
+    import log_viewer
+except Exception:  # pragma: no cover
+    log_viewer = None
+
 try:  # Telemetry tab (decodes unit arrays received on the CAN tab)
     import telemetry
 except Exception:  # pragma: no cover
@@ -1588,6 +1593,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(page(self.telem), "Telemetry")
         if self.telem and self.dash:
             self.telem.array_listeners.append(self.dash.on_array)
+        self.logs = None
+        if log_viewer:
+            self.logs = log_viewer.LogsTab(
+                folder_fn=(lambda: self.bench.log_folder) if self.bench else None)
+            self.tabs.addTab(self.logs, "Logs")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([420, 1140])
 

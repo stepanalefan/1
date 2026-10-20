@@ -29,7 +29,7 @@ Files
 * channels.txt (next to this script): optional channel names, lines "17=VCC_CORE".
   Channels named GND are skipped by the range scan.
   Names edited in the table are saved back to it.
-* voltage_log_YYYY-MM-DD.csv: one row per reading, same columns as before
+* voltage_log_YYYY-MM-DD.csv: one row per reading, columns Time, Channel, Voltage
   (time, channel, name, voltage), so old logs can still be loaded.
 
 Install:  pip install PyQt5 pyqtgraph numpy pyvisa pyvisa-py pyserial
@@ -503,8 +503,9 @@ class _Worker(QtCore.QThread):
 
 
 class DailyCsv:
-    """voltage_log_YYYY-MM-DD.csv, same columns as the original program."""
-    HEADER = ["Время", "Номер_канала", "Название_канала", "Напряжение_В"]
+    """voltage_log_YYYY-MM-DD.csv: Time, Channel, Voltage (channel names are in channels.txt).
+    A same-day file in the old 4-column format is left alone; new rows go to ..._2.csv."""
+    HEADER = ["Time", "Channel", "Voltage"]
 
     def __init__(self, folder: str):
         self.folder = folder
@@ -512,18 +513,30 @@ class DailyCsv:
         self.day = None
         self.last_flush = 0.0
 
-    def write(self, t: float, ch: int, name: str, v: float):
+    def _path(self, day: str) -> str:
+        want = ",".join(self.HEADER)
+        for k in range(1, 100):
+            path = os.path.join(self.folder, f"voltage_log_{day}{'' if k == 1 else f'_{k}'}.csv")
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    if f.readline().strip() == want:
+                        return path
+            except FileNotFoundError:
+                return path
+        return path
+
+    def write(self, t: float, ch: int, v: float):
         day = time.strftime("%Y-%m-%d", time.localtime(t))
         if day != self.day:
             self.close()
-            path = os.path.join(self.folder, f"voltage_log_{day}.csv")
+            path = self._path(day)
             new = not os.path.isfile(path)
             self.f = open(path, "a", newline="", encoding="utf-8")
             self.w = csv.writer(self.f)
             if new:
                 self.w.writerow(self.HEADER)
             self.day = day
-        self.w.writerow([time.strftime("%H:%M:%S", time.localtime(t)), ch, name, f"{v:.6f}"])
+        self.w.writerow([time.strftime("%H:%M:%S", time.localtime(t)), ch, f"{v:.6f}"])
         if t - self.last_flush > 1.0:
             self.f.flush()
             self.last_flush = t
@@ -628,7 +641,7 @@ class ScanWorker(_Worker):
         v = convert(ch, raw)
         t = time.time()
         if self.csv:
-            self.csv.write(t, ch, self.names.get(ch, str(ch)), v)
+            self.csv.write(t, ch, v)
             self._unflushed = True
         self.sample.emit(ch, t, v)
         return True
@@ -1327,14 +1340,14 @@ class BenchTab(QtCore.QObject):
                 rows = csv.reader(f)
                 next(rows, None)
                 for row in rows:
-                    if len(row) < 4 or not row[1].strip().isdigit():
+                    if len(row) < 3 or not row[1].strip().isdigit():
                         continue
                     ch = int(row[1])
                     if not 0 <= ch < N_CHANNELS:
                         continue
                     hh, mm, ss = (int(x) for x in row[0].split(":"))
                     t = _dt.datetime.combine(day, _dt.time(hh, mm, ss)).timestamp()
-                    self._add(ch, t, float(row[3]))
+                    self._add(ch, t, float(row[-1]))   # old files: 4 columns, new: 3
                     n += 1
         except Exception as e:
             self.log.emit(f"Could not load {path}: {type(e).__name__}: {e}", "err")
