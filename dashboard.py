@@ -16,6 +16,7 @@ dashboard.py
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -40,6 +41,40 @@ def _app_dir() -> str:
 
 
 STORE_FILE = os.path.join(_app_dir(), "dashboard.json")
+
+
+class TelemetryCsv:
+    """telemetry_log_YYYY-MM-DD.csv next to the program: one row per watched value update.
+    Long format, so adding or removing watch rows never breaks the file's columns."""
+    HEADER = ["Time", "Unit", "Array", "Designation", "Byte", "Value", "Meaning", "Warning"]
+
+    def __init__(self):
+        self.f = None
+        self.day = None
+        self.last_flush = 0.0
+
+    def write(self, ts, unit, arr, f, value, meaning, warn):
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        if day != self.day:
+            self.close()
+            path = os.path.join(_app_dir(), f"telemetry_log_{day}.csv")
+            new = not os.path.isfile(path)
+            self.f = open(path, "a", newline="", encoding="utf-8")
+            self.w = csv.writer(self.f)
+            if new:
+                self.w.writerow(self.HEADER)
+            self.day = day
+        stamp = time.strftime("%H:%M:%S", time.localtime(ts)) + f".{int(ts * 1000) % 1000:03d}"
+        self.w.writerow([stamp, unit, arr, f.name, f.byte, value, meaning, int(bool(warn))])
+        if ts - self.last_flush > 1.0:
+            self.f.flush()
+            self.last_flush = ts
+
+    def close(self):
+        if self.f:
+            self.f.close()
+            self.f = None
+            self.day = None
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
 STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
                "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9"}
@@ -414,6 +449,8 @@ class Dashboard(QtWidgets.QWidget):
         self.pc, self.stack, self.pending, self.run_steps = 0, [], None, []
         self.wait_until = 0.0
         self.watch_rows: list = []            # (unit, type, Field)
+        self.tlog: TelemetryCsv | None = None
+        self._tlog_last: dict = {}             # (unit, type, Field) -> last logged value
         self.volt_curves = {}
         self._range = None
 
@@ -614,6 +651,17 @@ class Dashboard(QtWidgets.QWidget):
         pick.addWidget(add_b)
         pick.addWidget(rm_b)
         pick.addStretch(1)
+        self.tlog_chk = QtWidgets.QCheckBox("Log to CSV")
+        self.tlog_chk.setToolTip("telemetry_log_YYYY-MM-DD.csv next to the program:\n"
+                                 "one row per update of each watched value")
+        self.tlog_chg = QtWidgets.QCheckBox("only changes")
+        self.tlog_chg.setToolTip("Write a row only when a value differs from the last logged one")
+        self.tlog_chk.setChecked(self.data.get("tlog", False))
+        self.tlog_chg.setChecked(self.data.get("tlog_changes", True))
+        self.tlog_chk.toggled.connect(self._on_tlog_toggled)
+        self.tlog_chg.toggled.connect(lambda *_: self.save())
+        pick.addWidget(self.tlog_chk)
+        pick.addWidget(self.tlog_chg)
         wv.addLayout(pick)
         self.watch = QtWidgets.QTableWidget(0, 5)
         self.watch.setHorizontalHeaderLabels(["Source", "Designation", "Value", "Meaning", "Updated"])
@@ -635,6 +683,7 @@ class Dashboard(QtWidgets.QWidget):
             if f is not None:
                 self._add_watch_row(unit, t, f)
         self.reload()
+        self._on_tlog_toggled(self.tlog_chk.isChecked(), save=False)
 
     # ------------------------------------------------------------- helpers
     def log(self, text, level="info"):
@@ -643,6 +692,8 @@ class Dashboard(QtWidgets.QWidget):
     def save(self):
         self.data["watch"] = [[u, t, f.byte, f.name] for u, t, f in self.watch_rows]
         self.data["volt_channels"] = self.volt_ch.text()
+        self.data["tlog"] = self.tlog_chk.isChecked()
+        self.data["tlog_changes"] = self.tlog_chg.isChecked()
         try:
             tmp = STORE_FILE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -821,6 +872,15 @@ class Dashboard(QtWidgets.QWidget):
             del self.watch_rows[r]
         self.save()
 
+    def _on_tlog_toggled(self, on, save=True):
+        if self.tlog:
+            self.tlog.close()
+        self.tlog = TelemetryCsv() if on else None
+        self._tlog_last.clear()
+        if save:
+            self.save()
+            self.log("Telemetry watch logging " + ("ON (telemetry_log_*.csv)" if on else "OFF"))
+
     def on_array(self, unit, t, data, ts):
         """Listener for TelemetryTab.array_listeners."""
         stamp = time.strftime("%H:%M:%S", time.localtime(ts))
@@ -837,6 +897,17 @@ class Dashboard(QtWidgets.QWidget):
             mi.setText(text)
             mi.setForeground(QtGui.QColor(C_ERR) if warn else QtGui.QBrush())
             self.watch.item(r, 4).setText(stamp)
+            if self.tlog:
+                key = (u, tt, f)
+                if self.tlog_chg.isChecked() and self._tlog_last.get(key) == v:
+                    continue
+                self._tlog_last[key] = v
+                try:
+                    self.tlog.write(ts, u, self.watch.item(r, 0).text().split(" · ", 1)[-1],
+                                    f, f.value_str(v), text, warn)
+                except OSError as e:
+                    self.log(f"Telemetry log stopped: {e}", "err")
+                    self.tlog_chk.setChecked(False)
 
     # ----------------------------------------------------------- sequences
     @property
@@ -1218,5 +1289,7 @@ class Dashboard(QtWidgets.QWidget):
             self._await_meas = None
 
     def shutdown(self):
+        if self.tlog:
+            self.tlog.close()
         if self.running:
             self.stop("stopped (application closed)", "warn")
