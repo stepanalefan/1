@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
+import math
 import os
 import queue
 import re
@@ -261,6 +262,21 @@ class MuxScanner:
         if resp != f"READY:{ch}":
             raise IOError(f"Arduino did not confirm channel {ch} (answer: {resp!r})")
 
+    def ow(self, cmd: str, timeout: float = 4.0) -> list[str]:
+        """1-Wire command (OW:CONV / OW:READ). Returns the reply lines up to OW:CONV:.. / OW:END:.."""
+        self.ard.reset_input_buffer()
+        self.ard.write(f"{cmd}\n".encode())
+        lines, deadline = [], time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.ard.readline().decode(errors="ignore").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if line.startswith(("OW:END", "OW:CONV")):
+                return lines
+        raise IOError(f"Arduino did not answer {cmd} - upload the sketch with 1-Wire support "
+                      f"(needs the OneWire library)")
+
     def measure(self, ch: int, settle_s: float = 0.0) -> float:
         t0 = time.perf_counter()
         self.select(ch)
@@ -295,6 +311,24 @@ class DemoScanner:
         if g == 2:
             return 16.0 / DIVIDER_RATIO + self.rng.normal(0, 0.005)  # displayed as ~16 V
         return self.base[ch] + self.rng.normal(0, 0.004)
+
+    # three simulated DS18B20 (one on parasitic power); same reply format as the sketch
+    _OW = (("28FF4A1B9316035E", 23.0, 0), ("28AA0C77511901A3", 31.5, 1), ("2861640A1C8E4F12", -4.0, 1))
+
+    def ow(self, cmd: str) -> list[str]:
+        from onewire_temp import crc8          # lazy: only needed in demo mode
+        time.sleep(0.02)
+        if cmd == "OW:CONV":
+            return ["OW:CONV:OK"]
+        out = []
+        for rom, base, ext in self._OW:
+            rb = bytearray.fromhex(rom)
+            rb[7] = crc8(rb[:7])
+            raw = int(round((base + self.rng.normal(0, 0.15) + 2 * math.sin(time.time() / 60)) * 16))
+            sp = bytearray(raw.to_bytes(2, "little", signed=True) + bytes([0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10]))
+            sp.append(crc8(sp))
+            out.append(f"OW:DEV:{rb.hex().upper()}:{sp.hex().upper()}:{ext}")
+        return out + [f"OW:END:{len(out)}"]
 
     def close(self):
         pass
@@ -880,6 +914,7 @@ class BenchTab(QtCore.QObject):
         self._hmp_ok = False
         self._hmp_master = False
         self.log_folder = script_dir()
+        self.folder_listeners = []   # called after the log folder changes (1-Wire log)
 
         self.scan = ScanWorker()
         self.hmp = HmpWorker()
@@ -1300,6 +1335,8 @@ class BenchTab(QtCore.QObject):
             self.folder_lbl.setText(d)
             self._on_log_toggled(self.log_chk.isChecked())
             self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
+            for fn in self.folder_listeners:
+                fn()
 
     def on_hmp_channel(self, ch, v, i, on):
         self.hmp.submit(lambda: self.hmp.set_channel(ch, v, i, on))

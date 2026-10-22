@@ -519,6 +519,13 @@ class Dashboard(QtWidgets.QWidget):
         hg.setColumnStretch(3, 1)
         lv.addWidget(g)
 
+        self.temp_box = QtWidgets.QGroupBox("Temperatures (1-Wire)")
+        self.temp_grid = QtWidgets.QGridLayout(self.temp_box)
+        self.temp_grid.setVerticalSpacing(2)
+        self.temp_rows: dict = {}          # rom -> (led, name, value)
+        self.temp_box.hide()               # shown once a sensor has been seen
+        lv.addWidget(self.temp_box)
+
         g = QtWidgets.QGroupBox("Test sequence")
         sv = QtWidgets.QVBoxLayout(g)
         top = QtWidgets.QHBoxLayout()
@@ -723,6 +730,9 @@ class Dashboard(QtWidgets.QWidget):
                 self._set_status(name, "ok" if b._scan_ok else "off", b.scan_status.text(),
                                  "scanning" if b._scan_ok and b.run_btn.isChecked() else "")
             self._refresh_hmp(b)
+        tt = getattr(h, "temps", None)
+        if tt:
+            self._refresh_temps(tt)
         smw = getattr(h, "smw", None)
         if smw:
             rf = smw.is_connected and smw.rf_btn.isChecked()
@@ -734,6 +744,43 @@ class Dashboard(QtWidgets.QWidget):
             self._set_status("CAN", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
         self._refresh_volt()
+
+    def _refresh_temps(self, tt):
+        """Name + temperature of every 1-Wire sensor; red = error, grey = not found in the last poll."""
+        if list(self.temp_rows) != sorted(tt.readings):
+            for w in (x for row in self.temp_rows.values() for x in row):
+                w.deleteLater()
+            self.temp_rows = {}
+            mono = QtGui.QFont("Consolas")
+            mono.setStyleHint(QtGui.QFont.Monospace)
+            for k, rom in enumerate(sorted(tt.readings)):
+                r, c0 = k // 2, (k % 2) * 4            # two sensors per row
+                led = QtWidgets.QLabel("●")
+                name = QtWidgets.QLabel()
+                val = QtWidgets.QLabel()
+                val.setFont(mono)
+                val.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                self.temp_grid.addWidget(led, r, c0)
+                self.temp_grid.addWidget(name, r, c0 + 1)
+                self.temp_grid.addWidget(val, r, c0 + 2)
+                self.temp_rows[rom] = (led, name, val)
+            self.temp_grid.setColumnStretch(1, 1)
+            self.temp_grid.setColumnStretch(5, 1)
+            self.temp_grid.setColumnMinimumWidth(3, 14)
+            self.temp_box.setVisible(bool(self.temp_rows))
+        for rom, (led, name, val) in self.temp_rows.items():
+            d = tt.readings[rom]
+            name.setText(f"<b>{tt.names.get(rom) or 'sensor ' + rom[-4:]}</b>")
+            name.setToolTip(f"ROM {rom}\n{d['status'] if not d['missing'] else 'not found in last poll'}")
+            if d["missing"]:
+                color, text = C_OFF, "missing"
+            elif not d["valid"]:
+                color, text = C_ERR, "error"
+            else:
+                color, text = C_OK, f"{d['temp']:7.2f} °C"
+            led.setStyleSheet(f"color:{color};font-size:16px;")
+            val.setText(text)
+            val.setStyleSheet("" if d["valid"] else f"color:{color};")
 
     def _refresh_hmp(self, b):
         """Per-channel HMP4040 state: LED green = output delivering (channel on + master on)."""

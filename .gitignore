@@ -10,3 +10,4 @@ dashboard.json.tmp
 build/
 dist/
 *.spec
+temperature_log_*.csv

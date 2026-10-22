@@ -2,6 +2,15 @@
 // ПОЛНЫЙ СКЕТЧ УПРАВЛЕНИЯ КОММУТАТОРОМ 176 КАНАЛОВ ДЛЯ БОСС v3.0
 // =========================================================================
 
+// Датчики температуры 1-Wire (DS18B20 и др.) на A3, подтяжка 4,7 кОм к +5 В,
+// паразитное питание. Нужна библиотека OneWire (Paul Stoffregen):
+// Скетч -> Подключить библиотеку -> Управлять библиотеками -> "OneWire" -> Установить
+#include <OneWire.h>
+const int pin_OW = A3;
+OneWire ow(pin_OW);
+unsigned long convStart = 0;    // момент запуска преобразования температуры
+bool convPending = false;
+
 // Пины адресной шины (подключены параллельно ко всем 11 чипам)
 const int pin_S0 = 2;
 const int pin_S1 = 3;
@@ -40,7 +49,13 @@ void loop() {
     inputString.trim(); // Очищаем строку от мусора и перевода строки
 
     // Проверяем формат команды, например: "SET:0" или "SET:175"
-    if (inputString.startsWith("SET:")) {
+    if (inputString == "OW:CONV") {
+      owConvert();
+    }
+    else if (inputString == "OW:READ") {
+      owRead();
+    }
+    else if (inputString.startsWith("SET:")) {
       int globalChannel = inputString.substring(4).toInt();
       
       // Вызываем функцию переключения
@@ -112,4 +127,69 @@ void allChipsOff() {
   for (int i = 0; i < 11; i++) {
     digitalWrite(pin_EN[i], HIGH);
   }
+}
+
+// =========================================================================
+// 1-Wire: запуск преобразования у всех датчиков сразу
+// Ответ: "OW:CONV:OK" или "OW:CONV:NODEV" (на шине никто не ответил)
+// =========================================================================
+void owConvert() {
+  if (!ow.reset()) {
+    Serial.println("OW:CONV:NODEV");
+    return;
+  }
+  ow.skip();             // команда всем датчикам (Skip ROM)
+  // power = 1: после команды пин остаётся в HIGH ("сильная" подтяжка) -
+  // при паразитном питании датчики берут ток на преобразование с линии данных.
+  // Коммутатор (SET:) можно переключать во время преобразования - шину не трогаем.
+  ow.write(0x44, 1);
+  convStart = millis();
+  convPending = true;
+  Serial.println("OW:CONV:OK");
+}
+
+void printHex(byte b) {
+  if (b < 16) Serial.print('0');
+  Serial.print(b, HEX);
+}
+
+// =========================================================================
+// 1-Wire: поиск всех датчиков и чтение их памяти (scratchpad)
+// Ответ: по строке на датчик "OW:DEV:<ROM 8 байт>:<scratchpad 9 байт>:<питание>",
+// затем "OW:END:<кол-во>". Питание: 1 = внешнее, 0 = паразитное.
+// CRC и температуру считает программа на ПК.
+// =========================================================================
+void owRead() {
+  if (convPending) {                      // DS18B20 12 бит: до 750 мс
+    unsigned long el = millis() - convStart;
+    if (el < 750) delay(750 - el);
+    convPending = false;
+  }
+  ow.depower();                           // снимаем сильную подтяжку
+
+  byte addr[8];
+  byte sp[9];
+  int n = 0;
+  ow.reset_search();
+  while (n < 32 && ow.search(addr)) {
+    n++;
+    ow.reset();
+    ow.select(addr);
+    ow.write(0xBE);                       // Read Scratchpad
+    for (int i = 0; i < 9; i++) sp[i] = ow.read();
+
+    ow.reset();
+    ow.select(addr);
+    ow.write(0xB4);                       // Read Power Supply
+    byte ext = ow.read_bit();             // 0 = паразитное питание
+
+    Serial.print("OW:DEV:");
+    for (int i = 0; i < 8; i++) printHex(addr[i]);
+    Serial.print(':');
+    for (int i = 0; i < 9; i++) printHex(sp[i]);
+    Serial.print(':');
+    Serial.println(ext);
+  }
+  Serial.print("OW:END:");
+  Serial.println(n);
 }

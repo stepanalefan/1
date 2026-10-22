@@ -122,6 +122,11 @@ try:  # Main (dashboard) tab
 except Exception:  # pragma: no cover
     dashboard = None
 
+try:  # 1-Wire temperature tab (sensors on the bench Arduino, pin A3)
+    import onewire_temp
+except Exception:  # pragma: no cover
+    onewire_temp = None
+
 try:  # Logs tab (all CSV logs on one plot)
     import log_viewer
 except Exception:  # pragma: no cover
@@ -1587,6 +1592,11 @@ class MainWindow(QtWidgets.QMainWindow):
             bench_split.addWidget(page(self.bench.page))
             bench_split.setSizes([390, 1170])
             self.tabs.addTab(bench_split, "Bench: 176 ch + HMP4040")
+        self.temps = None
+        if onewire_temp and self.bench:
+            self.temps = onewire_temp.TempTab(self.bench)
+            self.bench.folder_listeners.append(self.temps.folder_changed)
+            self.tabs.addTab(page(self.temps), "1-Wire Temp")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN (CANable)")
         if self.telem:
@@ -2232,6 +2242,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         if self.dash:
             self.dash.shutdown()
+        if self.temps:
+            self.temps.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()
