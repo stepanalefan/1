@@ -1,10 +1,11 @@
 """
-1-Wire temperature sensors (DS18B20 / DS18S20 / DS1822) on the bench Arduino, pin A3.
+1-Wire temperature sensors (DS18B20 / DS18S20 / DS1822) on the slave Arduino,
+three buses on pins A3, A4, A5.
 
-The Arduino is the one on the Bench tab (same USB link as the multiplexer); see the sketch:
-  OW:CONV  -> starts a conversion on all sensors, strong pull-up for parasitic power
-  OW:READ  -> one line per sensor "OW:DEV:<ROM 8 bytes>:<scratchpad 9 bytes>:<1 ext / 0 parasitic>",
-              then "OW:END:<n>"
+The slave is reached through the master Arduino on the Bench tab (one USB link); see the sketches:
+  OW:CONV  -> starts a conversion on all buses, strong pull-up for parasitic power
+  OW:READ  -> one line per sensor "OW:DEV:<bus>:<ROM 8 bytes>:<scratchpad 9 bytes>:<1 ext / 0 parasitic>",
+              then "OW:END:<n>"  (lines without <bus> from the old single-bus sketch are accepted too)
 CRCs, family, resolution and temperature are worked out here from the raw bytes.
 
 Files next to the program / in the bench log folder:
@@ -21,6 +22,7 @@ import time
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 FAMILIES = {0x28: "DS18B20", 0x22: "DS1822", 0x10: "DS18S20", 0x42: "DS28EA00", 0x3B: "MAX31850"}
+BUS_PINS = {1: "A3", 2: "A4", 3: "A5"}
 CONV_WAIT_MS = 800          # DS18B20 at 12 bit needs up to 750 ms
 C_OK, C_WARN, C_ERR, C_DIM = "#4fd18b", "#f0b03e", "#ff6b6b", "#8a96a3"
 
@@ -112,7 +114,7 @@ def save_names(names: dict[str, str]):
 class TempCsv:
     """temperature_log_YYYY-MM-DD.csv, one row per sensor per poll."""
     HEADER = ["Time", "ROM", "Name", "Temperature_C", "ROM_CRC_OK", "Data_CRC_OK", "Power", "Status",
-              "Scratchpad"]
+              "Scratchpad", "Bus"]
 
     def __init__(self, folder: str):
         self.folder = folder
@@ -144,7 +146,7 @@ class TempCsv:
 
 class TempTab(QtWidgets.QWidget):
     """1-Wire sensor table. `readings` (rom -> dict) is read by the Main tab."""
-    COLS = ["Name", "Temperature", "Status", "Model", "Unique ID (ROM)", "ROM CRC", "Scratchpad",
+    COLS = ["Name", "Temperature", "Status", "Bus", "Model", "Unique ID (ROM)", "ROM CRC", "Scratchpad",
             "Data CRC", "Resolution", "Power", "Min", "Max", "Updated"]
     _result = QtCore.pyqtSignal(object, float)     # list of decoded dicts, time
     _conv = QtCore.pyqtSignal(str)
@@ -163,7 +165,8 @@ class TempTab(QtWidgets.QWidget):
         self._failed.connect(self._on_failed)
         self._build()
         self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self.poll)
+        self.timer.timeout.connect(lambda: self.poll(manual=False))
+        self._backoff_until = 0.0     # automatic polls pause after the slave stopped answering
         self._apply_interval()
         self._on_log_toggled(self.log_chk.isChecked())
 
@@ -173,7 +176,7 @@ class TempTab(QtWidgets.QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         top = QtWidgets.QHBoxLayout()
         self.poll_btn = QtWidgets.QPushButton("⟳ Poll now")
-        self.poll_btn.clicked.connect(self.poll)
+        self.poll_btn.clicked.connect(lambda: self.poll(manual=True))
         self.auto_chk = QtWidgets.QCheckBox("Poll every")
         self.auto_chk.setChecked(True)
         self.auto_chk.toggled.connect(self._apply_interval)
@@ -192,7 +195,7 @@ class TempTab(QtWidgets.QWidget):
             top.addWidget(w)
         top.addStretch(1)
         v.addLayout(top)
-        self.status = QtWidgets.QLabel("Connect the Arduino on the Bench tab (sensors on pin A3).")
+        self.status = QtWidgets.QLabel("Connect the Arduino on the Bench tab (sensors on the slave Arduino, A3/A4/A5).")
         self.status.setStyleSheet(f"color:{C_DIM};")
         v.addWidget(self.status)
 
@@ -211,7 +214,7 @@ class TempTab(QtWidgets.QWidget):
         self.table.itemChanged.connect(self._on_item_changed)
         v.addWidget(self.table, 1)
         note = QtWidgets.QLabel("Unique ID = 64-bit ROM in bus order: family code, 48-bit serial, CRC.  "
-                                "Sensors are polled through the Bench Arduino; voltage scanning keeps running.")
+                                "Sensors are read through the master Arduino on the Bench tab; voltage scanning keeps running.")
         note.setStyleSheet(f"color:{C_DIM};font-size:11px;")
         v.addWidget(note)
 
@@ -229,9 +232,11 @@ class TempTab(QtWidgets.QWidget):
         self._on_log_toggled(self.log_chk.isChecked())
 
     # ---------------------------------------------------------------- polling
-    def poll(self):
+    def poll(self, manual=True):
         if self.busy_since and time.monotonic() - self.busy_since < 10:
             return
+        if not manual and time.monotonic() < self._backoff_until:
+            return          # each failed poll blocks the master ~1.5 s, which would slow the voltage scan
         scan = self.bench.scan
         if scan.dev is None or not hasattr(scan.dev, "ow"):
             self.status.setText("Arduino not connected - connect it on the Bench tab.")
@@ -247,9 +252,9 @@ class TempTab(QtWidgets.QWidget):
         scan.submit(conv)
 
     def _on_conv(self, answer):
-        if answer != "OW:CONV:OK":
+        if not answer.startswith("OW:CONV:OK"):
             self._on_result([], time.time())       # nothing on the bus: everything is missing
-            self.status.setText("No 1-Wire sensor answered (check wiring, pull-up 4.7 kΩ to +5 V on A3).")
+            self.status.setText("No 1-Wire sensor answered (check wiring, 4.7 kΩ pull-up to +5 V on A3/A4/A5 of the slave).")
             return
         QtCore.QTimer.singleShot(CONV_WAIT_MS, self._read)
 
@@ -264,8 +269,12 @@ class TempTab(QtWidgets.QWidget):
                 found = []
                 for line in scan.dev.ow("OW:READ"):
                     p = line.split(":")
-                    if p[:2] == ["OW", "DEV"] and len(p) == 5 and len(p[2]) == 16 and len(p[3]) == 18:
-                        found.append(decode(p[2], p[3], p[4]))
+                    if p[:2] == ["OW", "DEV"] and len(p) == 5:          # old single-bus sketch
+                        p = p[:2] + ["1"] + p[2:]
+                    if p[:2] == ["OW", "DEV"] and len(p) == 6 and len(p[3]) == 16 and len(p[4]) == 18:
+                        d = decode(p[3], p[4], p[5])
+                        d["bus"] = BUS_PINS.get(int(p[2]), p[2]) if p[2].isdigit() else p[2]
+                        found.append(d)
                 self._result.emit(found, time.time())
             except Exception as e:
                 self._failed.emit(f"{type(e).__name__}: {e}")
@@ -273,8 +282,9 @@ class TempTab(QtWidgets.QWidget):
 
     def _on_failed(self, msg):
         self.busy_since = None
+        self._backoff_until = time.monotonic() + 60
         self.poll_btn.setEnabled(True)
-        self.status.setText(f"1-Wire poll failed: {msg}")
+        self.status.setText(f"1-Wire poll failed: {msg}  (automatic polling retries in 60 s)")
         self.status.setStyleSheet(f"color:{C_ERR};")
 
     def _on_result(self, found: list, ts: float):
@@ -309,11 +319,11 @@ class TempTab(QtWidgets.QWidget):
             rows = []
             for rom, d in sorted(self.readings.items()):
                 if d["missing"]:
-                    rows.append((rom, self.names.get(rom, ""), "", "", "", "", "missing", ""))
+                    rows.append((rom, self.names.get(rom, ""), "", "", "", "", "missing", "", d.get("bus", "")))
                 else:
                     rows.append((rom, d["name"], "" if not d["valid"] else f"{d['temp']:.4f}",
                                  int(d["rom_crc_ok"]), int(d["sp_crc_ok"]), d["power"], d["status"],
-                                 d["sp"].replace(" ", "")))
+                                 d["sp"].replace(" ", ""), d.get("bus", "")))
             try:
                 self.csv.write_poll(ts, rows)
             except OSError as e:
@@ -340,6 +350,7 @@ class TempTab(QtWidgets.QWidget):
             self.names.get(rom, ""),
             "—" if stale or not d["valid"] else f"{d['temp']:.2f} °C",
             "not found in last poll" if stale else d["status"],
+            d.get("bus", ""),
             d["model"],
             " ".join(rom[i:i + 2] for i in range(0, 16, 2)),
             f"{d['rom_crc']:02X} " + ("✓" if d["rom_crc_ok"] else "✗"),
@@ -354,14 +365,14 @@ class TempTab(QtWidgets.QWidget):
         for c, text in enumerate(cells):
             it = self.table.item(r, c)
             it.setText(text)
-        self.table.item(r, 4).setToolTip(f"Family 0x{d['family']:02X} ({d['model']}), serial {d['serial']}, "
+        self.table.item(r, 5).setToolTip(f"Family 0x{d['family']:02X} ({d['model']}), serial {d['serial']}, "
                                          f"CRC 0x{d['rom_crc']:02X}")
         self.table.item(r, 0).setToolTip(rom)
         color = QtGui.QColor(C_DIM if stale else (C_OK if d["valid"] else C_ERR))
         self.table.item(r, 2).setForeground(color)
         self.table.item(r, 1).setForeground(QtGui.QColor(C_DIM) if stale else QtGui.QBrush())
-        for c in (5, 7):
-            ok = d["rom_crc_ok"] if c == 5 else d["sp_crc_ok"]
+        for c in (6, 8):
+            ok = d["rom_crc_ok"] if c == 6 else d["sp_crc_ok"]
             self.table.item(r, c).setForeground(QtGui.QColor(C_OK if ok else C_ERR))
         f = self.table.item(r, 1).font()
         f.setBold(True)

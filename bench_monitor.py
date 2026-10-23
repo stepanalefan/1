@@ -262,8 +262,11 @@ class MuxScanner:
         if resp != f"READY:{ch}":
             raise IOError(f"Arduino did not confirm channel {ch} (answer: {resp!r})")
 
-    def ow(self, cmd: str, timeout: float = 4.0) -> list[str]:
-        """1-Wire command (OW:CONV / OW:READ). Returns the reply lines up to OW:CONV:.. / OW:END:.."""
+    SLAVE_FINAL = ("OW:END", "OW:CONV", "SW:", "ERR")
+
+    def slave(self, cmd: str, timeout: float = 4.0) -> list[str]:
+        """Command for the slave Arduino (OW:... 1-Wire, SW:... switches), relayed by the master.
+        Returns the reply lines up to the final one (OW:END / OW:CONV / SW:STATE)."""
         self.ard.reset_input_buffer()
         self.ard.write(f"{cmd}\n".encode())
         lines, deadline = [], time.monotonic() + timeout
@@ -271,11 +274,19 @@ class MuxScanner:
             line = self.ard.readline().decode(errors="ignore").strip()
             if not line:
                 continue
+            deadline = time.monotonic() + timeout          # every line extends the wait
+            if line == "ERR:SLAVE_TIMEOUT":
+                raise IOError("slave Arduino does not answer - check the link wires "
+                              "(master A5 -> slave D2, slave D3 -> master A4, common GND) and the slave sketch")
+            if line.startswith("ERR"):
+                raise IOError(f"slave Arduino: {line} (command {cmd})")
             lines.append(line)
-            if line.startswith(("OW:END", "OW:CONV")):
+            if line.startswith(self.SLAVE_FINAL):
                 return lines
-        raise IOError(f"Arduino did not answer {cmd} - upload the sketch with 1-Wire support "
-                      f"(needs the OneWire library)")
+        raise IOError(f"master Arduino did not answer {cmd} - upload the new master sketch "
+                      f"(relays OW:/SW: commands to the slave)")
+
+    ow = slave
 
     def measure(self, ch: int, settle_s: float = 0.0) -> float:
         t0 = time.perf_counter()
@@ -312,23 +323,38 @@ class DemoScanner:
             return 16.0 / DIVIDER_RATIO + self.rng.normal(0, 0.005)  # displayed as ~16 V
         return self.base[ch] + self.rng.normal(0, 0.004)
 
-    # three simulated DS18B20 (one on parasitic power); same reply format as the sketch
-    _OW = (("28FF4A1B9316035E", 23.0, 0), ("28AA0C77511901A3", 31.5, 1), ("2861640A1C8E4F12", -4.0, 1))
+    # simulated slave Arduino: DS18B20 on the three 1-Wire buses + two switch outputs
+    _OW = ((1, "28FF4A1B9316035E", 23.0, 0), (2, "28AA0C77511901A3", 31.5, 1), (3, "2861640A1C8E4F12", -4.0, 1))
+    _sw = [False, False]
+    _pulse_end = [0.0, 0.0]
 
-    def ow(self, cmd: str) -> list[str]:
+    def slave(self, cmd: str) -> list[str]:
         from onewire_temp import crc8          # lazy: only needed in demo mode
         time.sleep(0.02)
+        now = time.monotonic()
+        for i, end in enumerate(self._pulse_end):
+            if end and now >= end:
+                self._sw[i], self._pulse_end[i] = False, 0.0
+        if cmd.startswith("SW:"):
+            p = cmd.split(":")
+            if p[1] in ("SET", "PULSE") and len(p) == 4:
+                i, val = int(p[2]), int(p[3])
+                self._sw[i] = bool(val) or p[1] == "PULSE"
+                self._pulse_end[i] = now + val / 1000 if p[1] == "PULSE" else 0.0
+            return ["SW:STATE:" + "".join("1" if x else "0" for x in self._sw)]
         if cmd == "OW:CONV":
-            return ["OW:CONV:OK"]
+            return ["OW:CONV:OK:7"]
         out = []
-        for rom, base, ext in self._OW:
+        for bus, rom, base, ext in self._OW:
             rb = bytearray.fromhex(rom)
             rb[7] = crc8(rb[:7])
             raw = int(round((base + self.rng.normal(0, 0.15) + 2 * math.sin(time.time() / 60)) * 16))
             sp = bytearray(raw.to_bytes(2, "little", signed=True) + bytes([0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10]))
             sp.append(crc8(sp))
-            out.append(f"OW:DEV:{rb.hex().upper()}:{sp.hex().upper()}:{ext}")
+            out.append(f"OW:DEV:{bus}:{rb.hex().upper()}:{sp.hex().upper()}:{ext}")
         return out + [f"OW:END:{len(out)}"]
+
+    ow = slave
 
     def close(self):
         pass

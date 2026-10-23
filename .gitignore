@@ -11,3 +11,5 @@ build/
 dist/
 *.spec
 temperature_log_*.csv
+switch_log_*.csv
+switch.json

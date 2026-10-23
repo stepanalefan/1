@@ -127,6 +127,11 @@ try:  # 1-Wire temperature tab (sensors on the bench Arduino, pin A3)
 except Exception:  # pragma: no cover
     onewire_temp = None
 
+try:  # switch outputs on the slave Arduino + BOS watchdog (panel on the Main tab)
+    import slave_switch
+except Exception:  # pragma: no cover
+    slave_switch = None
+
 try:  # Logs tab (all CSV logs on one plot)
     import log_viewer
 except Exception:  # pragma: no cover
@@ -1574,6 +1579,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
         if self.smw:
             self.smw.log.connect(self.logmsg)
+        self.switch = None
+        if slave_switch and self.bench:
+            self.switch = slave_switch.SwitchController(self.bench, self.logmsg, self)
+            if self.can_win:
+                self.can_win.frame_listeners.append(self.switch.on_frames)
         self.dash = dashboard.Dashboard(self) if dashboard else None
         if self.dash:
             self.tabs.addTab(page(self.dash), "Main")
@@ -2189,6 +2199,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_vsa(self, r: dict):
         if self.dash:
             self.dash.update_vsa(r)
+        if self.switch:
+            self.switch.on_vsa(r)
         now = r["t"]
         if self.t_start is None:
             self.t_start = now
@@ -2244,6 +2256,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dash.shutdown()
         if self.temps:
             self.temps.shutdown()
+        if self.switch:
+            self.switch.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()

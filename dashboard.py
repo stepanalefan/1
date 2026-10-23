@@ -428,8 +428,12 @@ def _smw_filters():
 # --------------------------------------------------------------------------- #
 #  Dashboard                                                                   #
 # --------------------------------------------------------------------------- #
+def slave_switch_pins(sw):
+    return getattr(sys.modules.get(type(sw).__module__), "PINS", ())
+
+
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "SMW200A", "34405A", "Arduino", "CAN"]
+    DEVICES = ["FSW", "HMP4040", "SMW200A", "34405A", "Arduino", "Slave", "CAN"]
 
     def __init__(self, host):
         super().__init__()
@@ -525,6 +529,9 @@ class Dashboard(QtWidgets.QWidget):
         self.temp_rows: dict = {}          # rom -> (led, name, value)
         self.temp_box.hide()               # shown once a sensor has been seen
         lv.addWidget(self.temp_box)
+        sw = getattr(self.host, "switch", None)
+        if sw:
+            lv.addWidget(sw.panel)
 
         g = QtWidgets.QGroupBox("Test sequence")
         sv = QtWidgets.QVBoxLayout(g)
@@ -730,6 +737,13 @@ class Dashboard(QtWidgets.QWidget):
                 self._set_status(name, "ok" if b._scan_ok else "off", b.scan_status.text(),
                                  "scanning" if b._scan_ok and b.run_btn.isChecked() else "")
             self._refresh_hmp(b)
+        sw = getattr(h, "switch", None)
+        if sw:
+            st = {True: "ok", False: "err", None: "off"}[sw.slave_ok]
+            info = {True: "1-Wire A3/A4/A5 · switch A0/A1", False: sw.error or "no answer",
+                    None: "via master Arduino (not connected)"}[sw.slave_ok]
+            outs = [p for p, on in zip(slave_switch_pins(sw), sw.state or []) if on]
+            self._set_status("Slave", st, info, (" ".join(outs) + " ON") if outs else "")
         tt = getattr(h, "temps", None)
         if tt:
             self._refresh_temps(tt)

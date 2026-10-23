@@ -2,14 +2,16 @@
 // ПОЛНЫЙ СКЕТЧ УПРАВЛЕНИЯ КОММУТАТОРОМ 176 КАНАЛОВ ДЛЯ БОСС v3.0
 // =========================================================================
 
-// Датчики температуры 1-Wire (DS18B20 и др.) на A3, подтяжка 4,7 кОм к +5 В,
-// паразитное питание. Нужна библиотека OneWire (Paul Stoffregen):
-// Скетч -> Подключить библиотеку -> Управлять библиотеками -> "OneWire" -> Установить
-#include <OneWire.h>
-const int pin_OW = A3;
-OneWire ow(pin_OW);
-unsigned long convStart = 0;    // момент запуска преобразования температуры
-bool convPending = false;
+// Связь с ведомой (slave) Arduino: датчики 1-Wire и ключи теперь на ней.
+// Аппаратный UART (D0/D1) занят USB, поэтому программный порт:
+//   A4 (RX мастера) <- D3 (TX slave)
+//   A5 (TX мастера) -> D2 (RX slave)
+//   GND мастера     -- GND slave (обязательно!)
+// Команды "OW:..." и "SW:..." от ПК пересылаются на slave, его ответы - обратно на ПК.
+#include <SoftwareSerial.h>
+SoftwareSerial slave(A4, A5);   // RX, TX
+const long SLAVE_BAUD = 19200;
+const unsigned long SLAVE_TIMEOUT_MS = 1500;   // slave отвечает не позже ~0,8 с
 
 // Пины адресной шины (подключены параллельно ко всем 11 чипам)
 const int pin_S0 = 2;
@@ -39,6 +41,7 @@ void setup() {
   // Запуск последовательного порта на высокой скорости (синхронизация с ПК)
   Serial.begin(115200);
   Serial.setTimeout(50);  // не ждать 1 с, если строка пришла без '\n'
+  slave.begin(SLAVE_BAUD);
   while (!Serial) { ; } // Ожидание подключения порта USB
 }
 
@@ -49,11 +52,8 @@ void loop() {
     inputString.trim(); // Очищаем строку от мусора и перевода строки
 
     // Проверяем формат команды, например: "SET:0" или "SET:175"
-    if (inputString == "OW:CONV") {
-      owConvert();
-    }
-    else if (inputString == "OW:READ") {
-      owRead();
+    if (inputString.startsWith("OW:") || inputString.startsWith("SW:")) {
+      relayToSlave(inputString);
     }
     else if (inputString.startsWith("SET:")) {
       int globalChannel = inputString.substring(4).toInt();
@@ -130,66 +130,37 @@ void allChipsOff() {
 }
 
 // =========================================================================
-// 1-Wire: запуск преобразования у всех датчиков сразу
-// Ответ: "OW:CONV:OK" или "OW:CONV:NODEV" (на шине никто не ответил)
+// Пересылка команды на slave и его ответа на ПК.
+// Ответ slave заканчивается строкой "OW:END...", "OW:CONV...", "SW:..." или "ERR...".
+// Если slave молчит дольше SLAVE_TIMEOUT_MS - на ПК уходит "ERR:SLAVE_TIMEOUT".
 // =========================================================================
-void owConvert() {
-  if (!ow.reset()) {
-    Serial.println("OW:CONV:NODEV");
-    return;
-  }
-  ow.skip();             // команда всем датчикам (Skip ROM)
-  // power = 1: после команды пин остаётся в HIGH ("сильная" подтяжка) -
-  // при паразитном питании датчики берут ток на преобразование с линии данных.
-  // Коммутатор (SET:) можно переключать во время преобразования - шину не трогаем.
-  ow.write(0x44, 1);
-  convStart = millis();
-  convPending = true;
-  Serial.println("OW:CONV:OK");
+bool isFinalLine(const String &line) {
+  return line.startsWith("OW:END") || line.startsWith("OW:CONV") ||
+         line.startsWith("SW:") || line.startsWith("ERR");
 }
 
-void printHex(byte b) {
-  if (b < 16) Serial.print('0');
-  Serial.print(b, HEX);
-}
+void relayToSlave(const String &cmd) {
+  while (slave.available()) slave.read();   // выбросить старый мусор
+  slave.print(cmd);
+  slave.print('\n');
 
-// =========================================================================
-// 1-Wire: поиск всех датчиков и чтение их памяти (scratchpad)
-// Ответ: по строке на датчик "OW:DEV:<ROM 8 байт>:<scratchpad 9 байт>:<питание>",
-// затем "OW:END:<кол-во>". Питание: 1 = внешнее, 0 = паразитное.
-// CRC и температуру считает программа на ПК.
-// =========================================================================
-void owRead() {
-  if (convPending) {                      // DS18B20 12 бит: до 750 мс
-    unsigned long el = millis() - convStart;
-    if (el < 750) delay(750 - el);
-    convPending = false;
+  String line = "";
+  unsigned long t0 = millis();
+  while (millis() - t0 < SLAVE_TIMEOUT_MS) {
+    while (slave.available()) {
+      char c = slave.read();
+      if (c == '\n') {
+        line.trim();
+        if (line.length() > 0) {
+          Serial.println(line);
+          if (isFinalLine(line)) return;
+        }
+        line = "";
+        t0 = millis();                      // каждая строка продлевает ожидание
+      } else if (c != '\r' && line.length() < 120) {
+        line += c;
+      }
+    }
   }
-  ow.depower();                           // снимаем сильную подтяжку
-
-  byte addr[8];
-  byte sp[9];
-  int n = 0;
-  ow.reset_search();
-  while (n < 32 && ow.search(addr)) {
-    n++;
-    ow.reset();
-    ow.select(addr);
-    ow.write(0xBE);                       // Read Scratchpad
-    for (int i = 0; i < 9; i++) sp[i] = ow.read();
-
-    ow.reset();
-    ow.select(addr);
-    ow.write(0xB4);                       // Read Power Supply
-    byte ext = ow.read_bit();             // 0 = паразитное питание
-
-    Serial.print("OW:DEV:");
-    for (int i = 0; i < 8; i++) printHex(addr[i]);
-    Serial.print(':');
-    for (int i = 0; i < 9; i++) printHex(sp[i]);
-    Serial.print(':');
-    Serial.println(ext);
-  }
-  Serial.print("OW:END:");
-  Serial.println(n);
+  Serial.println("ERR:SLAVE_TIMEOUT");
 }

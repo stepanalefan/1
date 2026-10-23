@@ -4,6 +4,7 @@ Logs tab: load any of the program's CSV logs and overlay them on one time plot.
 Understood formats (detected from the header, any number of files and days):
 * voltage_log_YYYY-MM-DD*.csv   Time, Channel, Voltage  (old 4-column files too)
 * hmp_log_YYYY-MM-DD.csv        Time, Master, CHn_On, CHn_Vset_V, ... per channel
+* switch_log_YYYY-MM-DD.csv      Time, Output, Pin, Name, Action, State, Reason  (0/1 steps)
 * temperature_log_YYYY-MM-DD.csv Time, ROM, Name, Temperature_C, ...  (1-Wire sensors)
 * telemetry_log_YYYY-MM-DD.csv  Time, Unit, Array, Designation, Byte, Value, Meaning, Warning
 * any other CSV whose first column is a time: every numeric column becomes a series
@@ -25,7 +26,7 @@ import pyqtgraph as pg
 
 PALETTE = ["#58a6ff", "#f0b03e", "#4fd18b", "#ff6b6b", "#d2a8ff", "#79c0ff", "#ffa657",
            "#7ee787", "#f778ba", "#a5d6ff", "#e3b341", "#56d4dd", "#bc8cff", "#ff7b72"]
-GROUPS = ("Voltage", "HMP4040", "Temperature", "Telemetry", "Other")
+GROUPS = ("Voltage", "HMP4040", "Temperature", "Switch", "Telemetry", "Other")
 
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -138,6 +139,24 @@ def parse_log(path: str) -> dict[tuple[str, str], tuple[list, list]]:
                     label = c.replace("_V_V", " V").replace("_I_A", " I (A)").replace("_P_W", " P (W)") \
                              .replace("_Vset_V", " Vset").replace("_Iset_A", " Iset").replace("_On", " On")
                     add("HMP4040", label, t, y)
+        elif h[:4] == ["Time", "Output", "Pin", "Name"]:          # switch_log: one row per action
+            ia, ist = h.index("Action"), h.index("State")
+            for row in rows:
+                if len(row) <= ist:
+                    continue
+                t = tp(row[0])
+                if t is None:
+                    continue
+                name = f"{row[2]} {row[3]}".strip()
+                m = re.match(r"pulse (\d+) ms", row[ia])
+                try:
+                    st = float(row[ist])
+                except ValueError:
+                    continue
+                add("Switch", name, t - 1e-3, 0.0 if m or st else 1.0)   # edge, so steps show the change
+                add("Switch", name, t, st)
+                if m:                                                    # the slave ends the pulse itself
+                    add("Switch", name, t + int(m.group(1)) / 1000, 0.0)
         elif h[:4] == ["Time", "ROM", "Name", "Temperature_C"]:
             last_name, pts = {}, []
             for row in rows:
@@ -202,7 +221,7 @@ class LogsTab(QtWidgets.QWidget):
         add_b = QtWidgets.QPushButton("Add CSV files…")
         add_b.clicked.connect(self.on_add)
         today_b = QtWidgets.QPushButton("Today's logs")
-        today_b.setToolTip("Load voltage, HMP4040, temperature and telemetry logs of today from the log folders")
+        today_b.setToolTip("Load voltage, HMP4040, temperature, switch and telemetry logs of today from the log folders")
         today_b.clicked.connect(self.on_today)
         clr_b = QtWidgets.QPushButton("Clear")
         clr_b.clicked.connect(self.on_clear)
@@ -285,7 +304,7 @@ class LogsTab(QtWidgets.QWidget):
         for d in self._folders():
             try:
                 for n in sorted(os.listdir(d)):
-                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("voltage", "hmp", "telemetry", "temperature"):
+                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("voltage", "hmp", "telemetry", "temperature", "switch"):
                         paths.append(os.path.join(d, n))
             except OSError:
                 pass
