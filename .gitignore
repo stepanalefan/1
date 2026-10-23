@@ -13,3 +13,4 @@ dist/
 temperature_log_*.csv
 switch_log_*.csv
 switch.json
+can_lines.json

@@ -1233,7 +1233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if args.demo:
             self.proto.setCurrentIndex(3)
             if self.can_win:
-                self.can_win._select_iface("demo")
+                self.can_win.demo_setup()           # BOS / AFAR / UPNG each on its own simulated line
                 QtCore.QTimer.singleShot(300, self.can_win.toggle_connect)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
@@ -1608,7 +1608,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.bench.folder_listeners.append(self.temps.folder_changed)
             self.tabs.addTab(page(self.temps), "1-Wire Temp")
         if self.can_win:
-            self.tabs.addTab(page(self.can_win), "CAN (CANable)")
+            self.tabs.addTab(page(self.can_win), "CAN")
         if self.telem:
             self.tabs.addTab(page(self.telem), "Telemetry")
         if self.telem and self.dash:

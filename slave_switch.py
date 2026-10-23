@@ -215,9 +215,12 @@ class SwitchController(QtCore.QObject):
         self._excl_off = [j for j in range(len(PINS)) if j != i and self.state and self.state[j]]
         return [f"SW:SET:{j}:0" for j in range(len(PINS)) if j != i]
 
-    def set_output(self, i: int, on: bool, reason="manual"):
-        cmds = (self._prefix_exclusive(i) if on else []) + [f"SW:SET:{i}:{int(on)}"]
-        self.command(cmds, lambda ok: self._logged(ok, i, "on" if on else "off", int(on), reason))
+    def set_output(self, i: int, on: bool, reason="manual", done=None):
+        def fin(ok):
+            self._logged(ok, i, "on" if on else "off", int(on), reason)
+            if done:
+                done(ok)
+        self.command((self._prefix_exclusive(i) if on else []) + [f"SW:SET:{i}:{int(on)}"], fin)
 
     def pulse(self, i: int, ms: int, reason="manual", done=None):
         def fin(ok):

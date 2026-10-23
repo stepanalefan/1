@@ -30,6 +30,19 @@ The CANable is shipped with one of two firmwares, select the matching interface:
       sudo ip link set can0 up type can bitrate 500000 [listen-only on]
   then use the "SocketCAN" interface (bitrate is set by ip link, not here).
 
+IXXAT USB-to-CAN (python-can "ixxat" interface, needs the IXXAT VCI 4 driver on Windows):
+  channel 0 = CAN1, 1 = CAN2. Each channel is its own CAN controller, so both are opened at the
+  same time (one worker thread per channel). Several IXXAT devices: channel "0@HW123456".
+  python-can's IXXAT driver has no listen-only mode.
+
+Lines
+-----
+Up to three CAN lines are captured at the same time, each on its own adapter / channel
+(default: BOS on the CANable, AFAR on IXXAT CAN1, UPNG on IXXAT CAN2), stored in
+can_lines.json. Every frame carries its line name: Trace and Monitor show it in the "Line"
+column and the line checkboxes next to the ID filter hide / show whole lines.
+Transmit: the panel sends on the selected line; library commands can be tied to a line.
+
 Listen-only: the adapter does not ACK frames, so the sniffer is invisible on the
 bus. If the sniffer is connected to a single node (nobody else to ACK), turn
 listen-only OFF, otherwise the node will retransmit the first frame forever.
@@ -59,6 +72,7 @@ import argparse
 import bisect
 import csv
 import datetime as _dt
+import json
 import math
 import os
 import random
@@ -92,12 +106,19 @@ CANABLE_USB_IDS = [(0x16D0, 0x117E), (0x0483, 0x5740)]   # slcan firmware / gene
 TRACE_MAX = 100_000      # rows kept in the Trace view
 RAW_MAX = 300_000        # frames kept in memory (Trace is rebuilt from these on filter change)
 HL_TIME = 2.0            # s, a changed byte stays highlighted in the Monitor
+LINE_COLORS = ["#f0b03e", "#79c0ff", "#4fd18b"]
+DEFAULT_LINES = [  # name = unit on that line
+    {"name": "BOS", "iface": "slcan", "channel": "", "bitrate": 500_000, "listen": False, "enabled": True},
+    {"name": "AFAR", "iface": "ixxat", "channel": "0", "bitrate": 500_000, "listen": False, "enabled": True},
+    {"name": "UPNG", "iface": "ixxat", "channel": "1", "bitrate": 500_000, "listen": False, "enabled": True},
+]
 APP_ID = "CANable Analyzer"
 ICON_FILE = "lupa.ico"
 
 INTERFACES = [  # key, label
     ("slcan", "CANable — slcan firmware (COM port)"),
     ("gs_usb", "CANable — candleLight firmware (gs_usb)"),
+    ("ixxat", "IXXAT USB-to-CAN (VCI driver)"),
     ("socketcan", "SocketCAN (Linux, e.g. can0)"),
     ("demo", "Demo — simulated bus"),
 ]
@@ -127,9 +148,9 @@ def set_windows_app_id():
 #  Frame + text formats                                                        #
 # --------------------------------------------------------------------------- #
 class Frame:
-    __slots__ = ("ts", "can_id", "ext", "rtr", "dlc", "data", "tx", "dt", "seq")
+    __slots__ = ("ts", "can_id", "ext", "rtr", "dlc", "data", "tx", "dt", "seq", "bus")
 
-    def __init__(self, ts, can_id, ext=False, rtr=False, dlc=None, data=b"", tx=False):
+    def __init__(self, ts, can_id, ext=False, rtr=False, dlc=None, data=b"", tx=False, bus=""):
         self.ts = ts
         self.can_id = can_id
         self.ext = ext
@@ -139,10 +160,11 @@ class Frame:
         self.tx = tx
         self.dt = None      # s since previous frame with the same ID
         self.seq = 0
+        self.bus = bus      # line name ("BOS", "AFAR", ...); "" = not set (tx: line chosen at send)
 
     @property
     def key(self):
-        return (self.ext, self.can_id)
+        return (self.bus, self.ext, self.can_id)
 
     def id_str(self) -> str:
         return f"{self.can_id:08X}" if self.ext else f"{self.can_id:03X}"
@@ -203,30 +225,32 @@ def encode_slcan(f: Frame) -> str:
     return s + "\r"
 
 
-def to_candump(f: Frame, iface="can0") -> str:
+def to_candump(f: Frame, iface=None) -> str:
+    """The line name is written as the candump interface name, so a log keeps the lines apart."""
     body = ("R" + (str(f.dlc) if f.dlc else "")) if f.rtr else f.data.hex().upper()
+    iface = iface or re.sub(r"\s+", "_", f.bus) or "can0"
     return f"({f.ts:.6f}) {iface} {f.id_str()}#{body}\n"
 
 
-_CANDUMP_RE = re.compile(r"^\((\d+(?:\.\d+)?)\)\s+\S+\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f.Rr]*)")
+_CANDUMP_RE = re.compile(r"^\((\d+(?:\.\d+)?)\)\s+(\S+)\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f.Rr]*)")
 
 
 def parse_candump(line: str) -> Frame | None:
     m = _CANDUMP_RE.match(line.strip())
     if not m:
         return None
-    ts, ids, body = float(m.group(1)), m.group(2), m.group(3).replace(".", "")
+    ts, bus, ids, body = float(m.group(1)), m.group(2), m.group(3), m.group(4).replace(".", "")
     ext = len(ids) > 3
     if body[:1] in ("R", "r"):
         dlc = int(body[1:]) if body[1:].isdigit() else 0
-        return Frame(ts, int(ids, 16), ext, True, min(dlc, 8))
+        return Frame(ts, int(ids, 16), ext, True, min(dlc, 8), bus=bus)
     try:
         data = bytes.fromhex(body)
     except ValueError:
         return None
     if len(data) > 8:
         return None
-    return Frame(ts, int(ids, 16), ext, False, None, data)
+    return Frame(ts, int(ids, 16), ext, False, None, data, bus=bus)
 
 
 def parse_filter(text: str):
@@ -401,6 +425,13 @@ class PyCanBackend:
                 except Exception as e:
                     lo = f", listen-only failed ({e})"
             self.info = f"gs_usb #{channel or 0}, {bitrate // 1000} kbit/s{lo}"
+        elif interface == "ixxat":
+            ch, _, hwid = (channel or "0").partition("@")       # "1" or "1@HW123456"
+            ch = int(ch)
+            self.bus = can.Bus(interface="ixxat", channel=ch, bitrate=bitrate,
+                               unique_hardware_id=hwid or None)
+            lo = ", listen-only NOT supported by the IXXAT driver" if listen_only else ""
+            self.info = f"IXXAT CAN{ch + 1}{' ' + hwid if hwid else ''}, {bitrate // 1000} kbit/s{lo}"
         elif interface == "socketcan":
             self.bus = can.Bus(interface="socketcan", channel=channel or "can0")
             self.info = f"socketcan {channel or 'can0'} (bitrate / listen-only set by 'ip link')"
@@ -439,9 +470,10 @@ class PyCanBackend:
 class DemoBackend:
     """Simulated vehicle-like bus; answers OBD-II requests sent to 7DF / 7E0."""
 
-    def __init__(self, bitrate: int, listen_only: bool):
+    def __init__(self, bitrate: int, listen_only: bool, only: str = "all"):
         self.errors = 0
-        self.info = f"demo bus, {bitrate // 1000} kbit/s"
+        self.only = (only or "all").upper()     # "ALL" or one unit: BOS / AFAR / UPNG
+        self.info = f"demo bus{'' if self.only == 'ALL' else ' (' + self.only + ')'}, {bitrate // 1000} kbit/s"
         self._t0 = time.time()
         self._lock = threading.Lock()
         self._pending: list[Frame] = []
@@ -505,14 +537,15 @@ class DemoBackend:
         now = time.time()
         t = now - self._t0
         out = []
-        for e in self._sched:
+        everything = self.only == "ALL"
+        for e in (self._sched if everything else []):
             if e[3] == 0:
                 e[3] = now + random.random() * e[2]
             while e[3] <= now:
                 self._cnt += 1
                 out.append(Frame(e[3], e[0], e[1], False, None, self._payload(e[0], t)))
                 e[3] += e[2]
-        if now >= self._afar_next:               # AFAR IOK OSN, 23 segments (counter wraps at 16)
+        if now >= self._afar_next and self.only in ("ALL", "AFAR"):   # AFAR IOK OSN, counter wraps at 16
             self._afar_next += 2.2
             a = self._afar
             a[6:8] = ((int.from_bytes(a[6:8], "little") + 1) & 0xFFFF).to_bytes(2, "little")
@@ -526,7 +559,7 @@ class DemoBackend:
                     seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | (i & 0x0F)
                     out.append(Frame(now + i * 0.005, 0x1AC60000 | seg << 8 | typ, True, False, None,
                                      bytes(arr[8 * i:8 * i + 8])))
-        if now >= self._bos_next:                # BOS IOK OSN every ~2.2 s
+        if now >= self._bos_next and self.only in ("ALL", "BOS"):     # BOS IOK OSN every ~2.2 s
             self._bos_next += 2.2
             b = self._bos
             b[6:8] = ((int.from_bytes(b[6:8], "little") + 1) & 0xFFFF).to_bytes(2, "little")
@@ -540,7 +573,7 @@ class DemoBackend:
                     seg = 0x00 if i == 0 else (0x80 if i == n - 1 else 0x40) | i
                     out.append(Frame(now + i * 0.007, 0x1A460000 | seg << 8 | typ, True, False, None,
                                      bytes(arr[8 * i:8 * i + 8])))
-        if now >= self._upng_next:               # UPNG IOK OSN / SOST / DOP every 4 s
+        if now >= self._upng_next and self.only in ("ALL", "UPNG"):   # UPNG IOK OSN / SOST / DOP every 4 s
             self._upng_next += 4.0
             wt = int.from_bytes(self._sost[24:28], "little") + 4             # Work_Time += 4 s
             self._sost[24:28] = wt.to_bytes(4, "little")
@@ -574,7 +607,7 @@ class DemoBackend:
 
     def send(self, f: Frame):
         d = f.data
-        if f.ext or f.can_id not in (0x7DF, 0x7E0) or len(d) < 3 or d[1] != 0x01:
+        if self.only != "ALL" or f.ext or f.can_id not in (0x7DF, 0x7E0) or len(d) < 3 or d[1] != 0x01:
             return
         pid = d[2]
         val = {0x0C: [int(self._rpm * 4) >> 8, int(self._rpm * 4) & 0xFF],
@@ -595,9 +628,9 @@ def make_backend(kind: str, channel: str, bitrate: int, listen_only: bool):
         if not channel:
             raise ValueError("no COM port selected")
         return SlcanBackend(channel, bitrate, listen_only)
-    if kind in ("gs_usb", "socketcan"):
+    if kind in ("gs_usb", "socketcan", "ixxat"):
         return PyCanBackend(kind, channel, bitrate, listen_only)
-    return DemoBackend(bitrate, listen_only)
+    return DemoBackend(bitrate, listen_only, channel)
 
 
 def list_channels(kind: str) -> list[tuple[str, str]]:
@@ -620,13 +653,26 @@ def list_channels(kind: str) -> list[tuple[str, str]]:
             return [(str(i), str(d)) for i, d in enumerate(devs)] or [("0", "no gs_usb device found")]
         except Exception as e:
             return [("0", f"scan failed: {e}")]
+    if kind == "ixxat":
+        try:
+            import can
+            cfgs = can.detect_available_configs(interfaces=["ixxat"])
+        except Exception:
+            cfgs = []
+        hwids = sorted({c.get("unique_hardware_id") for c in cfgs})
+        out = []
+        for c in cfgs:
+            ch, hw = int(c.get("channel", 0)), c.get("unique_hardware_id")
+            out.append((f"{ch}@{hw}" if len(hwids) > 1 else str(ch), f"CAN{ch + 1}  {hw or ''}"))
+        return out or [("0", "CAN1 (no IXXAT device detected)"), ("1", "CAN2 (no IXXAT device detected)")]
     if kind == "socketcan":
         try:
             names = sorted(n for n in os.listdir("/sys/class/net") if "can" in n)
         except OSError:
             names = []
         return [(n, "SocketCAN") for n in names] or [("can0", "SocketCAN")]
-    return [("simulated", "demo")]
+    return [("all", "all simulated frames"), ("BOS", "BOS arrays only"), ("AFAR", "AFAR arrays only"),
+            ("UPNG", "UPNG arrays only")]
 
 
 # --------------------------------------------------------------------------- #
@@ -636,8 +682,10 @@ class CanWorker(QtCore.QThread):
     opened = QtCore.pyqtSignal(str)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, kind, channel, bitrate, listen_only):
+    def __init__(self, kind, channel, bitrate, listen_only, name=""):
         super().__init__()
+        self.name = name                    # line name, stamped on every frame
+        self.bitrate = bitrate
         self.args = (kind, channel, bitrate, listen_only)
         self.backend = None
         self.frames: deque = deque()       # thread-safe append / popleft
@@ -658,6 +706,8 @@ class CanWorker(QtCore.QThread):
             while not self._quit:
                 frames = self.backend.recv()
                 if frames:
+                    for f in frames:
+                        f.bus = self.name
                     self.frames.extend(frames)
         except Exception as e:
             if not self._quit:
@@ -676,6 +726,7 @@ class CanWorker(QtCore.QThread):
         b.send(f)
         f.tx = True
         f.ts = time.time()
+        f.bus = self.name
         self.frames.append(f)
 
     def stop(self):
@@ -696,11 +747,17 @@ ALIGN_R = int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 ALIGN_C = int(QtCore.Qt.AlignCenter)
 
 
+def line_brush(colors: dict, bus: str):
+    c = colors.get(bus)
+    return QtGui.QColor(c) if c else None
+
+
 class TraceModel(QtCore.QAbstractTableModel):
-    COLS = ["#", "Time, s", "Δt, ms", "Dir", "ID", "Type", "DLC", "Data", "ASCII"]
+    COLS = ["#", "Time, s", "Δt, ms", "Line", "Dir", "ID", "Type", "DLC", "Data", "ASCII"]
 
     def __init__(self):
         super().__init__()
+        self.line_colors: dict[str, str] = {}
         self.rows: list[Frame] = []
         self.t0 = None
         self.abs_time = False
@@ -729,14 +786,16 @@ class TraceModel(QtCore.QAbstractTableModel):
         if c == 2:
             return "" if f.dt is None else f"{f.dt * 1000:.3f}"
         if c == 3:
-            return "Tx" if f.tx else "Rx"
+            return f.bus
         if c == 4:
-            return f.id_str()
+            return "Tx" if f.tx else "Rx"
         if c == 5:
-            return f.type_str()
+            return f.id_str()
         if c == 6:
-            return str(f.dlc)
+            return f.type_str()
         if c == 7:
+            return str(f.dlc)
+        if c == 8:
             return f.data_str()
         return f.ascii_str()
 
@@ -748,12 +807,14 @@ class TraceModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.DisplayRole:
             return self.text(f, c)
         if role == QtCore.Qt.ForegroundRole:
+            if c == 3:
+                return line_brush(self.line_colors, f.bus)
             if f.tx:
                 return C_TX
-            if c == 4 and f.ext:
+            if c == 5 and f.ext:
                 return C_EXT
             return None
-        if role == QtCore.Qt.TextAlignmentRole and c in (0, 1, 2, 6):
+        if role == QtCore.Qt.TextAlignmentRole and c in (0, 1, 2, 7):
             return ALIGN_R
         return None
 
@@ -796,12 +857,14 @@ class MonEntry:
 
 
 class MonitorModel(QtCore.QAbstractTableModel):
-    COLS = ["ID", "Type", "DLC"] + [f"D{i}" for i in range(8)] + ["ASCII", "Count", "Period, ms", "Age, s"]
-    BYTE0 = 3
+    COLS = ["Line", "ID", "Type", "DLC"] + [f"D{i}" for i in range(8)] + ["ASCII", "Count", "Period, ms",
+                                                                         "Age, s"]
+    BYTE0 = 4
 
     def __init__(self):
         super().__init__()
-        self.keys: list[tuple] = []          # sorted (ext, id)
+        self.line_colors: dict[str, str] = {}
+        self.keys: list[tuple] = []          # sorted (line, ext, id)
         self.entries: dict[tuple, MonEntry] = {}
 
     def rowCount(self, parent=QtCore.QModelIndex()):
@@ -828,18 +891,20 @@ class MonitorModel(QtCore.QAbstractTableModel):
         is_byte = 0 <= bi < 8
         if role == QtCore.Qt.DisplayRole:
             if c == 0:
-                return f.id_str()
+                return f.bus
             if c == 1:
-                return f.type_str()
+                return f.id_str()
             if c == 2:
+                return f.type_str()
+            if c == 3:
                 return str(f.dlc)
             if is_byte:
                 return f"{f.data[bi]:02X}" if bi < len(f.data) else ""
-            if c == 11:
-                return f.ascii_str()
             if c == 12:
-                return str(e.count)
+                return f.ascii_str()
             if c == 13:
+                return str(e.count)
+            if c == 14:
                 return "" if e.period is None else f"{e.period * 1000:.1f}"
             return f"{max(0.0, time.time() - f.ts):.1f}"
         if role == QtCore.Qt.BackgroundRole and is_byte and bi < len(f.data):
@@ -854,14 +919,16 @@ class MonitorModel(QtCore.QAbstractTableModel):
             if is_byte and e.count > 1 and bi < 8 and not e.ever_changed[bi]:
                 return C_DIM
             if c == 0:
+                return line_brush(self.line_colors, f.bus)
+            if c == 1:
                 return C_TX if f.tx else (C_EXT if f.ext else None)
-            if c == 14 and time.time() - f.ts > 2.0:
+            if c == 15 and time.time() - f.ts > 2.0:
                 return C_DIM
             return None
         if role == QtCore.Qt.TextAlignmentRole:
             if is_byte:
                 return ALIGN_C
-            if c in (2, 12, 13, 14):
+            if c in (3, 13, 14, 15):
                 return ALIGN_R
         return None
 
@@ -954,11 +1021,15 @@ def _table(model, widths) -> QtWidgets.QTableView:
 class SnifferWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
-        self.setWindowTitle("CAN sniffer — CANable (CAN 2.0A/B)")
+        self.setWindowTitle("CAN sniffer — CANable / IXXAT (CAN 2.0A/B)")
         self.resize(1650, 950)
-        self.worker: CanWorker | None = None
+        self.workers: dict[str, CanWorker] = {}  # line name -> worker (one thread per line)
         self.frame_listeners = []                # callables(list[Frame]) fed with every frame
         self.bitrate = DEFAULT_BITRATE
+        self.lines_file = os.path.join(script_dir(), "can_lines.json")
+        self.lines = self._load_lines()
+        self.hidden_lines: set[str] = set()
+        self._demo = bool(args.demo)
         self.raw: deque[Frame] = deque(maxlen=RAW_MAX)
         self.last_ts: dict[tuple, float] = {}
         self.seq = 0
@@ -966,7 +1037,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.rec_file = None
         self.rec_count = 0
         self.n_rx = self.n_tx = 0
-        self._win_bits = 0.0
+        self._win_bits: dict[str, float] = {}
         self._win_frames = 0
         self._win_t = time.monotonic()
 
@@ -980,14 +1051,14 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.periodic = QtCore.QTimer(self, timeout=self._send_periodic)
 
         if args.demo:
-            self._select_iface("demo")
+            self.demo_setup()
+        first = self.line_ui[0]
+        if args.interface or args.port:
+            self._set_iface(0, args.interface or "slcan")
         if args.port:
-            self._select_iface(args.interface or "slcan")
-            self.port_cb.setEditText(args.port)
-        elif args.interface:
-            self._select_iface(args.interface)
+            first["port"].setEditText(args.port)
         if args.bitrate:
-            self.br_cb.setCurrentText(str(args.bitrate))
+            first["br"].setCurrentText(str(args.bitrate))
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(100, self.toggle_connect)
 
@@ -997,51 +1068,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         root = QtWidgets.QVBoxLayout(central)
 
         # connection bar
-        conn = QtWidgets.QGroupBox("Adapter")
-        cv = QtWidgets.QVBoxLayout(conn)       # two rows: fits ~1100 px wide windows
-        h = QtWidgets.QHBoxLayout()
-        h2 = QtWidgets.QHBoxLayout()
-        cv.addLayout(h)
-        cv.addLayout(h2)
-        self.iface_cb = QtWidgets.QComboBox()
-        self.iface_cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.iface_cb.setMinimumContentsLength(22)    # long names are elided, not widening the page
-        for key, label in INTERFACES:
-            self.iface_cb.addItem(label, key)
-        self.iface_cb.currentIndexChanged.connect(self.refresh_ports)
-        self.port_cb = QtWidgets.QComboBox()
-        self.port_cb.setEditable(True)
-        self.port_cb.setMinimumWidth(150)
-        self.port_cb.currentIndexChanged.connect(self._port_desc)
-        self.port_desc = QtWidgets.QLabel()
-        self.port_desc.setStyleSheet("color:#8a96a3")
-        self.port_desc.setMinimumWidth(120)
-        refresh = QtWidgets.QPushButton("⟳")
-        refresh.setToolTip("Rescan ports / devices")
-        refresh.setFixedWidth(34)
-        refresh.clicked.connect(self.refresh_ports)
-        self.br_cb = QtWidgets.QComboBox()
-        self.br_cb.setEditable(True)
-        for b, _ in BITRATES:
-            self.br_cb.addItem(str(b))
-        self.br_cb.setCurrentText(str(DEFAULT_BITRATE))
-        self.listen_chk = QtWidgets.QCheckBox("Listen-only (no ACK)")
-        self.listen_chk.setToolTip("Adapter stays passive on the bus.\n"
-                                   "Turn OFF if the sniffer is the only other node on the bus.")
-        self.conn_btn = QtWidgets.QPushButton("Connect")
-        self.conn_btn.setCheckable(True)
-        self.conn_btn.setMinimumWidth(110)
-        self.conn_btn.clicked.connect(self.toggle_connect)
-        self.status = QtWidgets.QLabel("● disconnected")
-        self.status.setStyleSheet("color:#8a96a3")
-        for w in (QtWidgets.QLabel("Interface"), self.iface_cb, QtWidgets.QLabel("Port"), self.port_cb,
-                  refresh, self.port_desc):
-            h.addWidget(w)
-        h.addStretch(1)
-        for w in (QtWidgets.QLabel("Bitrate"), self.br_cb, self.listen_chk, self.conn_btn):
-            h2.addWidget(w)
-        h2.addWidget(self.status, 1)
-        root.addWidget(conn)
+        root.addWidget(self._build_lines())
 
         # view toolbar
         bar = QtWidgets.QHBoxLayout()
@@ -1074,6 +1101,14 @@ class SnifferWindow(QtWidgets.QMainWindow):
         frow = QtWidgets.QHBoxLayout()           # filter on its own row keeps the page narrow
         frow.addWidget(QtWidgets.QLabel("Filter"))
         frow.addWidget(self.filter_ed, 1)
+        frow.addWidget(QtWidgets.QLabel("  Show lines:"))
+        self.show_chk = []
+        for i in range(len(self.lines)):
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(True)
+            cb.toggled.connect(self._line_filter_changed)
+            self.show_chk.append(cb)
+            frow.addWidget(cb)
         root.addLayout(frow)
         for w in (self.pause_btn, self.auto_chk, self.time_cb, clear, self.rec_btn, save, load):
             bar.addWidget(w)
@@ -1083,8 +1118,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
         # views
         self.trace = TraceModel()
         self.mon = MonitorModel()
-        self.trace_view = _table(self.trace, [80, 120, 90, 40, 100, 80, 40, 240])
-        self.mon_view = _table(self.mon, [100, 70, 40] + [38] * 8 + [90, 80, 100, 70])
+        self.trace_view = _table(self.trace, [80, 120, 90, 60, 40, 100, 80, 40, 240])
+        self.mon_view = _table(self.mon, [60, 100, 70, 40] + [38] * 8 + [90, 80, 100, 70])
         self.mon_view.horizontalHeader().setStretchLastSection(False)
         self.mon_view.doubleClicked.connect(self._mon_to_tx)
         self.mon_view.setToolTip("Double-click a row to copy it into the Transmit panel")
@@ -1126,9 +1161,13 @@ class SnifferWindow(QtWidgets.QMainWindow):
         g.addWidget(self.tx_dlc, 0, 5)
         g.addWidget(QtWidgets.QLabel("Data (hex)"), 1, 0)
         g.addWidget(self.tx_data, 1, 1, 1, 5)
-        g.addWidget(self.tx_send, 2, 0, 1, 2)
-        g.addWidget(self.tx_period, 2, 2, 1, 2)
-        g.addWidget(self.tx_cyc, 2, 4, 1, 2)
+        self.tx_line = QtWidgets.QComboBox()
+        self.tx_line.setToolTip("Line used by the Transmit panel and by library commands without a fixed line")
+        g.addWidget(QtWidgets.QLabel("Line"), 2, 0)
+        g.addWidget(self.tx_line, 2, 1)
+        g.addWidget(self.tx_send, 3, 0, 1, 2)
+        g.addWidget(self.tx_period, 3, 2, 1, 2)
+        g.addWidget(self.tx_cyc, 3, 4, 1, 2)
         tx.setMaximumWidth(560)
 
         st = QtWidgets.QGroupBox("Bus statistics")
@@ -1173,33 +1212,180 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(outer)
         if self.store.error:
             QtCore.QTimer.singleShot(0, lambda: self.logmsg(self.store.error, "err"))
-        self.refresh_ports()
+        self._lines_changed()
 
-    def _select_iface(self, key):
-        i = self.iface_cb.findData(key)
-        if i >= 0:
-            self.iface_cb.setCurrentIndex(i)
+    # ------------------------------------------------------------ lines ---
+    def _load_lines(self) -> list[dict]:
+        lines = [dict(d) for d in DEFAULT_LINES]
+        try:
+            with open(self.lines_file, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            for d, sv in zip(lines, saved):
+                d.update({k: sv[k] for k in d if k in sv})
+        except (OSError, ValueError, TypeError):
+            pass
+        return lines
 
-    def refresh_ports(self):
-        kind = self.iface_cb.currentData()
-        cur = self.port_cb.currentText()
-        self.port_cb.blockSignals(True)
-        self.port_cb.clear()
-        for val, desc in list_channels(kind):
-            self.port_cb.addItem(val, desc)
-        if cur and self.port_cb.findText(cur) >= 0:
-            self.port_cb.setCurrentText(cur)
-        self.port_cb.blockSignals(False)
-        self.port_cb.setEnabled(kind != "demo")
-        self.br_cb.setEnabled(kind != "socketcan")
-        self._port_desc()
+    def _save_lines(self):
+        if self._demo:
+            return                      # --demo must not overwrite the real adapter setup
+        try:
+            with open(self.lines_file, "w", encoding="utf-8") as fh:
+                json.dump(self.lines, fh, indent=1)
+        except OSError as e:
+            self.logmsg(f"cannot save {self.lines_file}: {e}", "err")
 
-    def _port_desc(self, *_):
-        i = self.port_cb.currentIndex()
-        desc = self.port_cb.itemData(i) if i >= 0 else ""
-        if not desc and self.iface_cb.currentData() == "slcan":
+    def _build_lines(self) -> QtWidgets.QGroupBox:
+        box = QtWidgets.QGroupBox("CAN lines (each line = its own adapter / channel, all captured at once)")
+        g = QtWidgets.QGridLayout(box)
+        g.setVerticalSpacing(3)
+        for c, text in enumerate(("", "Line (unit)", "Interface", "Channel / port", "", "Bitrate", "", "Status")):
+            lb = QtWidgets.QLabel(text)
+            lb.setStyleSheet("color:#8a96a3")
+            g.addWidget(lb, 0, c)
+        self.line_ui = []
+        for i, ln in enumerate(self.lines):
+            use = QtWidgets.QCheckBox()
+            use.setChecked(ln["enabled"])
+            use.setToolTip("Connect this line with 'Connect'")
+            name = QtWidgets.QLineEdit(ln["name"])
+            name.setMaximumWidth(80)
+            name.setStyleSheet(f"color:{LINE_COLORS[i % len(LINE_COLORS)]};font-weight:700;")
+            iface = QtWidgets.QComboBox()
+            iface.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            iface.setMinimumContentsLength(20)
+            for key, label in INTERFACES:
+                iface.addItem(label, key)
+            port = QtWidgets.QComboBox()
+            port.setEditable(True)
+            port.setMinimumWidth(130)
+            refresh = QtWidgets.QPushButton("⟳")
+            refresh.setToolTip("Rescan ports / devices")
+            refresh.setFixedWidth(34)
+            br = QtWidgets.QComboBox()
+            br.setEditable(True)
+            for b, _ in BITRATES:
+                br.addItem(str(b))
+            br.setCurrentText(str(ln["bitrate"]))
+            br.setMaximumWidth(100)
+            listen = QtWidgets.QCheckBox("Listen-only")
+            listen.setChecked(ln["listen"])
+            listen.setToolTip("Adapter stays passive on the bus (no ACK).\n"
+                              "Turn OFF if the adapter is the only other node on that line.\n"
+                              "Not available for IXXAT (python-can driver).")
+            status = QtWidgets.QLabel("● off")
+            status.setStyleSheet("color:#8a96a3")
+            status.setMinimumWidth(120)
+            ui = {"use": use, "name": name, "iface": iface, "port": port, "refresh": refresh, "br": br,
+                  "listen": listen, "status": status}
+            self.line_ui.append(ui)
+            for c, w in enumerate((use, name, iface, port, refresh, br, listen, status)):
+                g.addWidget(w, i + 1, c)
+            j = iface.findData(ln["iface"])
+            iface.setCurrentIndex(max(0, j))
+            self.refresh_ports(i)
+            if ln["channel"]:
+                port.setEditText(ln["channel"])
+            iface.currentIndexChanged.connect(lambda _, i=i: (self.refresh_ports(i), self._lines_changed()))
+            refresh.clicked.connect(lambda _, i=i: self.refresh_ports(i))
+            name.editingFinished.connect(self._lines_changed)
+            port.currentTextChanged.connect(lambda *_: self._lines_changed())
+            port.currentIndexChanged.connect(lambda _, i=i: self._port_desc(i))
+        g.setColumnStretch(7, 1)
+        row = QtWidgets.QHBoxLayout()
+        self.conn_btn = QtWidgets.QPushButton("Connect")
+        self.conn_btn.setCheckable(True)
+        self.conn_btn.setMinimumWidth(120)
+        self.conn_btn.setToolTip("Connect / disconnect all ticked lines")
+        self.conn_btn.clicked.connect(self.toggle_connect)
+        self.status = QtWidgets.QLabel("● disconnected")
+        self.status.setStyleSheet("color:#8a96a3")
+        row.addWidget(self.conn_btn)
+        row.addWidget(self.status, 1)
+        g.addLayout(row, len(self.lines) + 1, 0, 1, 8)
+        return box
+
+    def _line_name(self, i) -> str:
+        return self.line_ui[i]["name"].text().strip() or f"L{i + 1}"
+
+    def line_names(self) -> list[str]:
+        return [self._line_name(i) for i in range(len(self.line_ui))]
+
+    def _adapter_short(self, i) -> str:
+        ui = self.line_ui[i]
+        kind, ch = ui["iface"].currentData(), ui["port"].currentText().strip()
+        if kind == "ixxat":
+            n = ch.partition("@")[0]
+            return f"IXXAT CAN{int(n) + 1}" if n.isdigit() else "IXXAT"
+        return {"slcan": "CANable", "gs_usb": "CANable", "socketcan": ch or "SocketCAN",
+                "demo": "demo"}.get(kind, kind)
+
+    def _lines_changed(self, *_):
+        """Names / adapters edited: relabel filter boxes, line colours, Transmit combo."""
+        if not hasattr(self, "show_chk"):
+            return
+        names = self.line_names()
+        colors = {n: LINE_COLORS[i % len(LINE_COLORS)] for i, n in enumerate(names)}
+        self.trace.line_colors = self.mon.line_colors = colors
+        for i, cb in enumerate(self.show_chk):
+            cb.setText(f"{names[i]} · {self._adapter_short(i)}")
+            cb.setStyleSheet(f"color:{colors[names[i]]};")
+        cur = self.tx_line.currentText()
+        self.tx_line.blockSignals(True)
+        self.tx_line.clear()
+        self.tx_line.addItems(names)
+        if cur in names:
+            self.tx_line.setCurrentText(cur)
+        self.tx_line.blockSignals(False)
+        self._line_filter_changed()
+
+    def _line_filter_changed(self, *_):
+        names = self.line_names()
+        self.hidden_lines = {names[i] for i, cb in enumerate(self.show_chk) if not cb.isChecked()}
+        self._rebuild_trace()
+        self._apply_mon_filter()
+
+    def _set_iface(self, i, key):
+        j = self.line_ui[i]["iface"].findData(key)
+        if j >= 0:
+            self.line_ui[i]["iface"].setCurrentIndex(j)
+
+    def _select_iface(self, key):        # kept for callers that know one adapter only
+        self._set_iface(0, key)
+
+    def demo_setup(self):
+        """--demo: every line on the simulator, each carrying only its own unit."""
+        self._demo = True
+        for i, ui in enumerate(self.line_ui):
+            ui["use"].setChecked(True)
+            self._set_iface(i, "demo")
+            name = self._line_name(i).upper()
+            ui["port"].setEditText(name if name in ("BOS", "AFAR", "UPNG") else "all")
+
+    def refresh_ports(self, i=0):
+        ui = self.line_ui[i]
+        kind = ui["iface"].currentData()
+        port = ui["port"]
+        cur = port.currentText()
+        port.blockSignals(True)
+        port.clear()
+        for k, (val, desc) in enumerate(list_channels(kind)):
+            port.addItem(val, desc)
+            port.setItemData(k, desc, QtCore.Qt.ToolTipRole)
+        if cur and port.findText(cur) >= 0:
+            port.setCurrentText(cur)
+        port.blockSignals(False)
+        ui["br"].setEnabled(kind != "socketcan")
+        ui["listen"].setEnabled(kind not in ("ixxat", "socketcan"))
+        self._port_desc(i)
+
+    def _port_desc(self, i=0):
+        port = self.line_ui[i]["port"]
+        j = port.currentIndex()
+        desc = port.itemData(j) if j >= 0 else ""
+        if not desc and self.line_ui[i]["iface"].currentData() == "slcan":
             desc = "no COM ports found — plug in the CANable"
-        self.port_desc.setText(desc or "")
+        port.setToolTip(desc or "")
 
     def logmsg(self, text, level="info"):
         color = {"info": "#c9d1d9", "ok": "#4fd18b", "warn": "#f0b03e", "err": "#ff6b6b"}[level]
@@ -1207,78 +1393,138 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.logbox.appendHtml(f'<span style="color:#6e7681">{ts}</span> <span style="color:{color}">{text}</span>')
 
     # --------------------------------------------------------- connection ---
+    @property
+    def worker(self):
+        """First connected line's worker (compatibility for code that knows one adapter)."""
+        return next((w for w in self.workers.values() if w.backend is not None), None)
+
+    def connected_lines(self) -> list[str]:
+        return [n for n, w in self.workers.items() if w.backend is not None]
+
     def toggle_connect(self):
-        if self.worker is not None:
+        if self.workers:
             self.disconnect_bus()
             return
-        kind = self.iface_cb.currentData()
-        try:
-            self.bitrate = int(self.br_cb.currentText().replace("_", "").replace(" ", ""))
-        except ValueError:
-            self.logmsg("bad bitrate", "err")
+        names = self.line_names()
+        if len(set(names)) != len(names):
+            self.logmsg("line names must be different", "err")
             self.conn_btn.setChecked(False)
             return
-        if kind == "slcan" and self.bitrate not in dict(BITRATES):
-            self.logmsg(f"slcan firmware supports only {', '.join(str(b) for b, _ in BITRATES)} bit/s", "err")
+        todo = []
+        for i, ui in enumerate(self.line_ui):
+            kind = ui["iface"].currentData()
+            try:
+                bitrate = int(ui["br"].currentText().replace("_", "").replace(" ", ""))
+            except ValueError:
+                self.logmsg(f"{names[i]}: bad bitrate", "err")
+                self.conn_btn.setChecked(False)
+                return
+            self.lines[i].update(name=names[i], iface=kind, channel=ui["port"].currentText().strip(),
+                                 bitrate=bitrate, listen=ui["listen"].isChecked(), enabled=ui["use"].isChecked())
+            if not ui["use"].isChecked():
+                continue
+            if kind == "slcan" and bitrate not in dict(BITRATES):
+                self.logmsg(f"{names[i]}: slcan supports only {', '.join(str(b) for b, _ in BITRATES)} bit/s",
+                            "err")
+                self.conn_btn.setChecked(False)
+                return
+            todo.append((i, kind, ui["port"].currentText().strip(), bitrate, ui["listen"].isChecked()))
+        if not todo:
+            self.logmsg("no line ticked", "warn")
             self.conn_btn.setChecked(False)
             return
-        self.worker = CanWorker(kind, self.port_cb.currentText().strip(), self.bitrate, self.listen_chk.isChecked())
-        self.worker.opened.connect(self._on_opened)
-        self.worker.failed.connect(lambda m: self.logmsg(m, "err"))
-        self.worker.finished.connect(self._on_worker_finished)
+        self._save_lines()
         self._set_inputs_enabled(False)
         self.conn_btn.setChecked(True)
-        self.conn_btn.setText("Connecting…")
-        self.status.setText("● connecting…")
-        self.status.setStyleSheet("color:#f0b03e")
+        self.conn_btn.setText("Disconnect")
         if self.trace.t0 is None:
             self.trace.t0 = time.time()
-        self.worker.start()
+        for i, kind, ch, bitrate, listen in todo:
+            w = CanWorker(kind, ch, bitrate, listen, names[i])
+            w.opened.connect(lambda info, i=i: self._on_opened(i, info))
+            w.failed.connect(lambda m, i=i: self._on_failed(i, m))
+            w.finished.connect(lambda i=i, w=w: self._on_worker_finished(i, w))
+            self.workers[names[i]] = w
+            st = self.line_ui[i]["status"]
+            st.setText("● connecting…")
+            st.setToolTip("")
+            st.setStyleSheet("color:#f0b03e")
+            w.start()
+        self._update_status()
 
-    def _on_opened(self, info):
-        self.conn_btn.setText("Disconnect")
-        self.status.setText(f"● {info}")
-        self.status.setStyleSheet("color:#4fd18b")
-        self.logmsg(f"connected: {info}", "ok")
+    def _on_opened(self, i, info):
+        st = self.line_ui[i]["status"]
+        st.setText(f"● {info}")
+        st.setStyleSheet("color:#4fd18b")
+        self.logmsg(f"{self._line_name(i)}: connected - {info}", "ok")
+        self._update_status()
 
-    def _on_worker_finished(self):
-        w, self.worker = self.worker, None
-        if w is not None:
-            self._drain(w)
-            w.deleteLater()
-        self.tx_cyc.setChecked(False)
-        self._set_inputs_enabled(True)
-        self.conn_btn.setChecked(False)
-        self.conn_btn.setText("Connect")
-        self.status.setText("● disconnected")
-        self.status.setStyleSheet("color:#8a96a3")
+    def _on_failed(self, i, msg):
+        st = self.line_ui[i]["status"]
+        st.setText(f"● {msg}")
+        st.setToolTip(msg)
+        st.setStyleSheet("color:#ff6b6b")
+        self.logmsg(f"{self._line_name(i)}: {msg}", "err")
+
+    def _on_worker_finished(self, i, w):
+        name = next((n for n, x in self.workers.items() if x is w), None)
+        if name is not None:
+            del self.workers[name]
+        self._drain(w)
+        w.deleteLater()
+        st = self.line_ui[i]["status"]
+        if "#ff6b6b" not in st.styleSheet():
+            st.setText("● off")
+            st.setStyleSheet("color:#8a96a3")
+        if not self.workers:
+            self.tx_cyc.setChecked(False)
+            self._set_inputs_enabled(True)
+            self.conn_btn.setChecked(False)
+            self.conn_btn.setText("Connect")
+        self._update_status()
+
+    def _update_status(self):
+        up = self.connected_lines()
+        if up:
+            self.status.setText(f"● {len(up)} line(s) connected: {', '.join(up)}")
+            self.status.setStyleSheet("color:#4fd18b")
+        elif self.workers:
+            self.status.setText("● connecting…")
+            self.status.setStyleSheet("color:#f0b03e")
+        else:
+            self.status.setText("● disconnected")
+            self.status.setStyleSheet("color:#8a96a3")
 
     def disconnect_bus(self):
-        w = self.worker
-        if w is None:
+        if not self.workers:
             return
         self.tx_cyc.setChecked(False)
         self.script_panel.stop("stopped (disconnected)")
-        w.stop()
+        for w in list(self.workers.values()):
+            w.stop()
         self.logmsg("disconnected")
 
     def _set_inputs_enabled(self, on):
-        for w in (self.iface_cb, self.port_cb, self.br_cb, self.listen_chk):
-            w.setEnabled(on)
-        if on:
-            self.refresh_ports()
+        for i, ui in enumerate(self.line_ui):
+            for k in ("use", "name", "iface", "port", "refresh", "br", "listen"):
+                ui[k].setEnabled(on)
+            if on:
+                self.refresh_ports(i)
 
     # ------------------------------------------------------------ ingest ---
     def _drain(self, worker=None):
-        w = worker or self.worker
-        if w is None:
-            return
-        q = w.frames
         frames = []
-        for _ in range(min(len(q), 50_000)):
-            frames.append(q.popleft())
+        for w in ([worker] if worker else list(self.workers.values())):
+            q = w.frames
+            for _ in range(min(len(q), 50_000)):
+                frames.append(q.popleft())
         if frames:
+            if worker is None and len(self.workers) > 1:
+                frames.sort(key=lambda f: f.ts)      # interleave the lines in time order
             self.ingest(frames)
+
+    def _visible(self, f: Frame) -> bool:
+        return f.bus not in self.hidden_lines and (self.filter is None or self.filter(f.can_id))
 
     def ingest(self, frames: list[Frame], live=True):
         for cb in self.frame_listeners:          # e.g. the Telemetry tab
@@ -1294,7 +1540,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
                 self.n_tx += 1
             else:
                 self.n_rx += 1
-            self._win_bits += f.bits()
+            self._win_bits[f.bus] = self._win_bits.get(f.bus, 0.0) + f.bits()
             self._win_frames += 1
         if self.trace.t0 is None:
             self.trace.t0 = frames[0].ts
@@ -1304,7 +1550,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
             self.rec_count += len(frames)
         self.mon.update(frames)
         if not self.pause_btn.isChecked():
-            shown = frames if self.filter is None else [f for f in frames if self.filter(f.can_id)]
+            shown = [f for f in frames if self._visible(f)]
             self.trace.append(shown)
             if shown and self.auto_chk.isChecked():
                 self.trace_view.scrollToBottom()
@@ -1314,14 +1560,15 @@ class SnifferWindow(QtWidgets.QMainWindow):
         dt = max(1e-3, now - self._win_t)
         if dt >= 1.0:
             fps = self._win_frames / dt
-            load = 100.0 * self._win_bits / dt / max(1, self.bitrate)
+            loads = [f"{n} {100.0 * self._win_bits.get(n, 0.0) / dt / max(1, w.bitrate):.0f}%"
+                     for n, w in self.workers.items() if w.backend is not None]
             self.st_lbl["Frames/s"].setText(f"{fps:,.0f}")
-            self.st_lbl["Bus load"].setText(f"≈ {load:.1f} %" if self.worker else "—")
-            self._win_bits, self._win_frames, self._win_t = 0.0, 0, now
+            self.st_lbl["Bus load"].setText(" · ".join(loads) if loads else "—")
+            self._win_bits, self._win_frames, self._win_t = {}, 0, now
         self.st_lbl["Rx frames"].setText(f"{self.n_rx:,}")
         self.st_lbl["Tx frames"].setText(f"{self.n_tx:,}")
         self.st_lbl["IDs"].setText(str(len(self.mon.keys)))
-        self.st_lbl["Errors"].setText(str(self.worker.errors if self.worker else 0))
+        self.st_lbl["Errors"].setText(str(sum(w.errors for w in self.workers.values())))
         self.st_lbl["Recorded"].setText(f"{self.rec_count:,}" if self.rec_file else "off")
         if self.rec_file is not None:
             self.rec_file.flush()
@@ -1342,11 +1589,12 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self._apply_mon_filter()
 
     def _apply_mon_filter(self):
-        for r, (_, cid) in enumerate(self.mon.keys):
-            self.mon_view.setRowHidden(r, self.filter is not None and not self.filter(cid))
+        for r, (bus, _, cid) in enumerate(self.mon.keys):
+            self.mon_view.setRowHidden(r, bus in self.hidden_lines or
+                                       (self.filter is not None and not self.filter(cid)))
 
     def _rebuild_trace(self):
-        frames = self.raw if self.filter is None else [f for f in self.raw if self.filter(f.can_id)]
+        frames = [f for f in self.raw if self._visible(f)]
         self.trace.set_rows(list(frames)[-TRACE_MAX:])
         if self.auto_chk.isChecked():
             self.trace_view.scrollToBottom()
@@ -1364,7 +1612,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
         self.raw.clear()
         self.last_ts.clear()
         self.trace.set_rows([])
-        self.trace.t0 = time.time() if self.worker else None
+        self.trace.t0 = time.time() if self.workers else None
         self.mon.clear()
         self.seq = self.n_rx = self.n_tx = 0
 
@@ -1380,6 +1628,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
     def _mon_to_tx(self, idx):
         f = self.mon.entry(idx.row()).frame
+        if f.bus in self.line_names():
+            self.tx_line.setCurrentText(f.bus)
         self.tx_id.setText(f.id_str())
         self.tx_ext.setChecked(f.ext)
         self.tx_rtr.setChecked(f.rtr)
@@ -1400,11 +1650,14 @@ class SnifferWindow(QtWidgets.QMainWindow):
         return self._tx_frame()
 
     def send_frame(self, f: Frame) -> bool:
-        if self.worker is None or self.worker.backend is None:
-            self.logmsg("not connected", "warn")
+        """Sends on f.bus (a library command tied to a line) or on the Transmit panel's line."""
+        line = f.bus or self.tx_line.currentText()
+        w = self.workers.get(line)
+        if w is None or w.backend is None:
+            self.logmsg(f"line '{line}' is not connected", "warn")
             return False
         try:
-            self.worker.send(f)
+            w.send(f)
             return True
         except Exception as e:
             self.logmsg(f"send failed: {type(e).__name__}: {e}", "err")
@@ -1420,9 +1673,10 @@ class SnifferWindow(QtWidgets.QMainWindow):
             self.tx_ext.setChecked(True)
         if can_id > 0x1FFFFFFF:
             raise ValueError("ID exceeds 29 bits")
+        line = self.tx_line.currentText()
         if self.tx_rtr.isChecked():
-            return Frame(0, can_id, ext, True, self.tx_dlc.value())
-        return Frame(0, can_id, ext, False, None, parse_hex_bytes(self.tx_data.text()))
+            return Frame(0, can_id, ext, True, self.tx_dlc.value(), bus=line)
+        return Frame(0, can_id, ext, False, None, parse_hex_bytes(self.tx_data.text()), bus=line)
 
     def send_once(self) -> bool:
         try:
@@ -1484,7 +1738,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
             "CSV (*.csv);;candump log (*.log)")
         if not path:
             return
-        frames = [f for f in self.raw if self.filter is None or self.filter(f.can_id)]
+        frames = [f for f in self.raw if self._visible(f)]
         try:
             if path.lower().endswith(".log") or "candump" in flt:
                 with open(path, "w", encoding="ascii", newline="\n") as fh:
@@ -1493,11 +1747,12 @@ class SnifferWindow(QtWidgets.QMainWindow):
                 t0 = self.trace.t0 or (frames[0].ts if frames else 0)
                 with open(path, "w", encoding="utf-8", newline="") as fh:
                     w = csv.writer(fh)
-                    w.writerow(["seq", "time", "time_rel_s", "dt_ms", "dir", "id", "type", "dlc", "data", "ascii"])
+                    w.writerow(["seq", "time", "time_rel_s", "dt_ms", "line", "dir", "id", "type", "dlc", "data",
+                                "ascii"])
                     for f in frames:
                         w.writerow([f.seq, _dt.datetime.fromtimestamp(f.ts).isoformat(timespec="microseconds"),
                                     f"{f.ts - t0:.6f}", "" if f.dt is None else f"{f.dt * 1000:.3f}",
-                                    "Tx" if f.tx else "Rx", f.id_str(), f.type_str(), f.dlc,
+                                    f.bus, "Tx" if f.tx else "Rx", f.id_str(), f.type_str(), f.dlc,
                                     f.data_str(), f.ascii_str()])
         except OSError as e:
             self.logmsg(f"save failed: {e}", "err")
@@ -1538,8 +1793,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         self.periodic.stop()
         self.script_panel.stop("stopped (window closed)")
-        if self.worker is not None:
-            self.worker.stop()
+        for w in list(self.workers.values()):
+            w.stop()
         if self.rec_file is not None:
             self.rec_file.close()
             self.rec_file = None
@@ -1548,7 +1803,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
 # --------------------------------------------------------------------------- #
 def main():
-    ap = argparse.ArgumentParser(description="CAN 2.0A/B sniffer for the CANable adapter")
+    ap = argparse.ArgumentParser(description="CAN 2.0A/B sniffer for CANable / IXXAT adapters")
     ap.add_argument("--interface", choices=[k for k, _ in INTERFACES], help="adapter interface")
     ap.add_argument("--port", help="COM port (slcan), device index (gs_usb) or can0 (socketcan)")
     ap.add_argument("--bitrate", type=int, help="bit/s, default 500000")

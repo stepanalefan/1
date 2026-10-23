@@ -6,7 +6,8 @@ Command library + block script editor for can_sniffer.py (keep both files in
 the same folder).
 
 * Command library - frames captured from the bus (or typed in), each with a
-  short key (letter) and a name. Double-click / Send / press the letter key
+  short key (letter), a name and optionally a fixed CAN line (BOS / AFAR / UPNG ...);
+  without a line, the line selected in the Transmit panel is used. Double-click / Send / press the letter key
   (with "Letter hotkeys" on) to transmit it.
 * Scripts - a single column of blocks:
       Send <command>        transmit a command from the library
@@ -32,8 +33,9 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 #  Data                                                                        #
 # --------------------------------------------------------------------------- #
 class Command:
-    def __init__(self, key="", name="", can_id=0, ext=False, rtr=False, dlc=0, data=b"", uid=None):
+    def __init__(self, key="", name="", can_id=0, ext=False, rtr=False, dlc=0, data=b"", uid=None, line=""):
         self.uid = uid or uuid.uuid4().hex[:12]
+        self.line = line            # CAN line name; "" = the Transmit panel's line
         self.key = key
         self.name = name
         self.can_id = can_id
@@ -44,8 +46,8 @@ class Command:
 
     def to_frame(self, frame_cls):
         if self.rtr:
-            return frame_cls(0, self.can_id, self.ext, True, self.dlc)
-        return frame_cls(0, self.can_id, self.ext, False, None, self.data)
+            return frame_cls(0, self.can_id, self.ext, True, self.dlc, bus=self.line)
+        return frame_cls(0, self.can_id, self.ext, False, None, self.data, bus=self.line)
 
     def id_str(self) -> str:
         return f"{self.can_id:08X}" if self.ext else f"{self.can_id:03X}"
@@ -56,16 +58,18 @@ class Command:
         return " ".join(f"{b:02X}" for b in self.data)
 
     def label(self) -> str:
-        return f"[{self.key}] {self.name}" if self.name else f"[{self.key}]"
+        return (f"[{self.key}] {self.name}" if self.name else f"[{self.key}]") + (f" @{self.line}" if self.line else "")
 
     def to_dict(self):
         return {"uid": self.uid, "key": self.key, "name": self.name, "id": self.id_str(),
-                "ext": self.ext, "rtr": self.rtr, "dlc": self.dlc, "data": self.data.hex().upper()}
+                "ext": self.ext, "rtr": self.rtr, "dlc": self.dlc, "data": self.data.hex().upper(),
+                "line": self.line}
 
     @classmethod
     def from_dict(cls, d):
         return cls(d.get("key", ""), d.get("name", ""), int(d["id"], 16), bool(d.get("ext")),
-                   bool(d.get("rtr")), int(d.get("dlc", 0)), bytes.fromhex(d.get("data", "")), d.get("uid"))
+                   bool(d.get("rtr")), int(d.get("dlc", 0)), bytes.fromhex(d.get("data", "")), d.get("uid"),
+                   d.get("line", ""))
 
 
 class Store:
@@ -126,7 +130,7 @@ def _hex_bytes(text: str) -> bytes:
 #  Command edit dialog                                                         #
 # --------------------------------------------------------------------------- #
 class CommandDialog(QtWidgets.QDialog):
-    def __init__(self, parent, cmd: Command, taken_keys: set[str]):
+    def __init__(self, parent, cmd: Command, taken_keys: set[str], lines=()):
         super().__init__(parent)
         self.setWindowTitle("Command")
         self.cmd = cmd
@@ -155,6 +159,13 @@ class CommandDialog(QtWidgets.QDialog):
         f.addRow("ID (hex)", self.cid)
         f.addRow("", flags)
         f.addRow("Data (hex)", self.data)
+        self.line = QtWidgets.QComboBox()
+        self.line.addItem("(line selected in the Transmit panel)", "")
+        for n in list(lines) + ([cmd.line] if cmd.line and cmd.line not in lines else []):
+            self.line.addItem(n, n)
+        self.line.setCurrentIndex(max(0, self.line.findData(cmd.line)))
+        self.line.setToolTip("CAN line this command is always sent on (e.g. BOS commands on the BOS line)")
+        f.addRow("Send on line", self.line)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -180,6 +191,7 @@ class CommandDialog(QtWidgets.QDialog):
         c.key, c.name, c.can_id, c.ext, c.rtr = key, self.name.text().strip(), can_id, ext, self.rtr.isChecked()
         c.data = data
         c.dlc = self.dlc.value() if c.rtr else len(data)
+        c.line = self.line.currentData() or ""
         super().accept()
 
 
@@ -205,7 +217,7 @@ class CommandPanel(QtWidgets.QGroupBox):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
         self.table.horizontalHeader().setStretchLastSection(True)
-        for i, w in enumerate((44, 130, 80)):
+        for i, w in enumerate((44, 130, 120)):
             self.table.setColumnWidth(i, w)
         self.table.doubleClicked.connect(lambda *_: self.send_selected())
         self.table.setToolTip("Double-click = send.  With 'Letter hotkeys' on, press the key to send.")
@@ -255,7 +267,7 @@ class CommandPanel(QtWidgets.QGroupBox):
         self.table.setRowCount(len(self.store.commands))
         rows = []
         for r, c in enumerate(self.store.commands):
-            items = [c.key, c.name, c.id_str(), c.data_str()]
+            items = [c.key, c.name, (f"{c.line}: " if c.line else "") + c.id_str(), c.data_str()]
             for col, text in enumerate(items):
                 it = QtWidgets.QTableWidgetItem(text)
                 if col == 0:
@@ -294,8 +306,14 @@ class CommandPanel(QtWidgets.QGroupBox):
         self._commit({c.uid for c in cmds})
         self.host.logmsg(f"added command(s): {', '.join(c.label() for c in cmds)}", "ok")
 
+    def _lines(self) -> list[str]:
+        fn = getattr(self.host, "line_names", None)
+        return fn() if fn else []
+
     def _from_frame(self, f) -> Command:
-        return Command("", "", f.can_id, f.ext, f.rtr, f.dlc, f.data)
+        bus = getattr(f, "bus", "")
+        return Command("", "", f.can_id, f.ext, f.rtr, f.dlc, f.data,
+                       line=bus if bus in self._lines() else "")
 
     # ---------------------------------------------------------- actions ---
     def add_from_selection(self):
@@ -316,7 +334,7 @@ class CommandPanel(QtWidgets.QGroupBox):
             cmds.append(c)
         del self.store.commands[-len(cmds):]
         if len(cmds) == 1:
-            dlg = CommandDialog(self, cmds[0], {x.key for x in self.store.commands})
+            dlg = CommandDialog(self, cmds[0], {x.key for x in self.store.commands}, self._lines())
             if dlg.exec_() != QtWidgets.QDialog.Accepted:
                 return
         self._add(cmds)
@@ -329,12 +347,12 @@ class CommandPanel(QtWidgets.QGroupBox):
             return
         c = self._from_frame(f)
         c.key = self.store.next_key()
-        if CommandDialog(self, c, {x.key for x in self.store.commands}).exec_() == QtWidgets.QDialog.Accepted:
+        if CommandDialog(self, c, {x.key for x in self.store.commands}, self._lines()).exec_() == QtWidgets.QDialog.Accepted:
             self._add([c])
 
     def add_new(self):
         c = Command(self.store.next_key())
-        if CommandDialog(self, c, {x.key for x in self.store.commands}).exec_() == QtWidgets.QDialog.Accepted:
+        if CommandDialog(self, c, {x.key for x in self.store.commands}, self._lines()).exec_() == QtWidgets.QDialog.Accepted:
             self._add([c])
 
     def edit_selected(self):
@@ -343,7 +361,7 @@ class CommandPanel(QtWidgets.QGroupBox):
             return
         c = sel[0]
         taken = {x.key for x in self.store.commands if x is not c}
-        if CommandDialog(self, c, taken).exec_() == QtWidgets.QDialog.Accepted:
+        if CommandDialog(self, c, taken, self._lines()).exec_() == QtWidgets.QDialog.Accepted:
             self._commit({c.uid})
 
     def delete_selected(self):

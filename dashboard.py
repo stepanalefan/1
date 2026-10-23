@@ -77,7 +77,8 @@ class TelemetryCsv:
             self.day = None
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
 STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
-               "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9"}
+               "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
+               "sw": "#ffa657"}
 SMW_KEYS = [  # key, label
     ("freq", "Frequency, Hz"), ("level", "Level, dBm"), ("format", "Modulation"), ("srate", "Symbol rate, Hz"),
     ("filter", "Filter"), ("fparam", "Filter alpha / BT"), ("dm", "Baseband DM on"),
@@ -212,7 +213,7 @@ class StepDialog(QtWidgets.QDialog):
         op = step["op"]
         self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "can": "CAN command",
                              "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "scan": "Voltage scan", "repeat": "Repeat",
-                             "log": "Log message"}.get(op, op))
+                             "log": "Log message", "sw": "Switch (slave Arduino)"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
         if op == "hmp":
@@ -343,6 +344,30 @@ class StepDialog(QtWidgets.QDialog):
         elif op == "log":
             self.text = QtWidgets.QLineEdit(step.get("text", ""))
             f.addRow("Message", self.text)
+        elif op == "sw":
+            sw = getattr(host, "switch", None)
+            pins = sw_pins(sw)
+            self.out = QtWidgets.QComboBox()
+            for i, pin in enumerate(pins):
+                self.out.addItem(f"{pin}  ({sw.cfg['names'][i]})" if sw else pin, i)
+            self.out.setCurrentIndex(max(0, min(step.get("out", 0), len(pins) - 1)))
+            f.addRow("Output", self.out)
+            self.sw_act = QtWidgets.QComboBox()
+            for k, text in (("on", "Switch ON"), ("off", "Switch OFF"), ("pulse", "Pulse (on, then off)")):
+                self.sw_act.addItem(text, k)
+            self.sw_act.setCurrentIndex(self.sw_act.findData(step.get("action", "pulse")))
+            f.addRow("Action", self.sw_act)
+            self.sw_ms = QtWidgets.QSpinBox()
+            self.sw_ms.setRange(10, 600000)
+            self.sw_ms.setSuffix(" ms")
+            self.sw_ms.setValue(int(step.get("ms", 1000)))
+            f.addRow("Pulse length", self.sw_ms)
+            self.sw_act.currentIndexChanged.connect(
+                lambda *_: self.sw_ms.setEnabled(self.sw_act.currentData() == "pulse"))
+            self.sw_ms.setEnabled(self.sw_act.currentData() == "pulse")
+            f.addRow(QtWidgets.QLabel("The step waits until the slave confirms (not for the end of the pulse)."))
+            if sw is None:
+                f.addRow(QtWidgets.QLabel("Switch control is not available (slave_switch.py missing)."))
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -376,6 +401,10 @@ class StepDialog(QtWidgets.QDialog):
                 s["cmd"] = self.cmd.currentData()
             elif op == "wait":
                 s["ms"] = self.ms.value()
+            elif op == "sw":
+                s["out"], s["action"] = self.out.currentData(), self.sw_act.currentData()
+                if s["action"] == "pulse":
+                    s["ms"] = self.sw_ms.value()
             elif op == "fsw_set":
                 app = self.app.currentData()
                 s["app"], s["params"] = app, {}
@@ -430,6 +459,10 @@ def _smw_filters():
 # --------------------------------------------------------------------------- #
 def slave_switch_pins(sw):
     return getattr(sys.modules.get(type(sw).__module__), "PINS", ())
+
+
+def sw_pins(sw):
+    return slave_switch_pins(sw) if sw is not None else ("A0", "A1")
 
 
 class Dashboard(QtWidgets.QWidget):
@@ -554,7 +587,8 @@ class Dashboard(QtWidgets.QWidget):
         add = QtWidgets.QGridLayout()
         for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
                                         ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW settings", "fsw_set"),
-                                        ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"))):
+                                        ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"),
+                                        ("+ Switch", "sw"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};")
             b.clicked.connect(lambda _, op=op: self.add_step(op))
@@ -754,7 +788,8 @@ class Dashboard(QtWidgets.QWidget):
                              smw.idn or "not connected", "RF ON" if rf else "")
         c = getattr(h, "can_win", None)
         if c:
-            ok = c.worker is not None and c.worker.backend is not None
+            up = c.connected_lines() if hasattr(c, "connected_lines") else []
+            ok = bool(up)
             self._set_status("CAN", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
         self._refresh_volt()
@@ -1009,6 +1044,14 @@ class Dashboard(QtWidgets.QWidget):
             return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
+        if op == "sw":
+            sw = getattr(self.host, "switch", None)
+            pins = sw_pins(sw)
+            i = s.get("out", 0)
+            pin = pins[i] if i < len(pins) else f"#{i}"
+            name = f" '{sw.cfg['names'][i]}'" if sw and i < len(sw.cfg["names"]) else ""
+            act = {"on": "ON", "off": "OFF"}.get(s["action"], f"pulse {s.get('ms', 0)} ms")
+            return f"⏻ Switch {pin}{name}   {act}"
         if op == "fsw":
             return "〰 FSW   " + {"single": "single measurement (wait for result)",
                                   "autolevel": "auto level"}.get(s["action"], s["action"])
@@ -1077,7 +1120,7 @@ class Dashboard(QtWidgets.QWidget):
                     "smw": {"freq": 2.4e9, "level": -30.0, "rf": True}, "wait": {"ms": 1000},
                     "fsw": {"action": "run"}, "scan": {"action": "start"},
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
-                    "log": {"text": ""}, "can": {}}
+                    "log": {"text": ""}, "can": {}, "sw": {"out": 0, "action": "pulse", "ms": 1000}}
         dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1293,6 +1336,25 @@ class Dashboard(QtWidgets.QWidget):
             params = {k: s[k] for k, _ in SMW_KEYS if k in s}
             return run_in(smw.worker.submit, lambda: smw.worker.apply(params, prev={}, label="sequence"),
                           "SMW200A")
+        elif op == "sw":
+            sw = getattr(h, "switch", None)
+            if sw is None:
+                raise RuntimeError("switch control not available")
+            if sw._dev() is None:
+                raise RuntimeError("Arduino not connected (Bench tab)")
+            i = s.get("out", 0)
+            tok = Token(f"Switch {sw_pins(sw)[i]}", timeout=15)
+
+            def done(ok):
+                if not ok:
+                    tok.error = sw.error or "slave did not confirm"
+                tok.done = True
+            reason = f"sequence '{self.seq_cb.currentText()}'"
+            if s["action"] == "pulse":
+                sw.pulse(i, int(s.get("ms", 1000)), reason, done)
+            else:
+                sw.set_output(i, s["action"] == "on", reason, done)
+            return tok
         elif op == "can":
             c = getattr(h, "can_win", None)
             cmd = c.store.by_uid(s.get("cmd")) if c else None
