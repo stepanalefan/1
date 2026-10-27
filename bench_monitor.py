@@ -276,6 +276,19 @@ class ArduinoMux:
 
     ow = slave
 
+    def raw(self, cmd: str, wait: float) -> list[str]:
+        """Send one line and return every line received within `wait` s (no interpretation)."""
+        self.ard.reset_input_buffer()
+        self.ard.write(f"{cmd}\n".encode())
+        lines, end = [], time.monotonic() + wait
+        while time.monotonic() < end:
+            line = self.ard.readline().decode(errors="replace").strip()
+            if line:
+                lines.append(line)
+                if line.startswith(self.SLAVE_FINAL):
+                    break
+        return lines
+
     def close(self):
         try:
             self.ard.close()
@@ -666,12 +679,107 @@ class HmpCsv:
             self.day = None
 
 
+def diagnose_slave(dev) -> list[tuple[str, str]]:
+    """Step-by-step check PC -> master -> slave -> 1-Wire. Returns [(level, text)], level ok/warn/err.
+    Does not switch any output."""
+    out = []
+    raw = getattr(dev, "raw", None)
+    if raw is None:                                          # simulator
+        raw = lambda cmd, wait: dev.slave(cmd)
+
+    # 1. master alive (multiplexer command)
+    try:
+        dev.select(0)
+        out.append(("ok", "1. Master Arduino answers (multiplexer command SET:0 confirmed)."))
+    except Exception as e:
+        out.append(("err", f"1. Master Arduino does not answer SET:0 ({e}). Check the COM port; "
+                           f"is the master sketch uploaded?"))
+        return out
+
+    # 2. relay to the slave
+    lines = raw("SW:STATE?", 2.5)
+    st = next((x for x in lines if x.startswith("SW:STATE:")), None)
+    if st:
+        bits = st.split(":")[2]
+        out.append(("ok", f"2. Slave Arduino answers through the master (switch outputs: "
+                          f"A0 {'ON' if bits[:1] == '1' else 'off'}, A1 {'ON' if bits[1:2] == '1' else 'off'})."))
+    elif "ERR:SLAVE_TIMEOUT" in lines:
+        out.append(("err", "2. The master has the new sketch, but the SLAVE does not answer. Check:\n"
+                           "   - master A5 -> slave D2 and slave D3 -> master A4 (TX to RX, not TX to TX);\n"
+                           "   - a GND wire between the two boards;\n"
+                           "   - the slave is powered and has slave_onewire_switch.ino uploaded;\n"
+                           "   - SLAVE_BAUD (master) = LINK_BAUD (slave) = 19200.\n"
+                           "   Test the slave alone: Serial Monitor on the slave's USB, 115200, 'Newline', "
+                           "type SW:STATE? - it must answer SW:STATE:00."))
+        return out
+    elif any(x.startswith("ERR:UNKNOWN_CMD") for x in lines):
+        out.append(("err", "2. The slave answers but does not know SW:STATE? - upload the current "
+                           "slave_onewire_switch.ino."))
+        return out
+    elif lines:
+        out.append(("err", f"2. Unexpected reply {lines[:3]} - garbled characters usually mean a baud-rate "
+                           f"mismatch (both must be 19200) or a missing GND between the boards."))
+        return out
+    else:
+        out.append(("err", "2. The master does not relay commands to the slave (no reply to SW:STATE?). "
+                           "Upload the NEW master sketch (sketch_sep24a.ino with the SoftwareSerial relay)."))
+        return out
+
+    # 3. 1-Wire reset on each bus
+    lines = raw("OW:CONV", 2.5)
+    conv = next((x for x in lines if x.startswith("OW:CONV")), "")
+    pins = ("A3", "A4", "A5")
+    if conv.startswith("OW:CONV:OK"):
+        try:
+            mask = int(conv.split(":")[3])
+        except (IndexError, ValueError):
+            mask = 0
+        on = [p for i, p in enumerate(pins) if mask >> i & 1]
+        off = [p for p in pins if p not in on]
+        out.append(("ok" if not off else "warn",
+                    f"3. 1-Wire devices answer on {', '.join(on) or '?'}"
+                    + (f"; nothing answers on {', '.join(off)} (fine if no sensor is wired there)." if off else ".")))
+    elif conv == "OW:CONV:NODEV":
+        out.append(("err", "3. No 1-Wire device answers on A3, A4 or A5. Check on each bus: 4.7 kOhm from the data "
+                           "line to +5 V of the SLAVE board, sensor GND to slave GND, data to A3/A4/A5. "
+                           "With parasitic power, sensor VDD must be tied to GND."))
+        return out
+    else:
+        out.append(("err", f"3. No answer to OW:CONV ({lines[:3]}) - is the OneWire library compiled in the slave sketch?"))
+        return out
+
+    # 4. read the sensors
+    lines = raw("OW:READ", 4.0)
+    devs = [x for x in lines if x.startswith("OW:DEV:")]
+    try:
+        from onewire_temp import decode, BUS_PINS
+        good, bad = [], []
+        for x in devs:
+            p = x.split(":")
+            if len(p) == 5:
+                p = p[:2] + ["1"] + p[2:]
+            d = decode(p[3], p[4], p[5])
+            where = BUS_PINS.get(int(p[2]), p[2]) if p[2].isdigit() else p[2]
+            (good if d["status"] == "OK" else bad).append(
+                f"{where} {p[3]}: " + (f"{d['temp']:.2f} °C" if d["status"] == "OK" else d["status"]))
+        if good or bad:
+            out.append(("ok" if not bad else "warn", f"4. {len(devs)} sensor(s) read:\n   " +
+                        "\n   ".join(good + bad)))
+        else:
+            out.append(("err", f"4. Bus reset OK but no sensor found by the search ({lines[-1:] or 'no reply'}). "
+                               f"Often a weak pull-up or long cable; try 2.2 kOhm or external power for the sensors."))
+    except Exception as e:
+        out.append(("warn", f"4. Read {len(devs)} line(s) but could not decode them: {e}"))
+    return out
+
+
 class ScanWorker(_Worker):
     sample = QtCore.pyqtSignal(int, float, float)        # channel, time, voltage
     scan_done = QtCore.pyqtSignal(float, int)            # seconds, channels
     timing = QtCore.pyqtSignal(float, float)             # s per channel: Arduino switch, DMM read
     ard_connected = QtCore.pyqtSignal(bool, str)
     dmm_connected = QtCore.pyqtSignal(bool, str)
+    diagnosed = QtCore.pyqtSignal(object)                # [(level, text)]
     stopped = QtCore.pyqtSignal(str)                     # reason ("" = by user)
 
     def __init__(self):
@@ -700,6 +808,13 @@ class ScanWorker(_Worker):
             self.dev.close()
             self.dev = None
             self.ard_connected.emit(False, "")
+
+    def diagnose(self):
+        try:
+            res = diagnose_slave(self.dev) if self.dev is not None else [("err", "Arduino not connected")]
+        except Exception as e:
+            res = [("err", f"test aborted: {type(e).__name__}: {e}")]
+        self.diagnosed.emit(res)
 
     def connect_dmm(self, demo: bool, resource: str):
         self.disconnect_dmm()
@@ -999,6 +1114,7 @@ class BenchTab(QtCore.QObject):
         self.scan.scan_done.connect(self._on_scan_done)
         self.scan.timing.connect(self._on_scan_timing)
         self.scan.ard_connected.connect(self._on_ard_connected)
+        self.scan.diagnosed.connect(self._on_diagnosed)
         self.scan.dmm_connected.connect(self._on_dmm_connected)
         self.scan.stopped.connect(self._on_scan_stopped)
         self.hmp_last_state = {}   # ch -> (Vset, Iset, on), read by the Main tab
@@ -1067,6 +1183,12 @@ class BenchTab(QtCore.QObject):
         row.addWidget(self.dmm_conn_btn)
         f.addRow("Multimeter", row)
         f.addRow("", self.dmm_status)
+        self.diag_btn = QtWidgets.QPushButton("Test slave link")
+        self.diag_btn.setToolTip("Checks PC -> master -> slave -> 1-Wire step by step and says where it stops.\n"
+                                 "Does not switch any output.")
+        self.diag_btn.clicked.connect(self.on_diagnose)
+        self.diag_btn.setEnabled(False)
+        f.addRow("", self.diag_btn)
         note = QtWidgets.QLabel("The voltage scan needs both. 1-Wire and the switch need only the Arduino.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#8a96a3;font-size:11px;")
@@ -1312,6 +1434,8 @@ class BenchTab(QtCore.QObject):
         self.ard_port.setEnabled(not self._ard_ok)
         self.dmm_res.setEnabled(not self._dmm_ok)
         self.g_scan.setEnabled(ok)
+        if hasattr(self, "diag_btn"):
+            self.diag_btn.setEnabled(self._ard_ok)
         if not ok and self.run_btn.isChecked():
             self.run_btn.setChecked(False)
 
@@ -1387,6 +1511,25 @@ class BenchTab(QtCore.QObject):
             self.on_ard_connect()
         if not self._dmm_ok:
             self.on_dmm_connect()
+
+    def on_diagnose(self):
+        self.diag_btn.setEnabled(False)
+        self.diag_btn.setText("Testing…")
+        self.scan.submit(self.scan.diagnose)
+
+    def _on_diagnosed(self, res):
+        self.diag_btn.setText("Test slave link")
+        self.diag_btn.setEnabled(self._ard_ok)
+        for level, text in res:
+            self.log.emit("Slave test: " + text.replace("\n", "  "), level)
+        icon = {"ok": "✓", "warn": "⚠", "err": "✗"}
+        box = QtWidgets.QMessageBox(self.page)
+        box.setWindowTitle("Slave link test")
+        worst = "err" if any(l == "err" for l, _ in res) else ("warn" if any(l == "warn" for l, _ in res) else "ok")
+        box.setIcon({"ok": QtWidgets.QMessageBox.Information, "warn": QtWidgets.QMessageBox.Warning,
+                     "err": QtWidgets.QMessageBox.Critical}[worst])
+        box.setText("\n\n".join(f"{icon[l]} {t}" for l, t in res))
+        box.exec_()
 
     def on_ard_connect(self):
         if self._ard_ok:
