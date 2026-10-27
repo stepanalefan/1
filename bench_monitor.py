@@ -220,15 +220,12 @@ def open_link(addr: str):
 # --------------------------------------------------------------------------- #
 #  Devices                                                                     #
 # --------------------------------------------------------------------------- #
-class MuxScanner:
-    """Arduino multiplexer + 34405A multimeter."""
+class ArduinoMux:
+    """Master Arduino: multiplexer channel switching + relay to the slave (1-Wire, switch)."""
 
-    def __init__(self, arduino_port: str, dmm_resource: str):
+    def __init__(self, arduino_port: str):
         if serial is None:
             raise RuntimeError("pyserial is not installed:  pip install pyserial")
-        if pyvisa is None:
-            raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        self.t_switch = self.t_read = 0.0      # accumulated per scan, for the timing readout
         self.ard = serial.Serial(arduino_port, 115200, timeout=1.0, write_timeout=1.0)
         try:
             time.sleep(2.0)                    # most Arduinos reboot when the port opens
@@ -242,19 +239,10 @@ class MuxScanner:
                         raise
                     time.sleep(0.5)
                     self.ard.reset_input_buffer()
-            try:
-                rm = pyvisa.ResourceManager()
-            except Exception:
-                rm = pyvisa.ResourceManager("@py")
-            self.dmm = rm.open_resource(dmm_resource)
-            self.dmm.timeout = 3000
-            self.dmm_idn = self.dmm.query("*IDN?").strip()
-            for cmd in ("*RST", "CONF:VOLT:DC 10", "SENS:VOLT:DC:NPLC 1"):
-                self.dmm.write(cmd)
         except Exception:
             self.ard.close()
             raise
-        self.info = f"Arduino {arduino_port} · {self.dmm_idn.split(',')[1] if ',' in self.dmm_idn else self.dmm_idn}"
+        self.info = f"Arduino {arduino_port}"
 
     def select(self, ch: int):
         self.ard.write(f"SET:{ch}\n".encode())
@@ -288,40 +276,74 @@ class MuxScanner:
 
     ow = slave
 
-    def measure(self, ch: int, settle_s: float = 0.0) -> float:
-        t0 = time.perf_counter()
-        self.select(ch)
-        if settle_s > 0:
-            time.sleep(settle_s)
-        t1 = time.perf_counter()
-        v = float(self.dmm.query("READ?"))
-        self.t_switch += t1 - t0
-        self.t_read += time.perf_counter() - t1
-        return v
+    def close(self):
+        try:
+            self.ard.close()
+        except Exception:
+            pass
+
+
+class Multimeter:
+    """Agilent 34405A over VISA: DC volts, 10 V range."""
+
+    def __init__(self, resource: str):
+        if pyvisa is None:
+            raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
+        try:
+            rm = pyvisa.ResourceManager()
+        except Exception:
+            rm = pyvisa.ResourceManager("@py")
+        self.dmm = rm.open_resource(resource)
+        try:
+            self.dmm.timeout = 3000
+            idn = self.dmm.query("*IDN?").strip()
+            for cmd in ("*RST", "CONF:VOLT:DC 10", "SENS:VOLT:DC:NPLC 1"):
+                self.dmm.write(cmd)
+        except Exception:
+            self.dmm.close()
+            raise
+        self.info = idn.split(",")[1].strip() if "," in idn else idn
+
+    def read(self, ch=None) -> float:
+        return float(self.dmm.query("READ?"))
 
     def close(self):
-        for dev in (getattr(self, "ard", None), getattr(self, "dmm", None)):
-            try:
-                dev.close()
-            except Exception:
-                pass
+        try:
+            self.dmm.close()
+        except Exception:
+            pass
 
 
-class DemoScanner:
-    info = "simulated Arduino + 34405A"
+class DemoMultimeter:
+    info = "simulated 34405A"
 
     def __init__(self):
         self.rng = np.random.default_rng()
         self.base = np.array([(1.8, 2.5, 3.3, 5.0)[ch % 4] for ch in range(N_CHANNELS)])
 
-    def measure(self, ch: int, settle_s: float = 0.0) -> float:
-        time.sleep(0.015 + settle_s)
+    def read(self, ch=None) -> float:
+        time.sleep(0.012)
+        if ch is None:
+            return self.rng.normal(0, 0.001)
         g = group_of(ch)
         if g == 1:
             return 5.0 + self.rng.normal(0, 0.01)                   # displayed as -5 V
         if g == 2:
             return 16.0 / DIVIDER_RATIO + self.rng.normal(0, 0.005)  # displayed as ~16 V
         return self.base[ch] + self.rng.normal(0, 0.004)
+
+    def close(self):
+        pass
+
+
+class DemoArduino:
+    info = "simulated Arduino"
+
+    def __init__(self):
+        self.rng = np.random.default_rng()
+
+    def select(self, ch: int):
+        time.sleep(0.003)
 
     # simulated slave Arduino: DS18B20 on the three 1-Wire buses + two switch outputs
     _OW = ((1, "28FF4A1B9316035E", 23.0, 0), (2, "28AA0C77511901A3", 31.5, 1), (3, "2861640A1C8E4F12", -4.0, 1))
@@ -648,7 +670,8 @@ class ScanWorker(_Worker):
     sample = QtCore.pyqtSignal(int, float, float)        # channel, time, voltage
     scan_done = QtCore.pyqtSignal(float, int)            # seconds, channels
     timing = QtCore.pyqtSignal(float, float)             # s per channel: Arduino switch, DMM read
-    connected = QtCore.pyqtSignal(bool, str)
+    ard_connected = QtCore.pyqtSignal(bool, str)
+    dmm_connected = QtCore.pyqtSignal(bool, str)
     stopped = QtCore.pyqtSignal(str)                     # reason ("" = by user)
 
     def __init__(self):
@@ -661,18 +684,34 @@ class ScanWorker(_Worker):
         self._idx = 0
         self._scan_t0 = None
         self._unflushed = False
+        self.dmm = None
+        self.t_switch = self.t_read = 0.0      # accumulated per scan, for the timing readout
 
-    def connect_dev(self, demo: bool, arduino: str, dmm: str):
-        self.disconnect_dev()
-        self.dev = DemoScanner() if demo else MuxScanner(arduino, dmm)
-        self.connected.emit(True, self.dev.info)
+    # self.dev = the Arduino (also used by the 1-Wire tab and the switch), self.dmm = the 34405A.
+    # They connect independently; the voltage scan needs both.
+    def connect_arduino(self, demo: bool, port: str):
+        self.disconnect_arduino()
+        self.dev = DemoArduino() if demo else ArduinoMux(port)
+        self.ard_connected.emit(True, self.dev.info)
 
-    def disconnect_dev(self):
+    def disconnect_arduino(self):
         self.running = False
         if self.dev is not None:
             self.dev.close()
             self.dev = None
-            self.connected.emit(False, "")
+            self.ard_connected.emit(False, "")
+
+    def connect_dmm(self, demo: bool, resource: str):
+        self.disconnect_dmm()
+        self.dmm = DemoMultimeter() if demo else Multimeter(resource)
+        self.dmm_connected.emit(True, self.dmm.info)
+
+    def disconnect_dmm(self):
+        self.running = False
+        if self.dmm is not None:
+            self.dmm.close()
+            self.dmm = None
+            self.dmm_connected.emit(False, "")
 
     def set_channels(self, chans: list[int]):
         self.channels = chans
@@ -680,7 +719,7 @@ class ScanWorker(_Worker):
         self._scan_t0 = None
 
     def step(self) -> bool:
-        if self.dev is None or not self.running or not self.channels:
+        if self.dev is None or self.dmm is None or not self.running or not self.channels:
             if self.csv and self.csv.f and not self.csv.f.closed and self._unflushed:
                 self.csv.f.flush()
                 self._unflushed = False
@@ -690,14 +729,20 @@ class ScanWorker(_Worker):
         if self._idx == 0:
             if self._scan_t0 is not None and len(self.channels) > 1:
                 self.scan_done.emit(time.perf_counter() - self._scan_t0, len(self.channels))
-                if hasattr(self.dev, "t_switch"):
-                    n = len(self.channels)
-                    self.timing.emit(self.dev.t_switch / n, self.dev.t_read / n)
-                    self.dev.t_switch = self.dev.t_read = 0.0
+                n = len(self.channels)
+                self.timing.emit(self.t_switch / n, self.t_read / n)
+            self.t_switch = self.t_read = 0.0
             self._scan_t0 = time.perf_counter()
         ch = self.channels[self._idx]
         self._idx += 1
-        raw = self.dev.measure(ch, self.settle_s)
+        t0 = time.perf_counter()
+        self.dev.select(ch)
+        if self.settle_s > 0:
+            time.sleep(self.settle_s)
+        t1 = time.perf_counter()
+        raw = self.dmm.read(ch)
+        self.t_switch += t1 - t0
+        self.t_read += time.perf_counter() - t1
         v = convert(ch, raw)
         t = time.time()
         if self.csv:
@@ -714,6 +759,9 @@ class ScanWorker(_Worker):
     def on_quit(self):
         if self.csv:
             self.csv.close()
+        if self.dmm is not None:
+            self.dmm.close()
+            self.dmm = None
         super().on_quit()
 
 
@@ -936,7 +984,8 @@ class BenchTab(QtCore.QObject):
         self._dirty_rows: set[int] = set()
         self._dirty_curves: set[int] = set()
         self._current = None
-        self._scan_ok = False
+        self._ard_ok = False
+        self._dmm_ok = False
         self._hmp_ok = False
         self._hmp_master = False
         self.log_folder = script_dir()
@@ -949,7 +998,8 @@ class BenchTab(QtCore.QObject):
         self.scan.sample.connect(self._on_sample)
         self.scan.scan_done.connect(self._on_scan_done)
         self.scan.timing.connect(self._on_scan_timing)
-        self.scan.connected.connect(self._on_scan_connected)
+        self.scan.ard_connected.connect(self._on_ard_connected)
+        self.scan.dmm_connected.connect(self._on_dmm_connected)
         self.scan.stopped.connect(self._on_scan_stopped)
         self.hmp_last_state = {}   # ch -> (Vset, Iset, on), read by the Main tab
         self.hmp_last_meas = {}    # ch -> (V, I)
@@ -995,14 +1045,32 @@ class BenchTab(QtCore.QObject):
         self.dmm_res = QtWidgets.QComboBox()
         self.dmm_res.setEditable(True)
         self.dmm_res.setToolTip("VISA resource of the 34405A, e.g. USB0::0x0957::0x0618::MY5327xxxx::INSTR")
-        self.scan_conn_btn = QtWidgets.QPushButton("Connect")
-        self.scan_conn_btn.clicked.connect(self.on_scan_connect)
-        self.scan_status = QtWidgets.QLabel("not connected")
-        self.scan_status.setWordWrap(True)
-        f.addRow("Arduino", self.ard_port)
-        f.addRow("Multimeter", self.dmm_res)
-        f.addRow(self.scan_conn_btn)
-        f.addRow(self.scan_status)
+        self.ard_conn_btn = QtWidgets.QPushButton("Connect")
+        self.ard_conn_btn.setToolTip("Arduino alone is enough for the 1-Wire sensors and the switch")
+        self.ard_conn_btn.clicked.connect(self.on_ard_connect)
+        self.dmm_conn_btn = QtWidgets.QPushButton("Connect")
+        self.dmm_conn_btn.clicked.connect(self.on_dmm_connect)
+        self.ard_status = QtWidgets.QLabel("not connected")
+        self.dmm_status = QtWidgets.QLabel("not connected")
+        for lb in (self.ard_status, self.dmm_status):
+            lb.setWordWrap(True)
+            lb.setStyleSheet("color:#8a96a3;")
+        for btn in (self.ard_conn_btn, self.dmm_conn_btn):
+            btn.setMinimumWidth(100)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.ard_port, 1)
+        row.addWidget(self.ard_conn_btn)
+        f.addRow("Arduino", row)
+        f.addRow("", self.ard_status)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.dmm_res, 1)
+        row.addWidget(self.dmm_conn_btn)
+        f.addRow("Multimeter", row)
+        f.addRow("", self.dmm_status)
+        note = QtWidgets.QLabel("The voltage scan needs both. 1-Wire and the switch need only the Arduino.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8a96a3;font-size:11px;")
+        f.addRow(note)
         lv.addWidget(g)
 
         self.g_scan = g = QtWidgets.QGroupBox("Scan")
@@ -1232,13 +1300,19 @@ class BenchTab(QtCore.QObject):
             combo.setEditText(cur)
             combo.blockSignals(False)
 
-    def _set_scan_connected(self, on: bool):
-        self._scan_ok = on
-        self.scan_conn_btn.setText("Disconnect" if on else "Connect")
-        self.g_scan.setEnabled(on)
-        self.ard_port.setEnabled(not on)
-        self.dmm_res.setEnabled(not on)
-        if not on and self.run_btn.isChecked():
+    @property
+    def _scan_ok(self) -> bool:
+        """Voltage scan possible: Arduino and multimeter both connected."""
+        return self._ard_ok and self._dmm_ok
+
+    def _set_scan_connected(self, *_):
+        ok = self._scan_ok
+        self.ard_conn_btn.setText("Disconnect" if self._ard_ok else "Connect")
+        self.dmm_conn_btn.setText("Disconnect" if self._dmm_ok else "Connect")
+        self.ard_port.setEnabled(not self._ard_ok)
+        self.dmm_res.setEnabled(not self._dmm_ok)
+        self.g_scan.setEnabled(ok)
+        if not ok and self.run_btn.isChecked():
             self.run_btn.setChecked(False)
 
     def _set_hmp_connected(self, on: bool):
@@ -1287,7 +1361,7 @@ class BenchTab(QtCore.QObject):
         self.detect_btn.setEnabled(False)
         self.detect_btn.setText("Detecting…")
         skip = []
-        if self._scan_ok:
+        if self._ard_ok:
             skip.append(self.ard_port.currentText())
         if self._hmp_ok:
             skip.append(self.hmp_addr.currentText())
@@ -1308,23 +1382,46 @@ class BenchTab(QtCore.QObject):
                       f"HMP4040 {found['hmp'] or '— (enter IP for LAN)'}", "ok")
 
     def on_scan_connect(self):
-        if self._scan_ok:
-            self.scan.submit(self.scan.disconnect_dev)
+        """Connect whatever of Arduino / multimeter is not connected yet."""
+        if not self._ard_ok:
+            self.on_ard_connect()
+        if not self._dmm_ok:
+            self.on_dmm_connect()
+
+    def on_ard_connect(self):
+        if self._ard_ok:
+            self.scan.submit(self.scan.disconnect_arduino)
             return
-        demo = self.demo_chk.isChecked()
-        ard, dmm = self.ard_port.currentText().strip(), self.dmm_res.currentText().strip()
-        if not demo and not (ard and dmm):
-            self.log.emit("Enter the Arduino COM port and the multimeter VISA resource "
-                          "(or use Auto-detect / demo)", "warn")
+        demo, port = self.demo_chk.isChecked(), self.ard_port.currentText().strip()
+        if not demo and not port:
+            self.log.emit("Enter the Arduino COM port (or use Auto-detect / demo)", "warn")
             return
-        self.scan_status.setText("connecting… (Arduino reset takes ~2 s)")
-        self.scan_conn_btn.setEnabled(False)
+        self.ard_status.setText("connecting… (Arduino reset takes ~2 s)")
+        self.ard_conn_btn.setEnabled(False)
 
         def job():
             try:
-                self.scan.connect_dev(demo, ard, dmm)
+                self.scan.connect_arduino(demo, port)
             except Exception as e:
-                self.scan.connected.emit(False, f"{type(e).__name__}: {e}")
+                self.scan.ard_connected.emit(False, f"{type(e).__name__}: {e}")
+        self.scan.submit(job)
+
+    def on_dmm_connect(self):
+        if self._dmm_ok:
+            self.scan.submit(self.scan.disconnect_dmm)
+            return
+        demo, res = self.demo_chk.isChecked(), self.dmm_res.currentText().strip()
+        if not demo and not res:
+            self.log.emit("Enter the multimeter VISA resource (or use Auto-detect / demo)", "warn")
+            return
+        self.dmm_status.setText("connecting…")
+        self.dmm_conn_btn.setEnabled(False)
+
+        def job():
+            try:
+                self.scan.connect_dmm(demo, res)
+            except Exception as e:
+                self.scan.dmm_connected.emit(False, f"{type(e).__name__}: {e}")
         self.scan.submit(job)
 
     def on_hmp_connect(self):
@@ -1443,23 +1540,34 @@ class BenchTab(QtCore.QObject):
         self.scan_info.setText(f"{getattr(self, '_scan_text', '')}\n"
                                f"per channel: switch {sw * 1000:.1f} ms · DMM {rd * 1000:.1f} ms")
 
-    def _on_scan_connected(self, ok, info):
-        self.scan_conn_btn.setEnabled(True)
-        self._set_scan_connected(ok)
+    def _on_ard_connected(self, ok, info):
+        self._on_part_connected("Arduino", ok, info, self.ard_conn_btn, self.ard_status)
+        self._ard_ok = ok
+        self._set_scan_connected()
+
+    def _on_dmm_connected(self, ok, info):
+        self._on_part_connected("34405A", ok, info, self.dmm_conn_btn, self.dmm_status)
+        self._dmm_ok = ok
+        self._set_scan_connected()
+
+    def _on_part_connected(self, what, ok, info, btn, status):
+        btn.setEnabled(True)
         if ok:
-            self.scan_status.setText(f"✓ {info}")
-            self.log.emit(f"Scanner connected: {info}", "ok")
+            status.setText(f"✓ {info}")
+            status.setStyleSheet("color:#4fd18b;")
+            self.log.emit(f"{what} connected: {info}", "ok")
         else:
-            self.scan_status.setText(info or "not connected")
+            status.setText(info or "not connected")
+            status.setStyleSheet(f"color:{'#ff6b6b' if info else '#8a96a3'};")
             if info:
-                self.log.emit(f"Scanner: {info}", "err")
+                self.log.emit(f"{what}: {info}", "err")
 
     def _on_scan_stopped(self, reason):
         if self.run_btn.isChecked():
             self.run_btn.setChecked(False)
         if reason:
             self.log.emit(f"Scan stopped: {reason}", "err")
-            self.scan_status.setText(f"⚠ {reason}")
+            self.scan_info.setText(f"⚠ {reason}")
 
     def _on_hmp_connected(self, ok, info):
         self.hmp_conn_btn.setEnabled(True)

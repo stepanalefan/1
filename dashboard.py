@@ -767,9 +767,9 @@ class Dashboard(QtWidgets.QWidget):
             m = b._hmp_ok and b._hmp_master
             self._set_status("HMP4040", "ok" if b._hmp_ok else "off", b.hmp_status.text(),
                              "MASTER ON" if m else "")
-            for name in ("34405A", "Arduino"):
-                self._set_status(name, "ok" if b._scan_ok else "off", b.scan_status.text(),
-                                 "scanning" if b._scan_ok and b.run_btn.isChecked() else "")
+            scanning = "scanning" if b._scan_ok and b.run_btn.isChecked() else ""
+            for name, ok, lbl in (("34405A", b._dmm_ok, b.dmm_status), ("Arduino", b._ard_ok, b.ard_status)):
+                self._set_status(name, "ok" if ok else "off", lbl.text(), scanning)
             self._refresh_hmp(b)
         sw = getattr(h, "switch", None)
         if sw:
@@ -1400,7 +1400,7 @@ class Dashboard(QtWidgets.QWidget):
         elif op == "scan":
             b = getattr(h, "bench", None)
             if not b or not b._scan_ok:
-                raise RuntimeError("multiplexer / 34405A not connected")
+                raise RuntimeError("Arduino and 34405A must both be connected for the voltage scan")
             b.run_btn.setChecked(s["action"] == "start")
         return None
 
