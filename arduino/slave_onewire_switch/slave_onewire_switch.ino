@@ -11,7 +11,8 @@
 // Скетч -> Подключить библиотеку -> Управлять библиотеками -> "OneWire" -> Установить
 //
 // Команды (каждая - одна строка):
-//   OW:CONV          запустить преобразование на всех шинах -> "OW:CONV:OK:<маска шин>" / "OW:CONV:NODEV"
+//   OW:CONV          запустить преобразование на всех шинах -> "OW:CONV:OK:<маска шин>" /
+//                    "OW:CONV:NODEV:<уровни>" (уровень линий в покое: 1 = +5 В, 0 = прижата к GND)
 //   OW:READ          прочитать все датчики -> "OW:DEV:<шина>:<ROM>:<scratchpad>:<питание>" ..., "OW:END:<n>"
 //   SW:SET:<i>:<0|1> выключить / включить ключ i (0 = A0, 1 = A1)       -> "SW:STATE:<состояния>"
 //   SW:PULSE:<i>:<мс> включить ключ i на заданное время (импульс)        -> "SW:STATE:<состояния>"
@@ -38,6 +39,7 @@ OneWire bus1(A3);
 OneWire bus2(A4);
 OneWire bus3(A5);
 OneWire *buses[] = {&bus1, &bus2, &bus3};
+const byte OW_PINS[] = {A3, A4, A5};
 const byte BUS_COUNT = 3;
 unsigned long convStart = 0;
 bool convPending = false;
@@ -138,7 +140,14 @@ void owConvert(Stream &port) {
     }
   }
   if (!mask) {
-    port.println("OW:CONV:NODEV");
+    // Никто не ответил: сообщаем уровень каждой линии в покое (диагностика проводки)
+    port.print("OW:CONV:NODEV:");
+    for (byte b = 0; b < BUS_COUNT; b++) {
+      pinMode(OW_PINS[b], INPUT);         // только внешняя подтяжка
+      delayMicroseconds(500);             // дать длинному кабелю зарядиться
+      port.print(digitalRead(OW_PINS[b]) ? '1' : '0');
+    }
+    port.println();
     return;
   }
   convStart = millis();

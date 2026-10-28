@@ -739,10 +739,25 @@ def diagnose_slave(dev) -> list[tuple[str, str]]:
         out.append(("ok" if not off else "warn",
                     f"3. 1-Wire devices answer on {', '.join(on) or '?'}"
                     + (f"; nothing answers on {', '.join(off)} (fine if no sensor is wired there)." if off else ".")))
-    elif conv == "OW:CONV:NODEV":
-        out.append(("err", "3. No 1-Wire device answers on A3, A4 or A5. Check on each bus: 4.7 kOhm from the data "
-                           "line to +5 V of the SLAVE board, sensor GND to slave GND, data to A3/A4/A5. "
-                           "With parasitic power, sensor VDD must be tied to GND."))
+    elif conv.startswith("OW:CONV:NODEV"):
+        levels = conv.split(":")[3] if conv.count(":") >= 3 else ""
+        text = "3. No 1-Wire device answers on A3, A4 or A5."
+        if len(levels) == 3:
+            for pin, lv in zip(pins, levels):
+                if lv == "0":
+                    text += (f"\n   {pin}: line is held LOW (0 V) - short to GND, pull-up missing, or a sensor "
+                             f"connected the wrong way round (it gets warm). Measure the voltage on {pin}.")
+                else:
+                    text += (f"\n   {pin}: line idles at +5 V (pull-up OK), but no sensor answers - data wire "
+                             f"broken, sensor GND not connected to the slave's GND, legs swapped, or VDD left "
+                             f"floating (with parasitic power VDD must go to GND at the sensor).")
+        else:
+            text += ("\n   Check on each bus: pull-up from data to +5 V of the SLAVE, sensor GND to slave GND, "
+                     "data to A3/A4/A5; with parasitic power sensor VDD to GND. "
+                     "(Upload the current slave sketch to see the line level of each bus here.)")
+        text += ("\n   Quick check: connect one sensor directly at the slave (short wires, VDD to +5 V) and "
+                 "test again - if it is found, the problem is in the 10 m cable / far end.")
+        out.append(("err", text))
         return out
     else:
         out.append(("err", f"3. No answer to OW:CONV ({lines[:3]}) - is the OneWire library compiled in the slave sketch?"))
