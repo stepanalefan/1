@@ -285,7 +285,18 @@ class VisaLink:
     def __init__(self, resource: str, timeout_ms=2000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py pyusb")
-        self.inst = _rm().open_resource(resource)
+        try:
+            self.inst = _rm().open_resource(resource)
+        except pyvisa.errors.VisaIOError as e:
+            if e.error_code != pyvisa.constants.StatusCode.error_resource_not_found:
+                raise
+            seen = [r for r, _ in find_usb()]
+            raise ConnectionError(
+                f"VISA has no device '{resource}'. "
+                + (f"USB devices VISA sees: {', '.join(seen)} - pick one with ⟳."
+                   if seen else "VISA sees no USB instrument at all: check the cable in the rear USB Device "
+                                "port, the generator is on, and the USB driver (Keysight IO Libraries / "
+                                "NI-VISA) - the generator must appear in Keysight Connection Expert."))
         self.inst.timeout = timeout_ms
         self.inst.read_termination = "\n"
         self.inst.write_termination = "\n"
