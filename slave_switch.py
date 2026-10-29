@@ -428,31 +428,36 @@ class SwitchPanel(QtWidgets.QGroupBox):
         for i, pin in enumerate(PINS):
             led = QtWidgets.QLabel("●")
             name = QtWidgets.QLabel()
+            name.setMinimumWidth(90)
             pl = QtWidgets.QLabel(pin)
             pl.setStyleSheet(f"color:{C_DIM};")
             on_b = QtWidgets.QPushButton("ON")
             off_b = QtWidgets.QPushButton("OFF")
             pul_b = QtWidgets.QPushButton("Pulse")
             for b in (on_b, off_b, pul_b):
-                b.setFixedWidth(68)
+                b.setFixedWidth(48)                   # compact: sits next to the HMP panel on Main
+                b.setStyleSheet("padding:3px 2px;")
             on_b.clicked.connect(lambda _, i=i: ctl.set_output(i, True))
             off_b.clicked.connect(lambda _, i=i: ctl.set_output(i, False))
             pul_b.clicked.connect(lambda _, i=i: ctl.pulse(i, int(ctl.cfg["manual_pulse_ms"])))
-            for c, w in enumerate((led, name, pl, on_b, off_b, pul_b)):
+            pl.hide()                                 # compact: pin shown with the name instead
+            for c, w in enumerate((led, name, on_b, off_b, pul_b)):
                 g.addWidget(w, i, c)
             self.rows.append((led, name, pul_b, (on_b, off_b, pul_b)))
         g.setColumnStretch(1, 1)
         r = len(PINS)
-        self.wd_chk = QtWidgets.QCheckBox("BOS watchdog")
+        self.wd_chk = QtWidgets.QCheckBox("Watchdog")
         self.wd_chk.setToolTip("Switch an output automatically when no BOS data arrives for too long")
         self.wd_chk.toggled.connect(ctl.set_watchdog)
         self.wd_lbl = QtWidgets.QLabel()
         self.wd_lbl.setWordWrap(True)
+        self.wd_lbl.setMinimumHeight(2 * self.wd_lbl.fontMetrics().lineSpacing() + 2)   # never clipped
         set_b = QtWidgets.QPushButton("Settings…")
         set_b.clicked.connect(lambda: SwitchSettings(ctl, self).exec_())
         g.addWidget(self.wd_chk, r, 0, 1, 2)
-        g.addWidget(set_b, r, 4, 1, 2)
-        g.addWidget(self.wd_lbl, r + 1, 0, 1, 6)
+        set_b.setStyleSheet("padding:3px 6px;")
+        g.addWidget(set_b, r, 2, 1, 3)
+        g.addWidget(self.wd_lbl, r + 1, 0, 1, 5)
         self.wd_chk.blockSignals(True)
         self.wd_chk.setChecked(ctl.cfg["wd_enabled"])
         self.wd_chk.blockSignals(False)
@@ -466,9 +471,10 @@ class SwitchPanel(QtWidgets.QGroupBox):
             on = known and i < len(ctl.state) and ctl.state[i]
             led.setStyleSheet(f"color:{(C_OK if on else C_OFF) if known else C_OFF};font-size:16px;")
             state = ("ON" if on else "off") if known else ("no answer" if ctl.slave_ok is False else "—")
-            name.setText(f"<b>{c['names'][i]}</b>  <span style='color:{C_ERR if ctl.slave_ok is False else C_DIM}'>"
+            label = c['names'][i] if PINS[i] in c['names'][i] else f"{c['names'][i]} ({PINS[i]})"
+            name.setText(f"<b>{label}</b>  <span style='color:{C_ERR if ctl.slave_ok is False else C_DIM}'>"
                          f"{state}</span>")
-            name.setToolTip(ctl.error or "")
+            name.setToolTip(f"pin {PINS[i]} on the slave Arduino" + (f"\n{ctl.error}" if ctl.error else ""))
             pul_b.setToolTip(f"On for {c['manual_pulse_ms']} ms (set in Settings…)")
             for b in buttons:
                 b.setEnabled(ctl._dev() is not None)

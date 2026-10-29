@@ -587,7 +587,9 @@ class Dashboard(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout(g)
         grid.setVerticalSpacing(2)
         self.status = {}
-        for r, name in enumerate(self.DEVICES):
+        half = (len(self.DEVICES) + 1) // 2           # two columns of devices
+        for k, name in enumerate(self.DEVICES):
+            r, c0 = k % half, (k // half) * 5
             led = QtWidgets.QLabel("●")
             led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
             nm = QtWidgets.QLabel(f"<b>{name}</b>")
@@ -595,30 +597,38 @@ class Dashboard(QtWidgets.QWidget):
             info.setStyleSheet(f"color:{C_DIM};")
             act = QtWidgets.QLabel("")
             act.setStyleSheet("font-weight:700;")
-            grid.addWidget(led, r, 0)
-            grid.addWidget(nm, r, 1)
-            grid.addWidget(act, r, 2)
-            grid.addWidget(info, r, 3)
+            info.setMinimumWidth(40)
+            info.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            grid.addWidget(led, r, c0)
+            grid.addWidget(nm, r, c0 + 1)
+            grid.addWidget(act, r, c0 + 2)
+            grid.addWidget(info, r, c0 + 3)
             self.status[name] = (led, info, act)
         grid.setColumnStretch(3, 1)
+        grid.setColumnStretch(8, 1)
+        grid.setColumnMinimumWidth(4, 10)
         lv.addWidget(g)
 
+        pair = QtWidgets.QHBoxLayout()               # HMP4040 outputs | Switch, side by side
         g = QtWidgets.QGroupBox("HMP4040 outputs")
         hg = QtWidgets.QGridLayout(g)
         hg.setVerticalSpacing(2)
-        for col, text in enumerate(("", "Ch", "Set", "Measured", "Power", "")):
+        hg.setHorizontalSpacing(6)
+        for col, text in enumerate(("", "Ch", "V", "A", "W", "")):
             lb = QtWidgets.QLabel(text)
             lb.setStyleSheet(f"color:{C_DIM};")
             hg.addWidget(lb, 0, col)
         mono = QtGui.QFont("Consolas")
         mono.setStyleHint(QtGui.QFont.Monospace)
+        mono.setPointSize(max(8, mono.pointSize() - 1))
         self.hmp_rows = {}
         for r, ch in enumerate((1, 2, 3, 4), start=1):
             led = QtWidgets.QLabel("●")
             led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
-            cells = [QtWidgets.QLabel("—") for _ in range(3)]
+            cells = [QtWidgets.QLabel("—") for _ in range(3)]     # V, A, W
             for c in cells:
                 c.setFont(mono)
+                c.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             mode = QtWidgets.QLabel("")
             mode.setStyleSheet("font-weight:700;")
             hg.addWidget(led, r, 0)
@@ -628,7 +638,7 @@ class Dashboard(QtWidgets.QWidget):
             hg.addWidget(mode, r, 5)
             self.hmp_rows[ch] = (led, *cells, mode)
         hg.setColumnStretch(3, 1)
-        lv.addWidget(g)
+        pair.addWidget(g, 1)
 
         self.temp_box = QtWidgets.QGroupBox("Temperatures (1-Wire)")
         self.temp_grid = QtWidgets.QGridLayout(self.temp_box)
@@ -638,7 +648,10 @@ class Dashboard(QtWidgets.QWidget):
         lv.addWidget(self.temp_box)
         sw = getattr(self.host, "switch", None)
         if sw:
-            lv.addWidget(sw.panel)
+            pair.addWidget(sw.panel, 1)
+        pair.setStretch(0, 6)
+        pair.setStretch(1, 5)
+        lv.insertLayout(lv.indexOf(self.temp_box), pair)
 
         g = QtWidgets.QGroupBox("Test sequence")
         sv = QtWidgets.QVBoxLayout(g)
@@ -660,18 +673,21 @@ class Dashboard(QtWidgets.QWidget):
         sv.addWidget(self.list, 1)
         add = QtWidgets.QGridLayout()
         for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
-                                        ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW settings", "fsw_set"),
+                                        ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW set", "fsw_set"),
                                         ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"),
                                         ("+ Switch", "sw"), ("+ TFG", "tfg"))):
             b = QtWidgets.QPushButton(text)
-            b.setStyleSheet(f"color:{STEP_COLORS[op]};")
+            b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
+            b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)"}.get(op, ""))
             b.clicked.connect(lambda _, op=op: self.add_step(op))
-            add.addWidget(b, k // 3, k % 3)
+            add.addWidget(b, k // 5, k % 5)
+        add.setSpacing(3)
         sv.addLayout(add)
         ed = QtWidgets.QHBoxLayout()
         for text, fn in (("▲", lambda: self.move(-1)), ("▼", lambda: self.move(1)), ("Copy", self.duplicate),
                          ("Edit", self.edit_step), ("Delete", self.delete_steps)):
             b = QtWidgets.QPushButton(text)
+            b.setStyleSheet("padding:2px 4px;")
             b.clicked.connect(fn)
             ed.addWidget(b)
         sv.addLayout(ed)
@@ -687,7 +703,7 @@ class Dashboard(QtWidgets.QWidget):
         run.addWidget(self.seq_status, 1)
         sv.addLayout(run)
         lv.addWidget(g, 1)
-        left.setMinimumWidth(430)
+        left.setMinimumWidth(540)
         split.addWidget(left)
 
         # --- right: constellation / voltages / telemetry
@@ -797,7 +813,7 @@ class Dashboard(QtWidgets.QWidget):
         right.addWidget(ww)
         right.setSizes([380, 260, 200])
         split.addWidget(right)
-        split.setSizes([470, 900])
+        split.setSizes([580, 900])
 
         self._fill_units()
         for unit, t, byte, name in self.data.get("watch", []):
@@ -828,7 +844,9 @@ class Dashboard(QtWidgets.QWidget):
     def _set_status(self, name, state, info="", act=""):
         led, inf, a = self.status[name]
         led.setStyleSheet(f"color:{ {'ok': C_OK, 'off': C_OFF, 'err': C_ERR}[state] };font-size:16px;")
-        inf.setText(info)
+        w = max(40, inf.width())                    # two columns: shorten, full text on hover
+        inf.setText(inf.fontMetrics().elidedText(info, QtCore.Qt.ElideRight, w))
+        inf.setToolTip(info)
         a.setText(act)
 
     def _tick(self):
@@ -905,29 +923,37 @@ class Dashboard(QtWidgets.QWidget):
             elif not d["valid"]:
                 color, text = C_ERR, "error"
             else:
-                color, text = C_OK, f"{d['temp']:7.2f} °C"
+                color, text = C_OK, f"{d['temp']:.2f} °C"
             led.setStyleSheet(f"color:{color};font-size:16px;")
             val.setText(text)
             val.setStyleSheet("" if d["valid"] else f"color:{color};")
 
     def _refresh_hmp(self, b):
-        """Per-channel HMP4040 state: LED green = output delivering (channel on + master on)."""
-        for ch, (led, set_l, meas_l, pwr_l, mode_l) in self.hmp_rows.items():
+        """Per channel: measured V / A / W while the output delivers, else the set values in grey.
+        LED green = channel on + master on; tooltip shows set and measured values."""
+        for ch, (led, v_l, i_l, p_l, mode_l) in self.hmp_rows.items():
             st = b.hmp_last_state.get(ch) if b._hmp_ok else None
             if st is None:
                 led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
-                for lb in (set_l, meas_l, pwr_l):
+                for lb in (v_l, i_l, p_l):
                     lb.setText("—")
+                    lb.setToolTip("")
                 mode_l.setText("")
                 continue
             vset, iset, on = st
             live = on and b._hmp_master
             v, i = b.hmp_last_meas.get(ch, (0.0, 0.0))
-            color = C_OK if live else ("#f0b03e" if on else C_OFF)
-            led.setStyleSheet(f"color:{color};font-size:16px;")
-            set_l.setText(f"{vset:6.3f} V {iset:6.3f} A")
-            meas_l.setText(f"{v:6.3f} V {i:6.3f} A" if live else "—")
-            pwr_l.setText(f"{v * i:6.2f} W" if live else "—")
+            led.setStyleSheet(f"color:{C_OK if live else ("#f0b03e" if on else C_OFF)};font-size:16px;")
+            if live:
+                texts, style = (f"{v:.3f}", f"{i:.3f}", f"{v * i:.2f}"), ""
+            else:
+                texts, style = (f"{vset:.3f}", f"{iset:.3f}", "—"), f"color:{C_DIM};"
+            tip = f"set {vset:.3f} V / {iset:.3f} A" + (f"\nmeasured {v:.3f} V / {i:.3f} A, {v * i:.2f} W"
+                                                        if live else "\n(output off: set values shown)")
+            for lb, t in zip((v_l, i_l, p_l), texts):
+                lb.setText(t)
+                lb.setStyleSheet(style)
+                lb.setToolTip(tip)
             if live and iset > 0 and i >= 0.98 * iset and v < 0.98 * vset:   # current limit reached
                 mode_l.setText("CC")
                 mode_l.setStyleSheet(f"font-weight:700;color:{C_ERR};")
