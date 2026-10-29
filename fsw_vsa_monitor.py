@@ -27,7 +27,8 @@ Features
 
 * Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / CAN /
   FSW / scan, constellation + MER/Power/CFE, voltages, telemetry watch list),
-  Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), Bench, CAN, Telemetry.
+  Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), TFG6806 (tfg_generator.py),
+  Bench, CAN, Telemetry.
 * Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
   scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
   daily CSV log, plus HMP4040 control (USB / LAN) with timed power cycling.
@@ -116,6 +117,11 @@ try:  # SMW200A generator tab
     import smw_generator
 except Exception:  # pragma: no cover
     smw_generator = None
+
+try:  # Suin TFG6806 function generator tab
+    import tfg_generator
+except Exception:  # pragma: no cover
+    tfg_generator = None
 
 try:  # Main (dashboard) tab
     import dashboard
@@ -1240,6 +1246,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.smw:
                 self.smw.proto.setCurrentIndex(3)
                 QtCore.QTimer.singleShot(400, self.smw.on_connect)
+            if self.tfg:
+                self.tfg.demo.setChecked(True)
+                QtCore.QTimer.singleShot(500, self.tfg.on_connect)
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
 
@@ -1579,6 +1588,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
         if self.smw:
             self.smw.log.connect(self.logmsg)
+        self.tfg = tfg_generator.TfgTab() if tfg_generator else None
+        if self.tfg:
+            self.tfg.log.connect(self.logmsg)
         self.switch = None
         if slave_switch and self.bench:
             self.switch = slave_switch.SwitchController(self.bench, self.logmsg, self)
@@ -1591,6 +1603,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(split, "Spectrum Analyzer")
         if self.smw:
             self.tabs.addTab(page(self.smw), "SMW200A")
+        if self.tfg:
+            self.tabs.addTab(self.tfg, "TFG6806")
         if self.bench:
             bench_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
             bscroll = QtWidgets.QScrollArea()
@@ -2267,6 +2281,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.can_win.close()            # stops worker, script, recording
         if self.smw:
             self.smw.shutdown()
+        if self.tfg:
+            self.tfg.shutdown()
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()
