@@ -229,6 +229,11 @@ try:  # Keysight N5183B MXG signal generator tab
 except Exception:  # pragma: no cover
     mxg_generator = None
 
+try:  # Help tab (FAQ / Readme / About)
+    import help_tab
+except Exception:  # pragma: no cover
+    help_tab = None
+
 try:  # Main (dashboard) tab
     import dashboard
 except Exception:  # pragma: no cover
@@ -1746,6 +1751,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.logs = log_viewer.LogsTab(
                 folder_fn=(lambda: self.bench.log_folder) if self.bench else None)
             self.tabs.addTab(self.logs, "Logs")
+        self.help = help_tab.HelpTab() if help_tab else None
+        if self.help:
+            self.tabs.addTab(self.help, "Help")
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([420, 1140])
 
