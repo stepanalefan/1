@@ -102,6 +102,20 @@ from collections import deque
 EARLY_VISA_RM = None
 EARLY_VISA_ERR = ""
 if sys.platform == "win32":
+    # In the EXE, PyInstaller's start-up code has called SetDllDirectory(<unpack folder>), so Windows
+    # resolves DLL dependencies from the bundled C++ runtime (msvcp140.dll ... shipped with Python /
+    # PyQt5) before System32. Keysight's VISA needs the newer runtime from System32 and then fails to
+    # load (VI_ERROR_LIBRARY_NFOUND). Restore the normal search while VISA is opened, then put the
+    # PyInstaller setting back - the newer runtime, once loaded, also serves PyQt5.
+    _frozen_dir = getattr(sys, "_MEIPASS", None) if getattr(sys, "frozen", False) else None
+    _k32 = None
+    if _frozen_dir:
+        try:
+            import ctypes as _ct
+            _k32 = _ct.windll.kernel32
+            _k32.SetDllDirectoryW(None)
+        except Exception:
+            _k32 = None
     try:
         import pyvisa as _pyvisa
         EARLY_VISA_RM = _pyvisa.ResourceManager()
@@ -109,6 +123,18 @@ if sys.platform == "win32":
             EARLY_VISA_ERR, EARLY_VISA_RM = "default lookup gave pyvisa-py", None
     except Exception as _e:              # no VISA installed -> pyvisa-py later
         EARLY_VISA_RM, EARLY_VISA_ERR = None, f"{type(_e).__name__}: {_e}"
+        try:                             # diagnostic: which C++ runtime is loaded in this process?
+            import ctypes as _ct
+            _buf = _ct.create_unicode_buffer(520)
+            for _dll in ("msvcp140.dll", "vcruntime140.dll"):
+                _h = _ct.windll.kernel32.GetModuleHandleW(_dll)
+                if _h and _ct.windll.kernel32.GetModuleFileNameW(_ct.c_void_p(_h), _buf, 520):
+                    EARLY_VISA_ERR += f" [{_dll} loaded from {_buf.value}]"
+        except Exception:
+            pass
+    finally:
+        if _k32 is not None:
+            _k32.SetDllDirectoryW(_frozen_dir)
 
 import numpy as np
 
