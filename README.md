@@ -107,7 +107,7 @@ comma-separated, hex.
 | `smw_generator.py`, `tfg_generator.py`, `mxg_generator.py` | Generator tabs |
 | `canable_analyzer.py`, `can_commands.py` | CAN tab |
 | `telemetry.py`, `log_viewer.py` | Telemetry and Logs tabs |
-| `build_exe.bat` | Builds `dist\FSW_Monitor.exe` |
+| `build_exe.bat`, `rthook_visa.py` | Build `dist\FSW_Monitor.exe` (the hook opens VISA before Qt in the EXE) |
 | `arduino/` | Master, slave and 1-Wire test sketches |
 | `FAQ.md` | Installation, troubleshooting, wiring |
 

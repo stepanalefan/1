@@ -174,11 +174,16 @@ if sys.platform == "win32":
             _k32 = None
     try:
         import pyvisa as _pyvisa
-        EARLY_VISA_RM = _pyvisa.ResourceManager()
+        if getattr(sys, "_fsw_early_visa", None) is not None:      # EXE: opened by rthook_visa.py
+            EARLY_VISA_RM = sys._fsw_early_visa
+        else:
+            if getattr(sys, "_fsw_early_visa_err", ""):
+                EARLY_VISA_ERR = sys._fsw_early_visa_err + " | "
+            EARLY_VISA_RM = _pyvisa.ResourceManager()
         if type(EARLY_VISA_RM.visalib).__module__.startswith("pyvisa_py"):
             EARLY_VISA_ERR, EARLY_VISA_RM = "default lookup gave pyvisa-py", None
     except Exception as _e:              # no VISA installed -> pyvisa-py later
-        EARLY_VISA_RM, EARLY_VISA_ERR = None, f"{type(_e).__name__}: {_e}"
+        EARLY_VISA_RM, EARLY_VISA_ERR = None, EARLY_VISA_ERR + f"{type(_e).__name__}: {_e}"
         try:
             _diag_path = _visa_diagnostics()
             if _diag_path:
