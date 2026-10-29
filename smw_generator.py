@@ -83,9 +83,13 @@ class SmwDriver:
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
         try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
+            from bench_monitor import visa_manager      # installed VISA first, pyvisa-py last
+            rm = visa_manager()
+        except ImportError:
+            try:
+                rm = pyvisa.ResourceManager()
+            except Exception:
+                rm = pyvisa.ResourceManager("@py")
         self.inst = rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         if resource.upper().endswith("::SOCKET"):

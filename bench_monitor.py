@@ -181,14 +181,52 @@ class SocketLink:
         self.sock.close()
 
 
+_VISA_RM = None
+VISA_INFO = ""          # which VISA library is in use (shown in the log on the first connection)
+
+
+def _is_pyvisa_py(rm) -> bool:
+    return type(rm.visalib).__module__.startswith("pyvisa_py")
+
+
+def visa_manager():
+    """One VISA ResourceManager for the bench. The installed VISA (Keysight IO Libraries / NI-VISA)
+    comes first: pyvisa's default lookup, then the DLLs in System32 by full path. pyvisa's default
+    silently drops to pyvisa-py (pure Python) when it cannot load the installed VISA, and pyvisa-py
+    cannot reach a USB instrument that uses Keysight's USB driver - so pyvisa-py is only accepted
+    when nothing else loads, and the reasons are kept in VISA_INFO."""
+    global _VISA_RM, VISA_INFO
+    if _VISA_RM is not None:
+        return _VISA_RM
+    tried, fallback = [], None
+    candidates = [None]
+    if sys.platform == "win32":
+        sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        candidates += [os.path.join(sysdir, n) for n in ("visa64.dll", "visa32.dll")]
+    for lib in candidates:
+        try:
+            rm = pyvisa.ResourceManager() if lib is None else pyvisa.ResourceManager(lib)
+        except Exception as e:
+            tried.append(f"{lib or 'default lookup'}: {type(e).__name__}: {e}")
+            continue
+        if _is_pyvisa_py(rm):
+            tried.append(f"{lib or 'default lookup'}: gave pyvisa-py")
+            fallback = fallback or rm
+            continue
+        _VISA_RM, VISA_INFO = rm, f"VISA: {rm.visalib}"
+        return rm
+    rm = fallback or pyvisa.ResourceManager("@py")
+    _VISA_RM = rm
+    VISA_INFO = ("VISA: pyvisa-py (pure Python; USB instruments with Keysight's driver are NOT reachable) - "
+                 "the installed VISA could not be loaded: " + " | ".join(tried))
+    return rm
+
+
 class VisaLink:
     def __init__(self, resource: str, timeout_ms: int = 2000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
+        rm = visa_manager()
         self.inst = rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         self.inst.read_termination = "\n"
@@ -302,11 +340,13 @@ class Multimeter:
     def __init__(self, resource: str):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
+        rm = visa_manager()
         try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
-        self.dmm = rm.open_resource(resource)
+            self.dmm = rm.open_resource(resource)
+        except Exception as e:
+            if VISA_INFO.startswith("VISA: pyvisa-py"):
+                raise RuntimeError(f"{type(e).__name__}: {e}\n{VISA_INFO}") from e
+            raise
         try:
             self.dmm.timeout = 3000
             idn = self.dmm.query("*IDN?").strip()
@@ -503,17 +543,14 @@ def detect_devices(skip_ports=()) -> dict:
     found = {"dmm": None, "hmp": None, "arduino": None, "ports": [], "visa": []}
     if pyvisa is not None:
         try:
-            try:
-                rm = pyvisa.ResourceManager()
-            except Exception:
-                rm = pyvisa.ResourceManager("@py")
+            rm = visa_manager()
             found["visa"] = [r for r in rm.list_resources() if r.upper().startswith("USB")]
             for r in found["visa"]:
                 if "0X0957" in r.upper() or "::2391::" in r:      # Agilent/Keysight vendor id, hex or decimal
                     found["dmm"] = r
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            found["visa_error"] = f"{type(e).__name__}: {e}"
     if serial is None:
         return found
     skip = {p.upper() for p in skip_ports if p}
@@ -1519,6 +1556,10 @@ class BenchTab(QtCore.QObject):
                 combo.setEditText(found[key])
         self.log.emit(f"Detected: Arduino {found['arduino'] or '—'}, 34405A {found['dmm'] or '—'}, "
                       f"HMP4040 {found['hmp'] or '— (enter IP for LAN)'}", "ok")
+        if VISA_INFO:
+            self.log.emit(VISA_INFO, "warn" if "pyvisa-py" in VISA_INFO else "info")
+        if found.get("visa_error"):
+            self.log.emit(f"VISA search failed: {found['visa_error']}", "err")
 
     def on_scan_connect(self):
         """Connect whatever of Arduino / multimeter is not connected yet."""

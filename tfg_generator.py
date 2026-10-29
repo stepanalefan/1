@@ -332,10 +332,15 @@ class VisaLink:
 
 
 def _rm():
+    """The bench's VISA loader: installed VISA (Keysight / NI) first, pyvisa-py only as last resort."""
     try:
-        return pyvisa.ResourceManager()
-    except Exception:
-        return pyvisa.ResourceManager("@py")       # pure-Python backend (needs pyusb for USB)
+        from bench_monitor import visa_manager
+        return visa_manager()
+    except ImportError:
+        try:
+            return pyvisa.ResourceManager()
+        except Exception:
+            return pyvisa.ResourceManager("@py")       # pure-Python backend (needs pyusb for USB)
 
 
 def find_usb() -> list[tuple[str, bool]]:

@@ -177,10 +177,15 @@ def resource_for(proto: str, addr: str) -> str:
 
 
 def _rm():
+    """The bench's VISA loader: installed VISA (Keysight / NI) first, pyvisa-py only as last resort."""
     try:
-        return pyvisa.ResourceManager()
-    except Exception:
-        return pyvisa.ResourceManager("@py")
+        from bench_monitor import visa_manager
+        return visa_manager()
+    except ImportError:
+        try:
+            return pyvisa.ResourceManager()
+        except Exception:
+            return pyvisa.ResourceManager("@py")
 
 
 def find_visa() -> list[tuple[str, bool]]:
