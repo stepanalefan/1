@@ -4,8 +4,10 @@ tfg_generator.py
 ================
 Suin TFG6806 (TFG6800 series, 2 channels, 65 MHz) function / arbitrary waveform generator tab.
 
-Connection: LAN, raw SCPI socket, port 5025 (the same as the maker's PC software,
-"TCPIP0::<ip>::5025::SOCKET"), commands end with LF.
+Connection (as in the maker's PC software), commands end with LF:
+  LAN  raw SCPI socket, port 5025 ("TCPIP0::<ip>::5025::SOCKET")
+  USB  USB-TMC through VISA, e.g. "USB0::1267::260::CH372USB::0::INSTR" (rear USB Device port;
+       needs a VISA library: Keysight IO Libraries / NI-VISA, or pyvisa-py + pyusb + libusb)
 
 SCPI taken from the TFG6800 Programmer's Guide (12/2024), sent in the long form exactly as written
 there, with the channel number: SOURce1: / SOURce2:, OUTPut1 / OUTPut2.
@@ -40,7 +42,13 @@ import time
 
 from PyQt5 import QtCore, QtWidgets
 
+try:
+    import pyvisa
+except ImportError:  # pragma: no cover - LAN works without it
+    pyvisa = None
+
 DEFAULT_PORT = 5025
+USB_IDS = ("1267::260", "0X04F3::0X0104")     # vendor::product of the TFG6800 (decimal / hex form)
 CHANNELS = (1, 2)
 _NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
@@ -168,7 +176,7 @@ def match_choice(resp: str, choices) -> str | None:
     r = resp.strip().strip("'\"").upper()
     for _, val in choices:
         s, full = short(val), val.upper()
-        if r in (s, full) or (len(r) >= len(s) and full.startswith(r)) or r.startswith(s):
+        if r in (s, full) or (len(r) >= min(3, len(s)) and full.startswith(r)) or r.startswith(s):
             return val
     return None
 
@@ -224,23 +232,14 @@ def describe(key, v) -> str:
 # --------------------------------------------------------------------------- #
 #  Drivers                                                                     #
 # --------------------------------------------------------------------------- #
-class TfgDriver:
-    """Raw SCPI over TCP (port 5025). Replies end with LF."""
+class SocketLink:
+    """LAN: raw SCPI over TCP (port 5025). Replies end with LF."""
 
     def __init__(self, host: str, port: int = DEFAULT_PORT, timeout=2.0):
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.settimeout(timeout)
         self._buf = b""
-        self.addr = f"{host}:{port}"
-        try:
-            self.idn = self.q("*IDN?")
-            self.write("*CLS")
-            self.write("SOURce1:VOLTage:UNIT VPP")      # amplitudes are read and set in Vpp
-            self.write("SOURce2:VOLTage:UNIT VPP")
-            self.errors()
-        except Exception:
-            self.sock.close()
-            raise
+        self.addr = f"LAN {host}:{port}"
 
     def write(self, c: str):
         self.sock.sendall(c.encode("ascii") + b"\n")
@@ -254,7 +253,7 @@ class TfgDriver:
         line, self._buf = self._buf.split(b"\n", 1)
         return line.decode("ascii", "replace").strip()
 
-    def q(self, c: str) -> str:
+    def query(self, c: str) -> str:
         self._buf = b""
         self.write(c)
         try:
@@ -275,6 +274,82 @@ class TfgDriver:
         finally:
             self.sock.settimeout(old)
             self._buf = b""
+
+    def close(self):
+        self.sock.close()
+
+
+class VisaLink:
+    """USB (USB-TMC) or any other VISA resource string."""
+
+    def __init__(self, resource: str, timeout_ms=2000):
+        if pyvisa is None:
+            raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py pyusb")
+        self.inst = _rm().open_resource(resource)
+        self.inst.timeout = timeout_ms
+        self.inst.read_termination = "\n"
+        self.inst.write_termination = "\n"
+        self.addr = resource
+
+    def write(self, c: str):
+        self.inst.write(c)
+
+    def query(self, c: str) -> str:
+        try:
+            return self.inst.query(c).strip()
+        except pyvisa.errors.VisaIOError as e:
+            if e.error_code == pyvisa.constants.StatusCode.error_timeout:
+                try:
+                    self.inst.clear()            # drop a late reply (USB-TMC device clear)
+                except Exception:
+                    pass
+                raise TimeoutError(f"no reply to {c}")
+            raise ConnectionError(f"VISA: {e}")
+
+    def close(self):
+        self.inst.close()
+
+
+def _rm():
+    try:
+        return pyvisa.ResourceManager()
+    except Exception:
+        return pyvisa.ResourceManager("@py")       # pure-Python backend (needs pyusb for USB)
+
+
+def find_usb() -> list[tuple[str, bool]]:
+    """VISA USB resources as (resource, looks_like_TFG); TFGs first."""
+    if pyvisa is None:
+        return []
+    try:
+        res = [r for r in _rm().list_resources() if r.upper().startswith("USB")]
+    except Exception:
+        return []
+    out = [(r, any(i in r.upper() for i in USB_IDS)) for r in res]
+    return sorted(out, key=lambda x: not x[1])
+
+
+class TfgDriver:
+    """TFG6800 SCPI on top of a link (SocketLink for LAN, VisaLink for USB)."""
+
+    def __init__(self, link):
+        self.link = link
+        self.addr = link.addr
+        try:
+            self.idn = self.q("*IDN?")
+            self.write("*CLS")
+            self.write("SOURce1:VOLTage:UNIT VPP")      # amplitudes are read and set in Vpp
+            self.write("SOURce2:VOLTage:UNIT VPP")
+            self.errors()
+        except Exception:
+            link.close()
+            raise
+
+    def write(self, c: str):
+        self.link.write(c)
+
+    def q(self, c: str) -> str:
+        return self.link.query(c)
 
     def errors(self) -> list[str]:
         out = []
@@ -322,7 +397,7 @@ class TfgDriver:
         except Exception:
             pass
         try:
-            self.sock.close()
+            self.link.close()
         except Exception:
             pass
 
@@ -428,16 +503,21 @@ class TfgWorker(QtCore.QThread):
             self.dev.close()
 
     # ---- jobs
-    def connect_dev(self, demo, host, port):
+    def connect_dev(self, demo, iface, addr, port=DEFAULT_PORT):
+        """iface 'lan' (addr = IP) or 'usb' (addr = VISA resource)."""
         if self.dev:
             self.dev.close()
         try:
-            self.dev = DemoTfg() if demo else TfgDriver(host, port)
+            if demo:
+                self.dev = DemoTfg()
+            else:
+                link = SocketLink(addr, port) if iface == "lan" else VisaLink(addr)
+                self.dev = TfgDriver(link)
         except Exception as e:
             self.dev = None
             self.connected.emit(False, f"{type(e).__name__}: {e}")
             return
-        self.connected.emit(True, self.dev.idn)
+        self.connected.emit(True, f"{self.dev.idn}  ({self.dev.addr})")
         for ch in CHANNELS:
             self.read(ch)
 
@@ -703,6 +783,7 @@ class TfgTab(QtWidgets.QWidget):
         self.worker.start()
         self._build()
         self._set_enabled(False)
+        self._iface_changed()
 
     @property
     def out_on(self) -> dict:
@@ -713,21 +794,47 @@ class TfgTab(QtWidgets.QWidget):
         root.setContentsMargins(4, 4, 4, 4)
 
         left = QtWidgets.QVBoxLayout()
-        g = QtWidgets.QGroupBox("Connection (LAN)")
+        g = QtWidgets.QGroupBox("Connection")
         f = QtWidgets.QFormLayout(g)
+        self.iface = QtWidgets.QComboBox()
+        self.iface.addItem("LAN (Ethernet)", "lan")
+        self.iface.addItem("USB (rear USB Device port)", "usb")
+        self.iface.currentIndexChanged.connect(self._iface_changed)
         self.host = QtWidgets.QLineEdit()
         self.host.setPlaceholderText("IP address, e.g. 192.168.1.60")
         self.port = QtWidgets.QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(DEFAULT_PORT)
+        self.usb = QtWidgets.QComboBox()
+        self.usb.setEditable(True)
+        self.usb.setMinimumContentsLength(18)
+        self.usb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.usb.lineEdit().setPlaceholderText("USB0::1267::260::…::INSTR")
+        self.usb.setToolTip("VISA address of the generator. ⟳ lists USB instruments; ★ = looks like a TFG.\n"
+                            "Needs a VISA library (Keysight IO Libraries / NI-VISA) or pyvisa-py + pyusb.")
+        self.usb_find = QtWidgets.QPushButton("⟳")
+        self.usb_find.setFixedWidth(34)
+        self.usb_find.setToolTip("Search USB instruments")
+        self.usb_find.clicked.connect(self.on_find_usb)
+        usb_row = QtWidgets.QHBoxLayout()
+        usb_row.addWidget(self.usb, 1)
+        usb_row.addWidget(self.usb_find)
         self.demo = QtWidgets.QCheckBox("Demo (no instrument)")
         self.conn_btn = QtWidgets.QPushButton("Connect")
         self.conn_btn.clicked.connect(self.on_connect)
         self.status = QtWidgets.QLabel("not connected")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#8a96a3;")
-        f.addRow("IP address", self.host)
-        f.addRow("Port", self.port)
+        self.usb_w = QtWidgets.QWidget()
+        self.usb_w.setLayout(usb_row)
+        usb_row.setContentsMargins(0, 0, 0, 0)
+        self._rows = {}
+        f.addRow("Interface", self.iface)
+        for key, text, w in (("lan", "IP address", self.host), ("lan2", "Port", self.port),
+                             ("usb", "Device", self.usb_w)):
+            lbl = QtWidgets.QLabel(text)
+            f.addRow(lbl, w)
+            self._rows[key] = (lbl, w)
         f.addRow(self.demo)
         f.addRow(self.conn_btn)
         f.addRow(self.status)
@@ -799,22 +906,56 @@ class TfgTab(QtWidgets.QWidget):
     def _set_enabled(self, on):
         for w in list(self.panels.values()) + [self.g_sys, self.g_con]:
             w.setEnabled(on)
-        for w in (self.host, self.port, self.demo):
+        for w in (self.iface, self.host, self.port, self.usb_w, self.demo):
             w.setEnabled(not on)
         self.conn_btn.setText("Disconnect" if on else "Connect")
 
     # ---------------------------------------------------------------- actions
+    def _iface_changed(self, *_):
+        usb = self.iface.currentData() == "usb"
+        for key, (lbl, w) in self._rows.items():
+            show = usb if key == "usb" else not usb
+            lbl.setVisible(show)
+            w.setVisible(show)
+        if usb and self.usb.count() == 0 and self.isVisible():
+            self.on_find_usb()
+
+    def on_find_usb(self):
+        found = find_usb()
+        cur = self.usb.currentText()
+        self.usb.clear()
+        for res, tfg in found:
+            self.usb.addItem(("★ " if tfg else "") + res, res)
+        if cur:
+            self.usb.setEditText(cur)
+        elif found:
+            self.usb.setCurrentIndex(0)
+        if pyvisa is None:
+            self.status.setText("USB needs pyvisa:  pip install pyvisa pyvisa-py pyusb")
+        elif not found:
+            self.status.setText("no USB instrument found - cable in the rear USB Device port? VISA installed?")
+
+    def _usb_resource(self) -> str:
+        i = self.usb.currentIndex()
+        txt = self.usb.currentText().strip()
+        if i >= 0 and self.usb.itemText(i) == txt:
+            return self.usb.itemData(i) or txt.lstrip("★ ").strip()
+        return txt.lstrip("★ ").strip()
+
     def on_connect(self):
         if self.is_connected:
             self.worker.submit(self.worker.disconnect_dev)
             return
-        demo, host, port = self.demo.isChecked(), self.host.text().strip(), self.port.value()
-        if not demo and not host:
-            self.log.emit("TFG6806: enter the generator's IP address (Utility -> LAN on the generator)", "warn")
+        demo, iface = self.demo.isChecked(), self.iface.currentData()
+        addr = self.host.text().strip() if iface == "lan" else self._usb_resource()
+        port = self.port.value()
+        if not demo and not addr:
+            self.log.emit("TFG6806: enter the generator's IP address (Utility -> LAN on the generator)"
+                          if iface == "lan" else "TFG6806: choose the USB device (press ⟳ to search)", "warn")
             return
         self.status.setText("connecting…")
         self.conn_btn.setEnabled(False)
-        self.worker.submit(lambda: self.worker.connect_dev(demo, host, port))
+        self.worker.submit(lambda: self.worker.connect_dev(demo, iface, addr, port))
 
     def _on_connected(self, ok, info):
         self.conn_btn.setEnabled(True)
