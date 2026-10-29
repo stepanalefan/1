@@ -101,6 +101,62 @@ from collections import deque
 # library once, and that stays usable from every thread. bench_monitor.visa_manager() uses this.
 EARLY_VISA_RM = None
 EARLY_VISA_ERR = ""
+
+
+def _visa_diagnostics():
+    """Windows only, when the installed VISA cannot be opened: write visa_diag.txt next to the
+    program with the loaded runtime / VISA DLLs (and where they come from), the VISA folders on
+    PATH and the Windows error of loading each installed VISA DLL directly."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    psapi.EnumProcessModules.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.HMODULE),
+                                         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    lines = [f"python {sys.version}", f"frozen={getattr(sys, 'frozen', False)} "
+             f"_MEIPASS={getattr(sys, '_MEIPASS', None)} exe={sys.executable}", ""]
+    mods = (wintypes.HMODULE * 2048)()
+    need = wintypes.DWORD()
+    keys = ("msvcp", "vcruntime", "concrt", "ucrtbase", "visa", "kt", "ag", "ivi", "qt5", "python")
+    if psapi.EnumProcessModules(k32.GetCurrentProcess(), mods, ctypes.sizeof(mods), ctypes.byref(need)):
+        buf = ctypes.create_unicode_buffer(1024)
+        lines.append("loaded DLLs (runtime / VISA / Qt / Python):")
+        for h in mods[:need.value // ctypes.sizeof(wintypes.HMODULE)]:
+            if h and k32.GetModuleFileNameW(h, buf, 1024):
+                name = os.path.basename(buf.value).lower()
+                if any(name.startswith(k) for k in keys):
+                    lines.append(f"  {buf.value}")
+    lines += ["", "PATH entries with VISA / IVI / Keysight / Agilent / NI:"]
+    lines += [f"  {d}" for d in os.environ.get("PATH", "").split(os.pathsep)
+              if any(k in d.lower() for k in ("visa", "ivi", "keysight", "agilent", "national instr"))]
+    sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    cands = [os.path.join(sysdir, n) for n in ("visa64.dll", "visa32.dll", "ktvisa32.dll", "agvisa32.dll",
+                                               "nivisa64.dll")]
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "IVI Foundation", "VISA"),
+                 os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Keysight", "IO Libraries Suite")):
+        for root, _dirs, files in os.walk(base) if "IVI" in base or "Keysight" in base else []:
+            cands += [os.path.join(root, f) for f in files if f.lower().endswith(".dll") and "visa" in f.lower()]
+            if len(cands) > 60:
+                break
+    lines += ["", "loading VISA DLLs directly (ok / Windows error):"]
+    for c in dict.fromkeys(cands):
+        if not os.path.isfile(c):
+            continue
+        try:
+            ctypes.WinDLL(c)
+            lines.append(f"  ok      {c}")
+        except OSError as e:
+            lines.append(f"  FAILED  {c}: {e}")
+    folder = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+    path = os.path.join(folder, "visa_diag.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return path
+
+
 if sys.platform == "win32":
     # In the EXE, PyInstaller's start-up code has called SetDllDirectory(<unpack folder>), so Windows
     # resolves DLL dependencies from the bundled C++ runtime (msvcp140.dll ... shipped with Python /
@@ -123,15 +179,12 @@ if sys.platform == "win32":
             EARLY_VISA_ERR, EARLY_VISA_RM = "default lookup gave pyvisa-py", None
     except Exception as _e:              # no VISA installed -> pyvisa-py later
         EARLY_VISA_RM, EARLY_VISA_ERR = None, f"{type(_e).__name__}: {_e}"
-        try:                             # diagnostic: which C++ runtime is loaded in this process?
-            import ctypes as _ct
-            _buf = _ct.create_unicode_buffer(520)
-            for _dll in ("msvcp140.dll", "vcruntime140.dll"):
-                _h = _ct.windll.kernel32.GetModuleHandleW(_dll)
-                if _h and _ct.windll.kernel32.GetModuleFileNameW(_ct.c_void_p(_h), _buf, 520):
-                    EARLY_VISA_ERR += f" [{_dll} loaded from {_buf.value}]"
-        except Exception:
-            pass
+        try:
+            _diag_path = _visa_diagnostics()
+            if _diag_path:
+                EARLY_VISA_ERR += f" [details: {_diag_path}]"
+        except Exception as _de:
+            EARLY_VISA_ERR += f" [diagnostics failed: {_de}]"
     finally:
         if _k32 is not None:
             _k32.SetDllDirectoryW(_frozen_dir)
