@@ -27,6 +27,59 @@ except ImportError:  # pragma: no cover
 _rm = None
 _info = ""
 _failures: list[str] = []
+_dll_dirs_added = False
+
+
+def _vendor_dirs() -> list[str]:
+    """Folders holding the VISA implementation and its dependencies (Keysight, IVI, NI)."""
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    bits64 = struct.calcsize("P") == 8
+    cands = [
+        os.path.join(pf, "Keysight", "IO Libraries Suite", "bin"),
+        os.path.join(pf86, "Keysight", "IO Libraries Suite", "bin"),
+        os.path.join(pf, "IVI Foundation", "VISA", "Win64" if bits64 else "WinNT", "Bin"),
+        os.path.join(pf, "IVI Foundation", "VISA", "Win64", "ktvisa"),
+        os.path.join(pf, "IVI Foundation", "VISA", "Win64", "agvisa"),
+        os.path.join(pf86, "IVI Foundation", "VISA", "WinNT", "Bin"),
+        os.path.join(pf86, "IVI Foundation", "VISA", "WinNT", "ktvisa"),
+        os.path.join(pf, "IVI Foundation", "IVI", "Bin"),
+        os.path.join(pf86, "IVI Foundation", "IVI", "Bin"),
+        os.path.join(pf, "National Instruments", "Shared", "NI-VISA") if bits64 else "",
+    ]
+    return [d for d in cands if d and os.path.isdir(d)]
+
+
+def _add_dll_dirs():
+    """Python 3.8+ no longer searches PATH for the dependencies of a DLL loaded through ctypes,
+    so visa64.dll loads but cannot find the vendor's VISA DLLs (VI_ERROR_LIBRARY_NFOUND).
+    Register the vendor folders for the DLL search and for the VISA router's own LoadLibrary."""
+    global _dll_dirs_added
+    if _dll_dirs_added or sys.platform != "win32":
+        return
+    _dll_dirs_added = True
+    for d in _vendor_dirs():
+        try:
+            os.add_dll_directory(d)
+        except (OSError, AttributeError):
+            pass
+        if d.lower() not in os.environ.get("PATH", "").lower():
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def _load_error(path: str) -> str:
+    """The Windows loader's own reason (missing dependency, wrong bitness, ...)."""
+    if sys.platform != "win32" or not path:
+        return ""
+    import ctypes
+    try:
+        ctypes.WinDLL(path)
+        return ""
+    except OSError as e:
+        code = getattr(e, "winerror", None)
+        hint = {126: "a DLL it depends on was not found", 193: "32/64-bit mismatch between Python and VISA",
+                127: "a required function is missing (old / mixed VISA versions)"}.get(code, "")
+        return f" [Windows: {e}{' - ' + hint if hint else ''}]"
 
 
 def _candidates() -> list[str]:
@@ -68,12 +121,13 @@ def resource_manager():
     if pyvisa is None:
         raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
     _failures.clear()
+    _add_dll_dirs()
     fallback = None
     for lib in _candidates():
         try:
             rm = pyvisa.ResourceManager(lib)
         except Exception as e:
-            _failures.append(f"{lib or 'default VISA'}: {type(e).__name__}: {e}")
+            _failures.append(f"{lib or 'default VISA'}: {type(e).__name__}: {e}{_load_error(lib)}")
             continue
         if _is_pyvisa_py(rm):
             _failures.append("default lookup found no installed VISA library")
@@ -83,7 +137,8 @@ def resource_manager():
         _info = f"VISA: {getattr(rm.visalib, 'library_path', rm.visalib)}"
         return _rm
     _rm = fallback or pyvisa.ResourceManager("@py")
-    _info = "VISA: pyvisa-py (pure Python) - no installed VISA library could be loaded"
+    _info = ("VISA: pyvisa-py (pure Python) - no installed VISA library could be loaded"
+             + (f" ({' | '.join(_failures)})" if _failures else ""))
     return _rm
 
 
@@ -115,7 +170,9 @@ def explain(e: Exception, resource: str = "") -> str:
     usb = resource.upper().startswith("USB")
     if using_pyvisa_py() and (usb or "pyusb" in msg.lower() or "no backend" in msg.lower()):
         why = ("\n  why the installed VISA was not used: " + " | ".join(_failures)) if _failures else ""
-        return ("This PC's VISA library (Keysight IO Libraries / NI-VISA) could not be loaded, so the "
+        bits = struct.calcsize("P") * 8
+        return (f"This PC's VISA library (Keysight IO Libraries / NI-VISA) could not be loaded into {bits}-bit "
+                f"Python ({sys.executable}), so the "
                 "pure-Python fallback was used - it cannot open USB instruments that use Keysight's driver."
                 f"{why}\n  Fix: restart Windows after installing IO Libraries Suite, and check that Python "
                 f"and VISA match (64-bit Python needs the 64-bit VISA - Keysight installs both). "
