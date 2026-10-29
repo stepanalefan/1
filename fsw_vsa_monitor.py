@@ -28,6 +28,7 @@ Features
 * Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / CAN /
   FSW / scan, constellation + MER/Power/CFE, voltages, telemetry watch list),
   Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), TFG6806 (tfg_generator.py),
+  N5183B (mxg_generator.py),
   Bench, CAN, Telemetry.
 * Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
   scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
@@ -122,6 +123,11 @@ try:  # Suin TFG6806 function generator tab
     import tfg_generator
 except Exception:  # pragma: no cover
     tfg_generator = None
+
+try:  # Keysight N5183B MXG signal generator tab
+    import mxg_generator
+except Exception:  # pragma: no cover
+    mxg_generator = None
 
 try:  # Main (dashboard) tab
     import dashboard
@@ -1249,6 +1255,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.tfg:
                 self.tfg.demo.setChecked(True)
                 QtCore.QTimer.singleShot(500, self.tfg.on_connect)
+            if self.mxg:
+                self.mxg.demo.setChecked(True)
+                QtCore.QTimer.singleShot(600, self.mxg.on_connect)
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
 
@@ -1591,6 +1600,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tfg = tfg_generator.TfgTab() if tfg_generator else None
         if self.tfg:
             self.tfg.log.connect(self.logmsg)
+        self.mxg = mxg_generator.MxgTab() if mxg_generator else None
+        if self.mxg:
+            self.mxg.log.connect(self.logmsg)
         self.switch = None
         if slave_switch and self.bench:
             self.switch = slave_switch.SwitchController(self.bench, self.logmsg, self)
@@ -1605,6 +1617,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(page(self.smw), "SMW200A")
         if self.tfg:
             self.tabs.addTab(self.tfg, "TFG6806")
+        if self.mxg:
+            self.tabs.addTab(self.mxg, "N5183B")
         if self.bench:
             bench_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
             bscroll = QtWidgets.QScrollArea()
@@ -2283,6 +2297,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.smw.shutdown()
         if self.tfg:
             self.tfg.shutdown()
+        if self.mxg:
+            self.mxg.shutdown()
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()

@@ -4,7 +4,7 @@ dashboard.py
 ============
 "Main" tab of fsw_vsa_monitor.py: everything important on one screen.
 
-* Device status: FSW, HMP4040, SMW200A, TFG6806, 34405A, Arduino, Slave, CAN lines.
+* Device status: FSW, HMP4040, SMW200A, N5183B, TFG6806, 34405A, Arduino, Slave, CAN lines.
 * Test sequences: steps that drive all devices (HMP outputs / master, SMW signal, CAN
   command from the CAN library, FSW run/stop/single, voltage scan start/stop, pause,
   repeat ... end, log message). Device steps wait until the instrument has executed
@@ -78,7 +78,7 @@ class TelemetryCsv:
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
 STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
                "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
-               "sw": "#ffa657", "tfg": "#56d4dd"}
+               "sw": "#ffa657", "tfg": "#56d4dd", "mxg": "#f778ba"}
 SMW_KEYS = [  # key, label
     ("freq", "Frequency, Hz"), ("level", "Level, dBm"), ("format", "Modulation"), ("srate", "Symbol rate, Hz"),
     ("filter", "Filter"), ("fparam", "Filter alpha / BT"), ("dm", "Baseband DM on"),
@@ -214,7 +214,7 @@ class StepDialog(QtWidgets.QDialog):
         self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "can": "CAN command",
                              "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "scan": "Voltage scan", "repeat": "Repeat",
                              "log": "Log message", "sw": "Switch (slave Arduino)",
-                             "tfg": "TFG6806 generator"}.get(op, op))
+                             "tfg": "TFG6806 generator", "mxg": "N5183B signal generator"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
         if op == "hmp":
@@ -302,6 +302,57 @@ class StepDialog(QtWidgets.QDialog):
             arow.addWidget(self.tfg_act, 1)
             arow.addWidget(QtWidgets.QLabel("slot"))
             arow.addWidget(self.tfg_slot)
+            f.addRow("Then", arow)
+        elif op == "mxg":
+            mg = _mxg()
+            if mg is None:
+                f.addRow(QtWidgets.QLabel("mxg_generator.py is missing - N5183B steps are not available."))
+            else:
+                box = QtWidgets.QWidget()
+                grid = QtWidgets.QGridLayout(box)
+                grid.setVerticalSpacing(2)
+                self.mxg_w = {}
+                params = step.get("p", {})
+                r = 0
+                for gname in mg.GROUPS:
+                    head = QtWidgets.QLabel(f"<b>{gname}</b>")
+                    head.setStyleSheet("color:#8a96a3;")
+                    grid.addWidget(head, r, 0, 1, 2)
+                    r += 1
+                    for key, prm in mg.PARAMS.items():
+                        if prm[4] != gname:
+                            continue
+                        use = QtWidgets.QCheckBox(prm[1])
+                        fld = mg.Field(key)
+                        use.setChecked(key in params)
+                        if key in params:
+                            fld.put(params[key])
+                        elif key in ("rf", "mod"):
+                            fld.put(True)
+                        fld.w.setEnabled(use.isChecked())
+                        use.toggled.connect(fld.w.setEnabled)
+                        grid.addWidget(use, r, 0)
+                        grid.addWidget(fld.w, r, 1)
+                        self.mxg_w[key] = (use, fld)
+                        r += 1
+                sc = QtWidgets.QScrollArea()
+                sc.setWidget(box)
+                sc.setWidgetResizable(True)
+                sc.setMinimumSize(430, 420)
+                f.addRow(sc)
+                f.addRow(QtWidgets.QLabel("Only ticked parameters are sent; modulation and RF output switch last."))
+            self.mxg_act = QtWidgets.QComboBox()
+            for k, text in (("", "none"), ("single", "Single sweep (:INITiate)"), ("trg", "Trigger (*TRG)"),
+                            ("recall", "Recall saved state"), ("preset", "Preset")):
+                self.mxg_act.addItem(text, k)
+            self.mxg_act.setCurrentIndex(max(0, self.mxg_act.findData(step.get("action", ""))))
+            self.mxg_slot = QtWidgets.QSpinBox()
+            self.mxg_slot.setRange(0, 99)
+            self.mxg_slot.setValue(step.get("slot", 0))
+            arow = QtWidgets.QHBoxLayout()
+            arow.addWidget(self.mxg_act, 1)
+            arow.addWidget(QtWidgets.QLabel("register"))
+            arow.addWidget(self.mxg_slot)
             f.addRow("Then", arow)
         elif op == "smw":
             for key, label in SMW_KEYS:
@@ -449,6 +500,13 @@ class StepDialog(QtWidgets.QDialog):
                     s["slot"] = self.tfg_slot.value()
                 if not s["p"] and not s["action"]:
                     raise ValueError("select at least one parameter or an action")
+            elif op == "mxg":
+                s["p"] = {k: fld.get() for k, (use, fld) in getattr(self, "mxg_w", {}).items() if use.isChecked()}
+                s["action"] = self.mxg_act.currentData()
+                if s["action"] == "recall":
+                    s["slot"] = self.mxg_slot.value()
+                if not s["p"] and not s["action"]:
+                    raise ValueError("select at least one parameter or an action")
             elif op == "smw":
                 for key, (use, wdg) in self.w.items():
                     if not use.isChecked():
@@ -512,6 +570,14 @@ def _tfg():
         return None
 
 
+def _mxg():
+    try:
+        import mxg_generator
+        return mxg_generator
+    except Exception:
+        return None
+
+
 def _smw_formats():
     try:
         import smw_generator
@@ -540,7 +606,7 @@ def sw_pins(sw):
 
 
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "SMW200A", "TFG6806", "34405A", "Arduino", "Slave", "CAN"]
+    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "34405A", "Arduino", "Slave", "CAN"]
 
     def __init__(self, host):
         super().__init__()
@@ -675,7 +741,7 @@ class Dashboard(QtWidgets.QWidget):
         for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
                                         ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW set", "fsw_set"),
                                         ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"),
-                                        ("+ Switch", "sw"), ("+ TFG", "tfg"))):
+                                        ("+ Switch", "sw"), ("+ TFG", "tfg"), ("+ MXG", "mxg"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
             b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)"}.get(op, ""))
@@ -878,6 +944,10 @@ class Dashboard(QtWidgets.QWidget):
             rf = smw.is_connected and smw.rf_btn.isChecked()
             self._set_status("SMW200A", "ok" if smw.is_connected else "off",
                              smw.idn or "not connected", "RF ON" if rf else "")
+        mxg = getattr(h, "mxg", None)
+        if mxg:
+            self._set_status("N5183B", "ok" if mxg.is_connected else "off", mxg.idn or "not connected",
+                             "RF ON" if mxg.rf_on else "")
         tfg = getattr(h, "tfg", None)
         if tfg:
             on = [f"CH{ch}" for ch, v in tfg.out_on.items() if v] if tfg.is_connected else []
@@ -1149,6 +1219,15 @@ class Dashboard(QtWidgets.QWidget):
             return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
+        if op == "mxg":
+            mg = _mxg()
+            parts = [f"{mg.PARAMS[k][1]} {mg.describe(k, v)}" if mg and k in mg.PARAMS else k
+                     for k, v in s.get("p", {}).items()]
+            act = {"single": "single sweep", "trg": "trigger", "preset": "preset",
+                   "recall": f"recall register {s.get('slot', 0)}"}.get(s.get("action", ""))
+            if act:
+                parts.append(act)
+            return "◈ MXG   " + ", ".join(parts)
         if op == "tfg":
             tg = _tfg()
             chs = "+".join(f"CH{c}" for c in s.get("ch", [1]))
@@ -1236,7 +1315,8 @@ class Dashboard(QtWidgets.QWidget):
                     "fsw": {"action": "run"}, "scan": {"action": "start"},
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
                     "log": {"text": ""}, "can": {}, "sw": {"out": 0, "action": "pulse", "ms": 1000},
-                    "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}}}
+                    "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}},
+                    "mxg": {"p": {"freq": 1e9, "power": -20.0, "rf": True}}}
         dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1452,6 +1532,25 @@ class Dashboard(QtWidgets.QWidget):
             params = {k: s[k] for k, _ in SMW_KEYS if k in s}
             return run_in(smw.worker.submit, lambda: smw.worker.apply(params, prev={}, label="sequence"),
                           "SMW200A")
+        elif op == "mxg":
+            mxg = getattr(h, "mxg", None)
+            if not mxg or not mxg.is_connected:
+                raise RuntimeError("N5183B not connected")
+            w = mxg.worker
+            params, act, slot = dict(s.get("p", {})), s.get("action", ""), s.get("slot", 0)
+
+            def job():
+                if act == "preset":
+                    w.command(":SYSTem:PRESet", "sequence: preset", reread=True)
+                elif act == "recall":
+                    w.command(f"*RCL {slot}", f"sequence: register {slot} recalled", reread=True)
+                if params:
+                    w.apply(params, prev={}, label="sequence")
+                if act == "single":
+                    w.command(":INITiate:IMMediate", "sequence: single sweep")
+                elif act == "trg":
+                    w.command("*TRG", "sequence: trigger")
+            return run_in(w.submit, job, "N5183B")
         elif op == "tfg":
             tfg = getattr(h, "tfg", None)
             if not tfg or not tfg.is_connected:

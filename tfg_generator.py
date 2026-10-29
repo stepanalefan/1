@@ -200,7 +200,7 @@ def fmt_si(v, unit="") -> str:
         return f"0 {unit}".strip()
     e = max(-9, min(9, int(math.floor(math.log10(abs(v)) / 3) * 3)))
     p = {9: "G", 6: "M", 3: "k", 0: "", -3: "m", -6: "u", -9: "n"}[e]
-    return f"{v / 10 ** e:.10g} {p}{unit}".strip()
+    return f"{v / 10 ** e:.15g} {p}{unit}".strip()
 
 
 def scpi_value(kind: str, v, key="") -> str:
@@ -227,6 +227,16 @@ def describe(key, v) -> str:
     if kind in ("deg", "pct", "num"):
         return f"{v:g}{UNITS.get(kind, '')}"
     return fmt_si(v, UNITS.get(kind, ""))
+
+
+def same(a, b) -> bool:
+    """Unchanged? Numbers equal within 1e-14 relative (text <-> number round trips are not exact)."""
+    if isinstance(a, float) or isinstance(b, float):
+        try:
+            return math.isclose(float(a), float(b), rel_tol=1e-14, abs_tol=1e-15)
+        except (TypeError, ValueError):
+            return False
+    return a == b
 
 
 # --------------------------------------------------------------------------- #
@@ -571,7 +581,7 @@ class TfgWorker(QtCore.QThread):
                 continue
             if key == "arb" and s.get("wave", ref.get("wave")) != "ARB":
                 continue
-            if key != "arb" and ref.get(key) == s[key]:
+            if key != "arb" and same(ref.get(key), s[key]):
                 continue
             self.dev.set(ch, key, s[key])
             sent.append(f"{PARAMS[key][1]} {describe(key, s[key])}")
