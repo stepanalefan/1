@@ -99,6 +99,7 @@ def _candidates() -> list[str]:
             os.path.join(pf86, "Keysight", "IO Libraries Suite", "bin", "ktvisa32.dll"),
             os.path.join(pf, "Keysight", "IO Libraries Suite", "bin", "agvisa32.dll"),
         ]
+        out += _vendor_visa_dlls(bits64)
     seen, uniq = set(), []
     for c in out:
         if c not in seen and (c == "" or os.path.isfile(c)):
@@ -109,6 +110,33 @@ def _candidates() -> list[str]:
 
 def _is_pyvisa_py(rm) -> bool:
     return type(rm.visalib).__module__.startswith("pyvisa_py")
+
+
+def _vendor_visa_dlls(bits64: bool) -> list[str]:
+    """The vendors' own VISA libraries behind the IVI router (System32\\visa64.dll only forwards to
+    the VISA registered as primary; if that registration is broken it fails with
+    VI_ERROR_LIBRARY_NFOUND although Keysight Connection Expert works). Keysight first."""
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    names = ({"visa64.dll", "ktvisa64.dll", "agvisa64.dll"} if bits64 else
+             {"visa32.dll", "ktvisa32.dll", "agvisa32.dll"})
+    roots = ([os.path.join(pf, "IVI Foundation", "VISA", "Win64"), os.path.join(pf, "Keysight", "IO Libraries Suite")]
+             if bits64 else
+             [os.path.join(pf86, "IVI Foundation", "VISA", "WinNT"), os.path.join(pf86, "Keysight", "IO Libraries Suite")])
+    found = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        base_depth = root.rstrip("\\/").count(os.sep)
+        for dirpath, dirnames, files in os.walk(root):
+            if dirpath.count(os.sep) - base_depth >= 3:
+                dirnames[:] = []                      # vendor DLLs sit at most 3 levels down
+            for f in files:
+                if f.lower() in names:
+                    found.append(os.path.join(dirpath, f))
+    rank = lambda p: (0 if "ktvisa" in p.lower() or "keysight" in p.lower() else
+                      1 if "agvisa" in p.lower() else 2)
+    return sorted(found, key=rank)
 
 
 def resource_manager():
@@ -124,6 +152,11 @@ def resource_manager():
     _add_dll_dirs()
     fallback = None
     for lib in _candidates():
+        if lib and sys.platform == "win32":
+            try:
+                os.add_dll_directory(os.path.dirname(lib))     # its dependencies sit next to it
+            except (OSError, AttributeError):
+                pass
         try:
             rm = pyvisa.ResourceManager(lib)
         except Exception as e:
@@ -170,6 +203,10 @@ def explain(e: Exception, resource: str = "") -> str:
     usb = resource.upper().startswith("USB")
     if using_pyvisa_py() and (usb or "pyusb" in msg.lower() or "no backend" in msg.lower()):
         why = ("\n  why the installed VISA was not used: " + " | ".join(_failures)) if _failures else ""
+        if any("LIBRARY_NFOUND" in f and "[Windows" not in f for f in _failures):
+            why += ("\n  visa64.dll itself loads, but it cannot open a VISA session - the IVI VISA router points "
+                    "to a missing / non-primary VISA. In Keysight Connection Expert: Settings (gear) -> "
+                    "'Keysight VISA is primary VISA' (or re-run the IO Libraries installer -> Repair).")
         bits = struct.calcsize("P") * 8
         return (f"This PC's VISA library (Keysight IO Libraries / NI-VISA) could not be loaded into {bits}-bit "
                 f"Python ({sys.executable}), so the "
