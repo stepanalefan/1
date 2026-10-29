@@ -62,8 +62,7 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover
     pyvisa = None
-
-
+import visa_rm      # one shared VISA ResourceManager (installed VISA first)
 # --------------------------------------------------------------------------- #
 #  Channel map (must match the Arduino sketch)                                 #
 # --------------------------------------------------------------------------- #
@@ -185,11 +184,7 @@ class VisaLink:
     def __init__(self, resource: str, timeout_ms: int = 2000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
-        self.inst = rm.open_resource(resource)
+        self.inst = visa_rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         self.inst.read_termination = "\n"
         self.inst.write_termination = "\n"
@@ -302,11 +297,7 @@ class Multimeter:
     def __init__(self, resource: str):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
-        self.dmm = rm.open_resource(resource)
+        self.dmm = visa_rm.open_resource(resource)
         try:
             self.dmm.timeout = 3000
             idn = self.dmm.query("*IDN?").strip()
@@ -503,10 +494,7 @@ def detect_devices(skip_ports=()) -> dict:
     found = {"dmm": None, "hmp": None, "arduino": None, "ports": [], "visa": []}
     if pyvisa is not None:
         try:
-            try:
-                rm = pyvisa.ResourceManager()
-            except Exception:
-                rm = pyvisa.ResourceManager("@py")
+            rm = visa_rm.resource_manager()
             found["visa"] = [r for r in rm.list_resources() if r.upper().startswith("USB")]
             for r in found["visa"]:
                 if "0X0957" in r.upper():

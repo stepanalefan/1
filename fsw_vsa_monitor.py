@@ -106,7 +106,7 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover - demo mode still works
     pyvisa = None
-
+import visa_rm      # one shared VISA ResourceManager (installed VISA first)
 try:  # Bench tab (176-channel voltage monitor + HMP4040), file next to this script
     import bench_monitor
     _BENCH_ERR = None
@@ -342,11 +342,8 @@ class FswVsa:
     def __init__(self, resource: str, timeout_ms: int = 30000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        try:
-            self.rm = pyvisa.ResourceManager()
-        except Exception:
-            self.rm = pyvisa.ResourceManager("@py")
-        self.inst = self.rm.open_resource(resource)
+        self.rm = visa_rm.resource_manager()
+        self.inst = visa_rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         self.timeout_ms = timeout_ms
         self._unsupported: set[str] = set()   # queries the firmware does not know (-113)
@@ -1239,6 +1236,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.logmsg(f"Bench tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
+        vi = visa_rm.info()
+        self.logmsg(vi, "warn" if "pyvisa-py" in vi or "not available" in vi else "info")
         if not self.can_win:
             self.logmsg(f"CAN tab disabled - canable_analyzer.py / can_commands.py could not be "
                         f"loaded ({_CAN_ERR}). Put them in the same folder as this script.", "warn")

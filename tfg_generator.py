@@ -46,7 +46,7 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover - LAN works without it
     pyvisa = None
-
+import visa_rm      # one shared VISA ResourceManager (installed VISA first)
 DEFAULT_PORT = 5025
 USB_IDS = ("1267::260", "0X04F3::0X0104")     # vendor::product of the TFG6800 (decimal / hex form)
 CHANNELS = (1, 2)
@@ -296,7 +296,7 @@ class VisaLink:
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py pyusb")
         try:
-            self.inst = _rm().open_resource(resource)
+            self.inst = visa_rm.open_resource(resource)
         except pyvisa.errors.VisaIOError as e:
             if e.error_code != pyvisa.constants.StatusCode.error_resource_not_found:
                 raise
@@ -332,10 +332,7 @@ class VisaLink:
 
 
 def _rm():
-    try:
-        return pyvisa.ResourceManager()
-    except Exception:
-        return pyvisa.ResourceManager("@py")       # pure-Python backend (needs pyusb for USB)
+    return visa_rm.resource_manager()
 
 
 def find_usb() -> list[tuple[str, bool]]:

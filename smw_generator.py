@@ -23,7 +23,7 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover
     pyvisa = None
-
+import visa_rm      # one shared VISA ResourceManager (installed VISA first)
 # label, SCPI mnemonic (long form; the instrument answers with the short form)
 FORMATS = [("BPSK", "BPSK"), ("QPSK", "QPSK"), ("OQPSK", "OQPSk"), ("pi/4-QPSK", "P4QPsk"),
            ("pi/4-DQPSK", "P4DQpsk"), ("8PSK", "PSK8"), ("16QAM", "QAM16"), ("32QAM", "QAM32"),
@@ -82,11 +82,7 @@ class SmwDriver:
     def __init__(self, resource: str, timeout_ms: int = 10000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        try:
-            rm = pyvisa.ResourceManager()
-        except Exception:
-            rm = pyvisa.ResourceManager("@py")
-        self.inst = rm.open_resource(resource)
+        self.inst = visa_rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         if resource.upper().endswith("::SOCKET"):
             self.inst.read_termination = "\n"

@@ -38,7 +38,7 @@ try:
     import pyvisa
 except ImportError:  # pragma: no cover
     pyvisa = None
-
+import visa_rm      # one shared VISA ResourceManager (installed VISA first)
 _NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 PROTOCOLS = [("LAN - HiSLIP", "hislip"), ("LAN - VXI-11", "vxi11"), ("LAN - socket 5025", "socket"),
              ("USB / GPIB / VISA address", "visa")]
@@ -177,10 +177,7 @@ def resource_for(proto: str, addr: str) -> str:
 
 
 def _rm():
-    try:
-        return pyvisa.ResourceManager()
-    except Exception:
-        return pyvisa.ResourceManager("@py")
+    return visa_rm.resource_manager()
 
 
 def find_visa() -> list[tuple[str, bool]]:
@@ -212,7 +209,7 @@ class MxgDriver:
     def __init__(self, resource: str, timeout_ms=5000):
         if pyvisa is None:
             raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        self.inst = _rm().open_resource(resource)
+        self.inst = visa_rm.open_resource(resource)
         self.inst.timeout = timeout_ms
         self.inst.read_termination = "\n"
         self.inst.write_termination = "\n"
