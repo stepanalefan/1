@@ -509,7 +509,7 @@ def detect_devices(skip_ports=()) -> dict:
                 rm = pyvisa.ResourceManager("@py")
             found["visa"] = [r for r in rm.list_resources() if r.upper().startswith("USB")]
             for r in found["visa"]:
-                if "0X0957" in r.upper():
+                if "0X0957" in r.upper() or "::2391::" in r:      # Agilent/Keysight vendor id, hex or decimal
                     found["dmm"] = r
                     break
         except Exception:
