@@ -1,7 +1,22 @@
 @echo off
 REM Build FSW Monitor EXE (run on Windows from this folder)
 REM Put app.ico (and optionally lupa.ico) next to the scripts first.
-python -m pip install --upgrade pyinstaller pyqt5 pyqtgraph numpy pyvisa pyvisa-py pyserial python-can
+cd /d "%~dp0"
+
+REM Find Python: PyCharm's project environment first, then the py launcher, then python on PATH
+set PY=
+if exist ".venv\Scripts\python.exe" set PY=".venv\Scripts\python.exe"
+if not defined PY if exist "venv\Scripts\python.exe" set PY="venv\Scripts\python.exe"
+if not defined PY (py -3 --version >nul 2>&1 && set PY=py -3)
+if not defined PY (python --version >nul 2>&1 && set PY=python)
+if not defined PY (
+  echo Python not found. Open the project in PyCharm and run the build command in its Terminal,
+  echo or install Python from python.org with "Add python.exe to PATH" ticked.
+  pause
+  exit /b 1
+)
+echo Using Python: %PY%
+%PY% -m pip install --upgrade pyinstaller pyqt5 pyqtgraph numpy pyvisa pyvisa-py pyserial python-can
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
@@ -9,7 +24,7 @@ set ICONARGS=
 if exist app.ico set ICONARGS=--icon app.ico --add-data "app.ico;."
 if exist lupa.ico set ICONARGS=%ICONARGS% --add-data "lupa.ico;."
 
-python -m PyInstaller --noconfirm --clean --windowed --onefile ^
+%PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --name FSW_Monitor %ICONARGS% ^
   --hidden-import bench_monitor --hidden-import canable_analyzer ^
   --hidden-import can_commands --hidden-import telemetry ^
