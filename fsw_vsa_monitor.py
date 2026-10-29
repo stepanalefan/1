@@ -94,6 +94,22 @@ import threading
 import time
 from collections import deque
 
+# VISA is opened HERE, before numpy / PyQt5 are imported. On Windows those packages call
+# os.add_dll_directory(), which switches the whole process to the "safe" DLL search that ignores
+# PATH - and the IVI VISA router (System32\visa32.dll / visa64.dll) finds Keysight's or NI's VISA
+# through PATH. Opened later it fails with VI_ERROR_LIBRARY_NFOUND; opened now it loads the vendor
+# library once, and that stays usable from every thread. bench_monitor.visa_manager() uses this.
+EARLY_VISA_RM = None
+EARLY_VISA_ERR = ""
+if sys.platform == "win32":
+    try:
+        import pyvisa as _pyvisa
+        EARLY_VISA_RM = _pyvisa.ResourceManager()
+        if type(EARLY_VISA_RM.visalib).__module__.startswith("pyvisa_py"):
+            EARLY_VISA_ERR, EARLY_VISA_RM = "default lookup gave pyvisa-py", None
+    except Exception as _e:              # no VISA installed -> pyvisa-py later
+        EARLY_VISA_RM, EARLY_VISA_ERR = None, f"{type(_e).__name__}: {_e}"
+
 import numpy as np
 
 try:

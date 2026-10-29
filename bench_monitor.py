@@ -185,6 +185,29 @@ _VISA_RM = None
 VISA_INFO = ""          # which VISA library is in use (shown in the log on the first connection)
 
 
+_DLL_DIR_HANDLES = []      # os.add_dll_directory() only lasts while its handle is alive
+
+
+def _keysight_dll_dirs():
+    """Fallback when VISA was not opened before PyQt5: let the IVI router find the vendor VISA
+    by adding the VISA folders from PATH (and the usual install folders) to the DLL search."""
+    if sys.platform != "win32" or _DLL_DIR_HANDLES or not hasattr(os, "add_dll_directory"):
+        return
+    keys = ("ivi", "visa", "keysight", "agilent", "national instruments")
+    dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if any(k in d.lower() for k in keys)]
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        dirs += [os.path.join(base, "Keysight", "IO Libraries Suite", "bin"),
+                 os.path.join(base, "IVI Foundation", "VISA", "Win64", "Bin"),
+                 os.path.join(base, "IVI Foundation", "VISA", "WinNT", "Bin")]
+    for d in dict.fromkeys(dirs):
+        if os.path.isdir(d):
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(d))
+            except OSError:
+                pass
+
+
 def _is_pyvisa_py(rm) -> bool:
     return type(rm.visalib).__module__.startswith("pyvisa_py")
 
@@ -198,7 +221,15 @@ def visa_manager():
     global _VISA_RM, VISA_INFO
     if _VISA_RM is not None:
         return _VISA_RM
+    main = sys.modules.get("__main__")
+    early = getattr(main, "EARLY_VISA_RM", None)            # opened by fsw_vsa_monitor before PyQt5
+    if early is not None:
+        _VISA_RM, VISA_INFO = early, f"VISA: {early.visalib}"
+        return early
     tried, fallback = [], None
+    if getattr(main, "EARLY_VISA_ERR", ""):
+        tried.append(f"at start-up: {main.EARLY_VISA_ERR}")
+    _keysight_dll_dirs()
     candidates = [None]
     if sys.platform == "win32":
         sysdir = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
