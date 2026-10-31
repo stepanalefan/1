@@ -4,23 +4,23 @@ dashboard.py
 ============
 "Main" tab of fsw_vsa_monitor.py: everything important on one screen.
 
-* Device status: FSW, HMP4040, SMW200A, N5183B, TFG6806, 34405A, Arduino, Slave, CAN lines.
-* Test sequences: steps that drive all devices (HMP outputs / master, SMW signal, CAN
-  command from the CAN library, FSW run/stop/single, voltage scan start/stop, pause,
+* Device status: FSW, HMP4040, SMW200A, N5183B, TFG6806, RS-485 ports.
+* Test sequences: steps that drive all devices (HMP outputs / master, SMW signal, RS-485
+  command from the RS-485 library, FSW run/stop/single, pause,
   repeat ... end, log message). Device steps wait until the instrument has executed
   them; any error stops the sequence. Stored in dashboard.json next to the program.
 * Constellation + MER / Power / Carrier frequency error (mirror of the VSA tab).
-* Voltage plot of selected Bench channels.
+* HMP4040 output plot (current / voltage / power of the 4 outputs).
 * Telemetry watch list: any decoded telemetry variable, picked from the Telemetry layouts.
 """
 
 from __future__ import annotations
 
+import bisect
 import csv
 import json
 import math
 import os
-import re
 import sys
 import time
 
@@ -76,9 +76,9 @@ class TelemetryCsv:
             self.f = None
             self.day = None
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
-STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
-               "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
-               "sw": "#ffa657", "tfg": "#56d4dd", "mxg": "#f778ba"}
+STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "rs485": "#79c0ff", "wait": "#8a96a3",
+               "fsw": "#58a6ff", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
+               "tfg": "#56d4dd", "mxg": "#f778ba"}
 SMW_KEYS = [  # key, label
     ("freq", "Frequency, Hz"), ("level", "Level, dBm"), ("format", "Modulation"), ("srate", "Symbol rate, Hz"),
     ("filter", "Filter"), ("fparam", "Filter alpha / BT"), ("dm", "Baseband DM on"),
@@ -147,19 +147,6 @@ def fsw_params(host, app: str):
     ]
 
 
-def parse_channels(text: str) -> list[int]:
-    out = []
-    for tok in re.split(r"[,;\s]+", text.strip()):
-        if not tok:
-            continue
-        if "-" in tok:
-            a, b = tok.split("-", 1)
-            out += list(range(int(a), int(b) + 1))
-        else:
-            out.append(int(tok))
-    return [c for c in dict.fromkeys(out) if 0 <= c < 176]
-
-
 def fmt_hz(v):
     if v is None:
         return "—"
@@ -207,13 +194,13 @@ def run_in(worker_submit, fn, what) -> Token:
 #  Step editor dialog                                                          #
 # --------------------------------------------------------------------------- #
 class StepDialog(QtWidgets.QDialog):
-    def __init__(self, parent, step: dict, can_cmds: list, host=None):
+    def __init__(self, parent, step: dict, cmds: list, host=None):
         super().__init__(parent)
         self.step = dict(step)
         op = step["op"]
-        self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "can": "CAN command",
-                             "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "scan": "Voltage scan", "repeat": "Repeat",
-                             "log": "Log message", "sw": "Switch (slave Arduino)",
+        self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "rs485": "RS-485 command",
+                             "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "repeat": "Repeat",
+                             "log": "Log message",
                              "tfg": "TFG6806 generator", "mxg": "N5183B signal generator"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
@@ -380,15 +367,15 @@ class StepDialog(QtWidgets.QDialog):
                                             "fparam": "0.35"}[key])
                 f.addRow(use, wdg)
                 self.w[key] = (use, wdg)
-        elif op == "can":
+        elif op == "rs485":
             self.cmd = QtWidgets.QComboBox()
-            for c in can_cmds:
-                self.cmd.addItem(f"{c.label()}   {c.id_str()}: {c.data_str()}", c.uid)
+            for c in cmds:
+                self.cmd.addItem(f"{c.label()}   {c.data_str()}", c.uid)
             i = self.cmd.findData(step.get("cmd"))
             self.cmd.setCurrentIndex(max(0, i))
-            f.addRow("Command (CAN library)", self.cmd)
-            if not can_cmds:
-                f.addRow(QtWidgets.QLabel("The CAN command library is empty - add commands on the CAN tab."))
+            f.addRow("Command (RS-485 library)", self.cmd)
+            if not cmds:
+                f.addRow(QtWidgets.QLabel("The RS-485 command library is empty - add commands on the RS-485 tab."))
         elif op == "wait":
             self.ms = QtWidgets.QSpinBox()
             self.ms.setRange(1, 86_400_000)
@@ -438,9 +425,9 @@ class StepDialog(QtWidgets.QDialog):
             self.app.setCurrentIndex(0 if step.get("app", "vsa") == "vsa" else 1)
             f.addRow(self.pages)
             f.addRow(QtWidgets.QLabel("Only ticked parameters are sent; the rest stay as they are."))
-        elif op in ("fsw", "scan"):
+        elif op == "fsw":
             self.action = QtWidgets.QComboBox()
-            acts = (["run", "stop", "single", "autolevel"] if op == "fsw" else ["start", "stop"])
+            acts = ["run", "stop", "single", "autolevel"]
             self.action.addItems(acts)
             self.action.setCurrentText(step.get("action", acts[0]))
             f.addRow("Action", self.action)
@@ -453,30 +440,6 @@ class StepDialog(QtWidgets.QDialog):
         elif op == "log":
             self.text = QtWidgets.QLineEdit(step.get("text", ""))
             f.addRow("Message", self.text)
-        elif op == "sw":
-            sw = getattr(host, "switch", None)
-            pins = sw_pins(sw)
-            self.out = QtWidgets.QComboBox()
-            for i, pin in enumerate(pins):
-                self.out.addItem(f"{pin}  ({sw.cfg['names'][i]})" if sw else pin, i)
-            self.out.setCurrentIndex(max(0, min(step.get("out", 0), len(pins) - 1)))
-            f.addRow("Output", self.out)
-            self.sw_act = QtWidgets.QComboBox()
-            for k, text in (("on", "Switch ON"), ("off", "Switch OFF"), ("pulse", "Pulse (on, then off)")):
-                self.sw_act.addItem(text, k)
-            self.sw_act.setCurrentIndex(self.sw_act.findData(step.get("action", "pulse")))
-            f.addRow("Action", self.sw_act)
-            self.sw_ms = QtWidgets.QSpinBox()
-            self.sw_ms.setRange(10, 600000)
-            self.sw_ms.setSuffix(" ms")
-            self.sw_ms.setValue(int(step.get("ms", 1000)))
-            f.addRow("Pulse length", self.sw_ms)
-            self.sw_act.currentIndexChanged.connect(
-                lambda *_: self.sw_ms.setEnabled(self.sw_act.currentData() == "pulse"))
-            self.sw_ms.setEnabled(self.sw_act.currentData() == "pulse")
-            f.addRow(QtWidgets.QLabel("The step waits until the slave confirms (not for the end of the pulse)."))
-            if sw is None:
-                f.addRow(QtWidgets.QLabel("Switch control is not available (slave_switch.py missing)."))
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -519,16 +482,12 @@ class StepDialog(QtWidgets.QDialog):
                         s[key] = float(wdg.text().replace(",", "."))
                 if len(s) == 1:
                     raise ValueError("select at least one parameter")
-            elif op == "can":
+            elif op == "rs485":
                 if self.cmd.currentData() is None:
-                    raise ValueError("no CAN command selected")
+                    raise ValueError("no RS-485 command selected")
                 s["cmd"] = self.cmd.currentData()
             elif op == "wait":
                 s["ms"] = self.ms.value()
-            elif op == "sw":
-                s["out"], s["action"] = self.out.currentData(), self.sw_act.currentData()
-                if s["action"] == "pulse":
-                    s["ms"] = self.sw_ms.value()
             elif op == "fsw_set":
                 app = self.app.currentData()
                 s["app"], s["params"] = app, {}
@@ -547,7 +506,7 @@ class StepDialog(QtWidgets.QDialog):
                         s["params"][key] = float(wdg.text().replace(",", "."))
                 if not s["params"]:
                     raise ValueError("select at least one parameter")
-            elif op in ("fsw", "scan"):
+            elif op == "fsw":
                 s["action"] = self.action.currentText()
             elif op == "repeat":
                 s["count"] = self.count.value()
@@ -597,21 +556,13 @@ def _smw_filters():
 # --------------------------------------------------------------------------- #
 #  Dashboard                                                                   #
 # --------------------------------------------------------------------------- #
-def slave_switch_pins(sw):
-    return getattr(sys.modules.get(type(sw).__module__), "PINS", ())
-
-
-def sw_pins(sw):
-    return slave_switch_pins(sw) if sw is not None else ("A0", "A1")
-
-
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "34405A", "Arduino", "Slave", "CAN"]
+    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "RS-485"]
 
     def __init__(self, host):
         super().__init__()
         self.host = host
-        self.data = {"scripts": {"Sequence 1": []}, "watch": [], "volt_channels": "0-7"}
+        self.data = {"scripts": {"Sequence 1": []}, "watch": []}
         self.load_error = ""
         try:
             with open(STORE_FILE, encoding="utf-8") as f:
@@ -628,7 +579,6 @@ class Dashboard(QtWidgets.QWidget):
         self.watch_rows: list = []            # (unit, type, Field)
         self.tlog: TelemetryCsv | None = None
         self._tlog_last: dict = {}             # (unit, type, Field) -> last logged value
-        self.volt_curves = {}
         self._range = None
 
         self._build()
@@ -675,7 +625,6 @@ class Dashboard(QtWidgets.QWidget):
         grid.setColumnMinimumWidth(4, 10)
         lv.addWidget(g)
 
-        pair = QtWidgets.QHBoxLayout()               # HMP4040 outputs | Switch, side by side
         g = QtWidgets.QGroupBox("HMP4040 outputs")
         hg = QtWidgets.QGridLayout(g)
         hg.setVerticalSpacing(2)
@@ -703,21 +652,8 @@ class Dashboard(QtWidgets.QWidget):
                 hg.addWidget(c, r, 2 + k)
             hg.addWidget(mode, r, 5)
             self.hmp_rows[ch] = (led, *cells, mode)
-        hg.setColumnStretch(3, 1)
-        pair.addWidget(g, 1)
-
-        self.temp_box = QtWidgets.QGroupBox("Temperatures (1-Wire)")
-        self.temp_grid = QtWidgets.QGridLayout(self.temp_box)
-        self.temp_grid.setVerticalSpacing(2)
-        self.temp_rows: dict = {}          # rom -> (led, name, value)
-        self.temp_box.hide()               # shown once a sensor has been seen
-        lv.addWidget(self.temp_box)
-        sw = getattr(self.host, "switch", None)
-        if sw:
-            pair.addWidget(sw.panel, 1)
-        pair.setStretch(0, 6)
-        pair.setStretch(1, 5)
-        lv.insertLayout(lv.indexOf(self.temp_box), pair)
+        hg.setColumnStretch(6, 1)
+        lv.addWidget(g)
 
         g = QtWidgets.QGroupBox("Test sequence")
         sv = QtWidgets.QVBoxLayout(g)
@@ -738,10 +674,10 @@ class Dashboard(QtWidgets.QWidget):
         self.list.setToolTip("Double-click to edit a step")
         sv.addWidget(self.list, 1)
         add = QtWidgets.QGridLayout()
-        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
+        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ RS-485", "rs485"),
                                         ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW set", "fsw_set"),
-                                        ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"),
-                                        ("+ Switch", "sw"), ("+ TFG", "tfg"), ("+ MXG", "mxg"))):
+                                        ("+ Repeat", "repeat"), ("+ Log", "log"),
+                                        ("+ TFG", "tfg"), ("+ MXG", "mxg"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
             b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)"}.get(op, ""))
@@ -772,7 +708,7 @@ class Dashboard(QtWidgets.QWidget):
         left.setMinimumWidth(540)
         split.addWidget(left)
 
-        # --- right: constellation / voltages / telemetry
+        # --- right: constellation / HMP plot / telemetry
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         top_w = QtWidgets.QWidget()
         th = QtWidgets.QHBoxLayout(top_w)
@@ -814,24 +750,28 @@ class Dashboard(QtWidgets.QWidget):
         vv = QtWidgets.QVBoxLayout(vw)
         vv.setContentsMargins(0, 0, 0, 0)
         vb = QtWidgets.QHBoxLayout()
-        vb.addWidget(QtWidgets.QLabel("Voltage channels"))
-        self.volt_ch = QtWidgets.QLineEdit(self.data.get("volt_channels", "0-7"))
-        self.volt_ch.setToolTip("Bench channels to plot, e.g. 0-7, 144, 160-163")
-        self.volt_ch.editingFinished.connect(self._volt_channels_changed)
-        vb.addWidget(self.volt_ch, 1)
+        vb.addWidget(QtWidgets.QLabel("HMP4040 outputs"))
+        self.hmp_what = QtWidgets.QComboBox()
+        self.hmp_what.addItems(["Current, A", "Voltage, V", "Power, W"])
+        self.hmp_what.setCurrentIndex(self.data.get("hmp_plot", 0))
+        self.hmp_what.currentIndexChanged.connect(lambda *_: self.save())
+        vb.addWidget(self.hmp_what)
+        vb.addStretch(1)
         self.volt_win = QtWidgets.QSpinBox()
         self.volt_win.setRange(10, 86400)
-        self.volt_win.setValue(120)
+        self.volt_win.setValue(300)
         self.volt_win.setPrefix("last ")
         self.volt_win.setSuffix(" s")
         vb.addWidget(self.volt_win)
         vv.addLayout(vb)
         self.volt = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         self.volt.showGrid(x=True, y=True, alpha=0.25)
-        self.volt.setLabel("left", "Voltage", units="V")
         self.volt.getPlotItem().setMenuEnabled(False)
         self.volt.getPlotItem().setAutoVisible(y=True)
         self.volt.addLegend(offset=(5, 5), labelTextSize="8pt")
+        colors = ["#f0b03e", "#79c0ff", "#4fd18b", "#d2a8ff"]
+        self.hmp_curves = {ch: self.volt.plot([], [], pen=pg.mkPen(colors[k], width=1.5), name=f"OUT {ch}")
+                           for k, ch in enumerate((1, 2, 3, 4))}
         vv.addWidget(self.volt, 1)
         right.addWidget(vw)
 
@@ -895,7 +835,7 @@ class Dashboard(QtWidgets.QWidget):
 
     def save(self):
         self.data["watch"] = [[u, t, f.byte, f.name] for u, t, f in self.watch_rows]
-        self.data["volt_channels"] = self.volt_ch.text()
+        self.data["hmp_plot"] = self.hmp_what.currentIndex()
         self.data["tlog"] = self.tlog_chk.isChecked()
         self.data["tlog_changes"] = self.tlog_chg.isChecked()
         try:
@@ -925,20 +865,7 @@ class Dashboard(QtWidgets.QWidget):
             m = b._hmp_ok and b._hmp_master
             self._set_status("HMP4040", "ok" if b._hmp_ok else "off", b.hmp_status.text(),
                              "MASTER ON" if m else "")
-            scanning = "scanning" if b._scan_ok and b.run_btn.isChecked() else ""
-            for name, ok, lbl in (("34405A", b._dmm_ok, b.dmm_status), ("Arduino", b._ard_ok, b.ard_status)):
-                self._set_status(name, "ok" if ok else "off", lbl.text(), scanning)
             self._refresh_hmp(b)
-        sw = getattr(h, "switch", None)
-        if sw:
-            st = {True: "ok", False: "err", None: "off"}[sw.slave_ok]
-            info = {True: "1-Wire A3/A4/A5 · switch A0/A1", False: sw.error or "no answer",
-                    None: "via master Arduino (not connected)"}[sw.slave_ok]
-            outs = [p for p, on in zip(slave_switch_pins(sw), sw.state or []) if on]
-            self._set_status("Slave", st, info, (" ".join(outs) + " ON") if outs else "")
-        tt = getattr(h, "temps", None)
-        if tt:
-            self._refresh_temps(tt)
         smw = getattr(h, "smw", None)
         if smw:
             rf = smw.is_connected and smw.rf_btn.isChecked()
@@ -953,50 +880,12 @@ class Dashboard(QtWidgets.QWidget):
             on = [f"CH{ch}" for ch, v in tfg.out_on.items() if v] if tfg.is_connected else []
             self._set_status("TFG6806", "ok" if tfg.is_connected else "off", tfg.idn or "not connected",
                              (" ".join(on) + " ON") if on else "")
-        c = getattr(h, "can_win", None)
+        c = getattr(h, "rs485", None)
         if c:
-            up = c.connected_lines() if hasattr(c, "connected_lines") else []
-            ok = bool(up)
-            self._set_status("CAN", "ok" if ok else "off", c.status.text().lstrip("● "),
+            ok = bool(c.connected_ports())
+            self._set_status("RS-485", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
-        self._refresh_volt()
-
-    def _refresh_temps(self, tt):
-        """Name + temperature of every 1-Wire sensor; red = error, grey = not found in the last poll."""
-        if list(self.temp_rows) != sorted(tt.readings):
-            for w in (x for row in self.temp_rows.values() for x in row):
-                w.deleteLater()
-            self.temp_rows = {}
-            mono = QtGui.QFont("Consolas")
-            mono.setStyleHint(QtGui.QFont.Monospace)
-            for k, rom in enumerate(sorted(tt.readings)):
-                r, c0 = k // 2, (k % 2) * 4            # two sensors per row
-                led = QtWidgets.QLabel("●")
-                name = QtWidgets.QLabel()
-                val = QtWidgets.QLabel()
-                val.setFont(mono)
-                val.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                self.temp_grid.addWidget(led, r, c0)
-                self.temp_grid.addWidget(name, r, c0 + 1)
-                self.temp_grid.addWidget(val, r, c0 + 2)
-                self.temp_rows[rom] = (led, name, val)
-            self.temp_grid.setColumnStretch(1, 1)
-            self.temp_grid.setColumnStretch(5, 1)
-            self.temp_grid.setColumnMinimumWidth(3, 14)
-            self.temp_box.setVisible(bool(self.temp_rows))
-        for rom, (led, name, val) in self.temp_rows.items():
-            d = tt.readings[rom]
-            name.setText(f"<b>{tt.names.get(rom) or 'sensor ' + rom[-4:]}</b>")
-            name.setToolTip(f"ROM {rom}\n{d['status'] if not d['missing'] else 'not found in last poll'}")
-            if d["missing"]:
-                color, text = C_OFF, "missing"
-            elif not d["valid"]:
-                color, text = C_ERR, "error"
-            else:
-                color, text = C_OK, f"{d['temp']:.2f} °C"
-            led.setStyleSheet(f"color:{color};font-size:16px;")
-            val.setText(text)
-            val.setStyleSheet("" if d["valid"] else f"color:{color};")
+        self._refresh_hmp_plot()
 
     def _refresh_hmp(self, b):
         """Per channel: measured V / A / W while the output delivers, else the set values in grey.
@@ -1047,39 +936,22 @@ class Dashboard(QtWidgets.QWidget):
             v = r.get(k)
             self.tiles[k].setText(fmt.format(v) if v is not None and math.isfinite(v) else "—")
 
-    # ------------------------------------------------------------ voltages
-    def _volt_channels_changed(self):
-        try:
-            parse_channels(self.volt_ch.text())
-            self.volt_ch.setStyleSheet("")
-        except ValueError:
-            self.volt_ch.setStyleSheet("border-color:#f85149")
-            return
-        for c in self.volt_curves.values():
-            self.volt.removeItem(c)
-        self.volt_curves = {}
-        self.volt.plotItem.legend.clear()
-        self.save()
-        self._refresh_volt()
-
-    def _refresh_volt(self):
+    # ------------------------------------------------------------ HMP plot
+    def _refresh_hmp_plot(self):
         b = getattr(self.host, "bench", None)
-        if not b:
+        if not b or not hasattr(b, "hist"):
             return
-        try:
-            chans = parse_channels(self.volt_ch.text())
-        except ValueError:
-            return
-        for ch in chans:
-            if ch not in self.volt_curves:
-                color = pg.intColor(ch, hues=22, values=8, minValue=140, maxValue=255)
-                self.volt_curves[ch] = self.volt.plot([], [], pen=pg.mkPen(color, width=1.5),
-                                                      name=f"{ch} {b.names.get(ch, '')}")
-            ts, vs = b.hist[ch]
-            if ts:
-                self.volt_curves[ch].setData(np.fromiter(ts, float, len(ts)), np.fromiter(vs, float, len(vs)))
+        k = self.hmp_what.currentIndex()
+        self.volt.setLabel("left", ("Current", "Voltage", "Power")[k], units=("A", "V", "W")[k])
         now = time.time()
-        self.volt.setXRange(now - self.volt_win.value(), now, padding=0)
+        t0 = now - self.volt_win.value()
+        for ch, (ts, vs, is_) in b.hist.items():
+            n = min(len(ts), len(vs), len(is_))
+            a = bisect.bisect_left(ts, t0, 0, n)            # visible part only
+            v, i = np.asarray(vs[a:n], float), np.asarray(is_[a:n], float)
+            y = i if k == 0 else v if k == 1 else v * i
+            self.hmp_curves[ch].setData(np.asarray(ts[a:n], float), y)
+        self.volt.setXRange(t0, now, padding=0)
 
     # ----------------------------------------------------------- telemetry
     def _layouts(self):
@@ -1185,8 +1057,8 @@ class Dashboard(QtWidgets.QWidget):
     def steps(self) -> list:
         return self.data["scripts"].setdefault(self.seq_cb.currentText(), [])
 
-    def _can_cmds(self):
-        c = getattr(self.host, "can_win", None)
+    def _cmds(self):
+        c = getattr(self.host, "rs485", None)
         return list(c.store.commands) if c else []
 
     def step_text(self, s) -> str:
@@ -1214,9 +1086,9 @@ class Dashboard(QtWidgets.QWidget):
                 else:
                     parts.append(str(v))
             return "📡 SMW   " + ", ".join(parts)
-        if op == "can":
-            c = next((c for c in self._can_cmds() if c.uid == s.get("cmd")), None)
-            return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
+        if op == "rs485":
+            c = next((c for c in self._cmds() if c.uid == s.get("cmd")), None)
+            return ("✉ RS-485   " + (f"{c.label()}: {c.data_str()}" if c else "<missing command>"))
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
         if op == "mxg":
@@ -1238,14 +1110,6 @@ class Dashboard(QtWidgets.QWidget):
             if act:
                 parts.append(act)
             return f"∿ TFG {chs}   " + ", ".join(parts)
-        if op == "sw":
-            sw = getattr(self.host, "switch", None)
-            pins = sw_pins(sw)
-            i = s.get("out", 0)
-            pin = pins[i] if i < len(pins) else f"#{i}"
-            name = f" '{sw.cfg['names'][i]}'" if sw and i < len(sw.cfg["names"]) else ""
-            act = {"on": "ON", "off": "OFF"}.get(s["action"], f"pulse {s.get('ms', 0)} ms")
-            return f"⏻ Switch {pin}{name}   {act}"
         if op == "fsw":
             return "〰 FSW   " + {"single": "single measurement (wait for result)",
                                   "autolevel": "auto level"}.get(s["action"], s["action"])
@@ -1266,8 +1130,6 @@ class Dashboard(QtWidgets.QWidget):
                 else:
                     parts.append(f"{name} {v:g}" if isinstance(v, float) else f"{name} {v}")
             return f"〰 FSW {'VSA' if s['app'] == 'vsa' else 'Spectrum'}   " + ", ".join(parts)
-        if op == "scan":
-            return f"⎍ Voltage scan {s['action']}"
         if op == "repeat":
             return f"⟳ Repeat {'forever' if s['count'] == 0 else str(s['count']) + ' ×'}"
         if op == "end":
@@ -1281,7 +1143,7 @@ class Dashboard(QtWidgets.QWidget):
             if s["op"] == "end":
                 depth = max(0, depth - 1)
             it = QtWidgets.QListWidgetItem("    " * depth + self.step_text(s))
-            missing = s["op"] == "can" and "<missing" in it.text()
+            missing = s["op"] == "rs485" and "<missing" in it.text()
             it.setForeground(QtGui.QColor(C_ERR if missing else STEP_COLORS.get(s["op"], "#c9d1d9")))
             self.list.addItem(it)
             if i in select:
@@ -1312,12 +1174,12 @@ class Dashboard(QtWidgets.QWidget):
                 return
         defaults = {"hmp": {"ch": {"1": {"v": 16.0, "i": 1.0, "on": True}}, "master": True},
                     "smw": {"freq": 2.4e9, "level": -30.0, "rf": True}, "wait": {"ms": 1000},
-                    "fsw": {"action": "run"}, "scan": {"action": "start"},
+                    "fsw": {"action": "run"},
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
-                    "log": {"text": ""}, "can": {}, "sw": {"out": 0, "action": "pulse", "ms": 1000},
+                    "log": {"text": ""}, "rs485": {},
                     "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}},
                     "mxg": {"p": {"freq": 1e9, "power": -20.0, "rf": True}}}
-        dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
+        dlg = StepDialog(self, {"op": op, **defaults[op]}, self._cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         rows = self._sel()
@@ -1331,7 +1193,7 @@ class Dashboard(QtWidgets.QWidget):
         rows = self._sel()
         if self.running or len(rows) != 1 or self.steps[rows[0]]["op"] == "end":
             return
-        dlg = StepDialog(self, self.steps[rows[0]], self._can_cmds(), self.host)
+        dlg = StepDialog(self, self.steps[rows[0]], self._cmds(), self.host)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.steps[rows[0]] = dlg.step
             self.save()
@@ -1572,33 +1434,14 @@ class Dashboard(QtWidgets.QWidget):
                     for ch in (1, 2):
                         w.read(ch)
             return run_in(w.submit, job, "TFG6806")
-        elif op == "sw":
-            sw = getattr(h, "switch", None)
-            if sw is None:
-                raise RuntimeError("switch control not available")
-            if sw._dev() is None:
-                raise RuntimeError("Arduino not connected (Bench tab)")
-            i = s.get("out", 0)
-            tok = Token(f"Switch {sw_pins(sw)[i]}", timeout=15)
-
-            def done(ok):
-                if not ok:
-                    tok.error = sw.error or "slave did not confirm"
-                tok.done = True
-            reason = f"sequence '{self.seq_cb.currentText()}'"
-            if s["action"] == "pulse":
-                sw.pulse(i, int(s.get("ms", 1000)), reason, done)
-            else:
-                sw.set_output(i, s["action"] == "on", reason, done)
-            return tok
-        elif op == "can":
-            c = getattr(h, "can_win", None)
+        elif op == "rs485":
+            c = getattr(h, "rs485", None)
             cmd = c.store.by_uid(s.get("cmd")) if c else None
             if cmd is None:
-                raise RuntimeError("CAN command not found in the library")
-            if not c.send_frame(cmd.to_frame(c.FRAME)):
-                raise RuntimeError("CAN send failed (adapter not connected?)")
-            self.log(f"[sequence] CAN sent {cmd.label()} {cmd.id_str()}: {cmd.data_str()}")
+                raise RuntimeError("RS-485 command not found in the library")
+            if not c.send_command(cmd):
+                raise RuntimeError("RS-485 send failed (port not connected?)")
+            self.log(f"[sequence] RS-485 sent {cmd.label()}: {cmd.data_str()}")
         elif op == "fsw":
             if not h.connected:
                 raise RuntimeError("FSW not connected")
@@ -1633,11 +1476,6 @@ class Dashboard(QtWidgets.QWidget):
             tok = run_in(lambda j: h.worker.submit("seq", j), job, box.what)
             tok.msg_from = box
             return tok
-        elif op == "scan":
-            b = getattr(h, "bench", None)
-            if not b or not b._scan_ok:
-                raise RuntimeError("Arduino and 34405A must both be connected for the voltage scan")
-            b.run_btn.setChecked(s["action"] == "start")
         return None
 
     def on_measurement(self, r: dict):

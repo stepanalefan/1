@@ -3,9 +3,9 @@
 """
 bench_monitor.py
 ================
-176-channel voltage monitor + R&S HMP4040 power-supply control.
+R&S HMP4040 power-supply control (4 outputs, master output, timed power cycling, daily log).
 
-Used as the "Bench" tab of fsw_vsa_monitor.py (keep both files in the same
+Used as the "HMP4040" tab of fsw_vsa_monitor.py (keep both files in the same
 folder), or standalone:
 
     python bench_monitor.py            # real hardware
@@ -13,24 +13,15 @@ folder), or standalone:
 
 Hardware
 --------
-* Arduino (sketch_sep24a.ino) driving 11 x CD74HC4067 multiplexers.
-  Protocol (115200 Bd): "SET:<n>\\n" -> "READY:<n>"  (n = 0...175)
-      0...143   chips 0-8   0...5 V            V = reading
-      144...159 chip 9      -5...0 V           V = -reading
-      160...175 chip 10     ~16 V via divider  V = reading x 133/33
-* Agilent/Keysight 34405A multimeter over USB (VISA):
-  *RST, CONF:VOLT:DC 10, SENS:VOLT:DC:NPLC 1, then READ? per channel.
 * R&S HMP4040 over USB (virtual COM port, 9600 Bd), USB-TMC (VISA) or LAN
   (raw SCPI socket, port 5025). SCPI as used by pymeasure's HMP4040 driver:
   INST:NSEL n, VOLT, CURR, OUTP:SEL, OUTP:GEN, MEAS:VOLT?, MEAS:CURR?, SYST:REM/LOC.
 
+Also provides visa_manager() (the shared VISA ResourceManager) for the other tabs.
+
 Files
 -----
-* channels.txt (next to this script): optional channel names, lines "17=VCC_CORE".
-  Channels named GND are skipped by the range scan.
-  Names edited in the table are saved back to it.
-* voltage_log_YYYY-MM-DD.csv: one row per reading, columns Time, Channel, Voltage
-  (time, channel, name, voltage), so old logs can still be loaded.
+* hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P of all 4 channels.
 
 Install:  pip install PyQt5 pyqtgraph numpy pyvisa pyvisa-py pyserial
 """
@@ -39,18 +30,15 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
-import math
 import os
 import queue
-import re
 import socket
 import sys
 import threading
 import time
-from collections import deque
 
 import numpy as np
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 try:
@@ -64,39 +52,8 @@ except ImportError:  # pragma: no cover
     pyvisa = None
 
 
-# --------------------------------------------------------------------------- #
-#  Channel map (must match the Arduino sketch)                                 #
-# --------------------------------------------------------------------------- #
-N_CHANNELS = 176
-R_TOP, R_BOTTOM = 100.0, 33.0   # kOhm: 16 V -> R_TOP -> mux input -> R_BOTTOM -> GND
-DIVIDER_RATIO = (R_TOP + R_BOTTOM) / R_BOTTOM   # = 4.03
-GROUPS = [  # first, last, label
-    (0, 143, "0…5 V"),
-    (144, 159, "−5…0 V"),
-    (160, 175, "16 V (÷)"),
-]
-HIST_LEN = 20000          # points kept per channel for the plot
 HMP_CHANNELS = (1, 2, 3, 4)
 HMP_DEFAULT_PORT = 5025   # raw SCPI socket
-
-
-def group_of(ch: int) -> int:
-    for k, (a, b, _) in enumerate(GROUPS):
-        if a <= ch <= b:
-            return k
-    raise ValueError(ch)
-
-
-def convert(ch: int, raw: float) -> float:
-    """Multimeter reading -> real channel voltage.
-    Mux 10 (ch 144-159): inverting op-amp, -3 V in gives +3 V at the mux.
-    Mux 11 (ch 160-175): 100k/33k divider, Vin = Vmux * (100+33)/33."""
-    g = group_of(ch)
-    if g == 1:
-        return -raw
-    if g == 2:
-        return raw * DIVIDER_RATIO
-    return raw
 
 
 def script_dir() -> str:
@@ -105,35 +62,8 @@ def script_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def load_channel_names(path: str) -> dict[int, str]:
-    names = {ch: f"Ch_{ch}" for ch in range(N_CHANNELS)}
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if "=" in line:
-                    k, v = line.strip().split("=", 1)
-                    if k.strip().isdigit() and int(k) < N_CHANNELS:
-                        names[int(k)] = v.strip()
-    except FileNotFoundError:
-        pass
-    return names
-
-
-SKIP_NAMES = {"GND"}      # channels with these names (any case) are left out of range scans
-
-
-def is_skipped(name: str) -> bool:
-    return name.strip().upper() in SKIP_NAMES
-
-
-def save_channel_names(path: str, names: dict[int, str]):
-    with open(path, "w", encoding="utf-8") as f:
-        for ch in range(N_CHANNELS):
-            f.write(f"{ch}={names[ch]}\n")
-
-
 # --------------------------------------------------------------------------- #
-#  Transports for the HMP4040 (COM port / LAN socket / VISA)                   #
+#  Links                                                                       #
 # --------------------------------------------------------------------------- #
 class SerialLink:
     def __init__(self, port: str, baud: int = 9600, timeout: float = 1.0):
@@ -289,183 +219,6 @@ def open_link(addr: str):
 # --------------------------------------------------------------------------- #
 #  Devices                                                                     #
 # --------------------------------------------------------------------------- #
-class ArduinoMux:
-    """Master Arduino: multiplexer channel switching + relay to the slave (1-Wire, switch)."""
-
-    def __init__(self, arduino_port: str):
-        if serial is None:
-            raise RuntimeError("pyserial is not installed:  pip install pyserial")
-        self.ard = serial.Serial(arduino_port, 115200, timeout=1.0, write_timeout=1.0)
-        try:
-            time.sleep(2.0)                    # most Arduinos reboot when the port opens
-            self.ard.reset_input_buffer()
-            for attempt in range(3):           # first command may be eaten by the bootloader
-                try:
-                    self.select(0)
-                    break
-                except IOError:
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.5)
-                    self.ard.reset_input_buffer()
-        except Exception:
-            self.ard.close()
-            raise
-        self.info = f"Arduino {arduino_port}"
-
-    def select(self, ch: int):
-        self.ard.write(f"SET:{ch}\n".encode())
-        resp = self.ard.readline().decode(errors="ignore").strip()
-        if resp != f"READY:{ch}":
-            raise IOError(f"Arduino did not confirm channel {ch} (answer: {resp!r})")
-
-    SLAVE_FINAL = ("OW:END", "OW:CONV", "SW:", "ERR")
-
-    def slave(self, cmd: str, timeout: float = 4.0) -> list[str]:
-        """Command for the slave Arduino (OW:... 1-Wire, SW:... switches), relayed by the master.
-        Returns the reply lines up to the final one (OW:END / OW:CONV / SW:STATE)."""
-        self.ard.reset_input_buffer()
-        self.ard.write(f"{cmd}\n".encode())
-        lines, deadline = [], time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            line = self.ard.readline().decode(errors="ignore").strip()
-            if not line:
-                continue
-            deadline = time.monotonic() + timeout          # every line extends the wait
-            if line == "ERR:SLAVE_TIMEOUT":
-                raise IOError("slave Arduino does not answer - check the link wires "
-                              "(master A5 -> slave D2, slave D3 -> master A4, common GND) and the slave sketch")
-            if line.startswith("ERR"):
-                raise IOError(f"slave Arduino: {line} (command {cmd})")
-            lines.append(line)
-            if line.startswith(self.SLAVE_FINAL):
-                return lines
-        raise IOError(f"master Arduino did not answer {cmd} - upload the new master sketch "
-                      f"(relays OW:/SW: commands to the slave)")
-
-    ow = slave
-
-    def raw(self, cmd: str, wait: float) -> list[str]:
-        """Send one line and return every line received within `wait` s (no interpretation)."""
-        self.ard.reset_input_buffer()
-        self.ard.write(f"{cmd}\n".encode())
-        lines, end = [], time.monotonic() + wait
-        while time.monotonic() < end:
-            line = self.ard.readline().decode(errors="replace").strip()
-            if line:
-                lines.append(line)
-                if line.startswith(self.SLAVE_FINAL):
-                    break
-        return lines
-
-    def close(self):
-        try:
-            self.ard.close()
-        except Exception:
-            pass
-
-
-class Multimeter:
-    """Agilent 34405A over VISA: DC volts, 10 V range."""
-
-    def __init__(self, resource: str):
-        if pyvisa is None:
-            raise RuntimeError("pyvisa is not installed:  pip install pyvisa pyvisa-py")
-        rm = visa_manager()
-        try:
-            self.dmm = rm.open_resource(resource)
-        except Exception as e:
-            if VISA_INFO.startswith("VISA: pyvisa-py"):
-                raise RuntimeError(f"{type(e).__name__}: {e}\n{VISA_INFO}") from e
-            raise
-        try:
-            self.dmm.timeout = 3000
-            idn = self.dmm.query("*IDN?").strip()
-            for cmd in ("*RST", "CONF:VOLT:DC 10", "SENS:VOLT:DC:NPLC 1"):
-                self.dmm.write(cmd)
-        except Exception:
-            self.dmm.close()
-            raise
-        self.info = idn.split(",")[1].strip() if "," in idn else idn
-
-    def read(self, ch=None) -> float:
-        return float(self.dmm.query("READ?"))
-
-    def close(self):
-        try:
-            self.dmm.close()
-        except Exception:
-            pass
-
-
-class DemoMultimeter:
-    info = "simulated 34405A"
-
-    def __init__(self):
-        self.rng = np.random.default_rng()
-        self.base = np.array([(1.8, 2.5, 3.3, 5.0)[ch % 4] for ch in range(N_CHANNELS)])
-
-    def read(self, ch=None) -> float:
-        time.sleep(0.012)
-        if ch is None:
-            return self.rng.normal(0, 0.001)
-        g = group_of(ch)
-        if g == 1:
-            return 5.0 + self.rng.normal(0, 0.01)                   # displayed as -5 V
-        if g == 2:
-            return 16.0 / DIVIDER_RATIO + self.rng.normal(0, 0.005)  # displayed as ~16 V
-        return self.base[ch] + self.rng.normal(0, 0.004)
-
-    def close(self):
-        pass
-
-
-class DemoArduino:
-    info = "simulated Arduino"
-
-    def __init__(self):
-        self.rng = np.random.default_rng()
-
-    def select(self, ch: int):
-        time.sleep(0.003)
-
-    # simulated slave Arduino: DS18B20 on the three 1-Wire buses + two switch outputs
-    _OW = ((1, "28FF4A1B9316035E", 23.0, 0), (2, "28AA0C77511901A3", 31.5, 1), (3, "2861640A1C8E4F12", -4.0, 1))
-    _sw = [False, False]
-    _pulse_end = [0.0, 0.0]
-
-    def slave(self, cmd: str) -> list[str]:
-        from onewire_temp import crc8          # lazy: only needed in demo mode
-        time.sleep(0.02)
-        now = time.monotonic()
-        for i, end in enumerate(self._pulse_end):
-            if end and now >= end:
-                self._sw[i], self._pulse_end[i] = False, 0.0
-        if cmd.startswith("SW:"):
-            p = cmd.split(":")
-            if p[1] in ("SET", "PULSE") and len(p) == 4:
-                i, val = int(p[2]), int(p[3])
-                self._sw[i] = bool(val) or p[1] == "PULSE"
-                self._pulse_end[i] = now + val / 1000 if p[1] == "PULSE" else 0.0
-            return ["SW:STATE:" + "".join("1" if x else "0" for x in self._sw)]
-        if cmd == "OW:CONV":
-            return ["OW:CONV:OK:7"]
-        out = []
-        for bus, rom, base, ext in self._OW:
-            rb = bytearray.fromhex(rom)
-            rb[7] = crc8(rb[:7])
-            raw = int(round((base + self.rng.normal(0, 0.15) + 2 * math.sin(time.time() / 60)) * 16))
-            sp = bytearray(raw.to_bytes(2, "little", signed=True) + bytes([0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10]))
-            sp.append(crc8(sp))
-            out.append(f"OW:DEV:{bus}:{rb.hex().upper()}:{sp.hex().upper()}:{ext}")
-        return out + [f"OW:END:{len(out)}"]
-
-    ow = slave
-
-    def close(self):
-        pass
-
-
 class Hmp4040:
     def __init__(self, addr: str):
         self.link = open_link(addr)
@@ -564,31 +317,17 @@ class DemoHmp:
 # --------------------------------------------------------------------------- #
 #  Device discovery                                                            #
 # --------------------------------------------------------------------------- #
-ARDUINO_HINTS = ("ARDUINO", "CH340", "CH341", "FT232", "FTDI", "CP210", "USB-SERIAL", "USB SERIAL")
-
-
-def detect_devices(skip_ports=()) -> dict:
-    """Find the 34405A (VISA, Agilent vendor id 0x0957), the HMP4040 (COM port
-    answering *IDN? with HMP/HAMEG/ROHDE) and the Arduino (remaining COM port,
-    preferring typical USB-serial chips). Ports in `skip_ports` are not touched."""
-    found = {"dmm": None, "hmp": None, "arduino": None, "ports": [], "visa": []}
-    if pyvisa is not None:
-        try:
-            rm = visa_manager()
-            found["visa"] = [r for r in rm.list_resources() if r.upper().startswith("USB")]
-            for r in found["visa"]:
-                if "0X0957" in r.upper() or "::2391::" in r:      # Agilent/Keysight vendor id, hex or decimal
-                    found["dmm"] = r
-                    break
-        except Exception as e:
-            found["visa_error"] = f"{type(e).__name__}: {e}"
+def detect_hmp(skip_ports=()) -> dict:
+    """Find the HMP4040 on a COM port (answers *IDN? with HMP/HAMEG/ROHDE).
+    Ports in `skip_ports` (e.g. the MOXA RS-485 ports) are not touched."""
+    found = {"hmp": None, "ports": []}
     if serial is None:
         return found
     skip = {p.upper() for p in skip_ports if p}
     ports = list(serial.tools.list_ports.comports())
     found["ports"] = [p.device for p in ports]
     for p in ports:
-        if p.device.upper() in skip:
+        if p.device.upper() in skip or "MOXA" in f"{p.description} {p.manufacturer or ''}".upper():
             continue
         try:
             with serial.Serial(p.device, 9600, timeout=0.3, write_timeout=0.3) as s:
@@ -599,13 +338,6 @@ def detect_devices(skip_ports=()) -> dict:
                 break
         except Exception:
             pass
-    rest = [p for p in ports if p.device.upper() not in skip and p.device != found["hmp"]]
-    for p in rest:
-        if any(h in f"{p.description} {p.manufacturer or ''}".upper() for h in ARDUINO_HINTS):
-            found["arduino"] = p.device
-            break
-    if found["arduino"] is None and rest:
-        found["arduino"] = rest[0].device
     return found
 
 
@@ -665,52 +397,6 @@ class _Worker(QtCore.QThread):
             self.dev = None
 
 
-class DailyCsv:
-    """voltage_log_YYYY-MM-DD.csv: Time, Channel, Voltage (channel names are in channels.txt).
-    A same-day file in the old 4-column format is left alone; new rows go to ..._2.csv."""
-    HEADER = ["Time", "Channel", "Voltage"]
-
-    def __init__(self, folder: str):
-        self.folder = folder
-        self.f = None
-        self.day = None
-        self.last_flush = 0.0
-
-    def _path(self, day: str) -> str:
-        want = ",".join(self.HEADER)
-        for k in range(1, 100):
-            path = os.path.join(self.folder, f"voltage_log_{day}{'' if k == 1 else f'_{k}'}.csv")
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    if f.readline().strip() == want:
-                        return path
-            except FileNotFoundError:
-                return path
-        return path
-
-    def write(self, t: float, ch: int, v: float):
-        day = time.strftime("%Y-%m-%d", time.localtime(t))
-        if day != self.day:
-            self.close()
-            path = self._path(day)
-            new = not os.path.isfile(path)
-            self.f = open(path, "a", newline="", encoding="utf-8")
-            self.w = csv.writer(self.f)
-            if new:
-                self.w.writerow(self.HEADER)
-            self.day = day
-        self.w.writerow([time.strftime("%H:%M:%S", time.localtime(t)), ch, f"{v:.6f}"])
-        if t - self.last_flush > 1.0:
-            self.f.flush()
-            self.last_flush = t
-
-    def close(self):
-        if self.f:
-            self.f.close()
-            self.f = None
-            self.day = None
-
-
 class HmpCsv:
     """hmp_log_YYYY-MM-DD.csv: one row per interval with master state and all 4 channels."""
     HEADER = ["Time", "Master"] + [f"CH{c}_{k}" for c in HMP_CHANNELS
@@ -745,222 +431,6 @@ class HmpCsv:
             self.f.close()
             self.f = None
             self.day = None
-
-
-def diagnose_slave(dev) -> list[tuple[str, str]]:
-    """Step-by-step check PC -> master -> slave -> 1-Wire. Returns [(level, text)], level ok/warn/err.
-    Does not switch any output."""
-    out = []
-    raw = getattr(dev, "raw", None)
-    if raw is None:                                          # simulator
-        raw = lambda cmd, wait: dev.slave(cmd)
-
-    # 1. master alive (multiplexer command)
-    try:
-        dev.select(0)
-        out.append(("ok", "1. Master Arduino answers (multiplexer command SET:0 confirmed)."))
-    except Exception as e:
-        out.append(("err", f"1. Master Arduino does not answer SET:0 ({e}). Check the COM port; "
-                           f"is the master sketch uploaded?"))
-        return out
-
-    # 2. relay to the slave
-    lines = raw("SW:STATE?", 2.5)
-    st = next((x for x in lines if x.startswith("SW:STATE:")), None)
-    if st:
-        bits = st.split(":")[2]
-        out.append(("ok", f"2. Slave Arduino answers through the master (switch outputs: "
-                          f"A0 {'ON' if bits[:1] == '1' else 'off'}, A1 {'ON' if bits[1:2] == '1' else 'off'})."))
-    elif "ERR:SLAVE_TIMEOUT" in lines:
-        out.append(("err", "2. The master has the new sketch, but the SLAVE does not answer. Check:\n"
-                           "   - master A5 -> slave D2 and slave D3 -> master A4 (TX to RX, not TX to TX);\n"
-                           "   - a GND wire between the two boards;\n"
-                           "   - the slave is powered and has slave_onewire_switch.ino uploaded;\n"
-                           "   - SLAVE_BAUD (master) = LINK_BAUD (slave) = 19200.\n"
-                           "   Test the slave alone: Serial Monitor on the slave's USB, 115200, 'Newline', "
-                           "type SW:STATE? - it must answer SW:STATE:00."))
-        return out
-    elif any(x.startswith("ERR:UNKNOWN_CMD") for x in lines):
-        out.append(("err", "2. The slave answers but does not know SW:STATE? - upload the current "
-                           "slave_onewire_switch.ino."))
-        return out
-    elif lines:
-        out.append(("err", f"2. Unexpected reply {lines[:3]} - garbled characters usually mean a baud-rate "
-                           f"mismatch (both must be 19200) or a missing GND between the boards."))
-        return out
-    else:
-        out.append(("err", "2. The master does not relay commands to the slave (no reply to SW:STATE?). "
-                           "Upload the NEW master sketch (sketch_sep24a.ino with the SoftwareSerial relay)."))
-        return out
-
-    # 3. 1-Wire reset on each bus
-    lines = raw("OW:CONV", 2.5)
-    conv = next((x for x in lines if x.startswith("OW:CONV")), "")
-    pins = ("A3", "A4", "A5")
-    if conv.startswith("OW:CONV:OK"):
-        try:
-            mask = int(conv.split(":")[3])
-        except (IndexError, ValueError):
-            mask = 0
-        on = [p for i, p in enumerate(pins) if mask >> i & 1]
-        off = [p for p in pins if p not in on]
-        out.append(("ok" if not off else "warn",
-                    f"3. 1-Wire devices answer on {', '.join(on) or '?'}"
-                    + (f"; nothing answers on {', '.join(off)} (fine if no sensor is wired there)." if off else ".")))
-    elif conv.startswith("OW:CONV:NODEV"):
-        levels = conv.split(":")[3] if conv.count(":") >= 3 else ""
-        text = "3. No 1-Wire device answers on A3, A4 or A5."
-        if len(levels) == 3:
-            for pin, lv in zip(pins, levels):
-                if lv == "0":
-                    text += (f"\n   {pin}: line is held LOW (0 V) - short to GND, pull-up missing, or a sensor "
-                             f"connected the wrong way round (it gets warm). Measure the voltage on {pin}.")
-                else:
-                    text += (f"\n   {pin}: line idles at +5 V (pull-up OK), but no sensor answers - data wire "
-                             f"broken, sensor GND not connected to the slave's GND, legs swapped, or VDD left "
-                             f"floating (with parasitic power VDD must go to GND at the sensor).")
-        else:
-            text += ("\n   Check on each bus: pull-up from data to +5 V of the SLAVE, sensor GND to slave GND, "
-                     "data to A3/A4/A5; with parasitic power sensor VDD to GND. "
-                     "(Upload the current slave sketch to see the line level of each bus here.)")
-        text += ("\n   Quick check: connect one sensor directly at the slave (short wires, VDD to +5 V) and "
-                 "test again - if it is found, the problem is in the 10 m cable / far end.")
-        out.append(("err", text))
-        return out
-    else:
-        out.append(("err", f"3. No answer to OW:CONV ({lines[:3]}) - is the OneWire library compiled in the slave sketch?"))
-        return out
-
-    # 4. read the sensors
-    lines = raw("OW:READ", 4.0)
-    devs = [x for x in lines if x.startswith("OW:DEV:")]
-    try:
-        from onewire_temp import decode, BUS_PINS
-        good, bad = [], []
-        for x in devs:
-            p = x.split(":")
-            if len(p) == 5:
-                p = p[:2] + ["1"] + p[2:]
-            d = decode(p[3], p[4], p[5])
-            where = BUS_PINS.get(int(p[2]), p[2]) if p[2].isdigit() else p[2]
-            (good if d["status"] == "OK" else bad).append(
-                f"{where} {p[3]}: " + (f"{d['temp']:.2f} °C" if d["status"] == "OK" else d["status"]))
-        if good or bad:
-            out.append(("ok" if not bad else "warn", f"4. {len(devs)} sensor(s) read:\n   " +
-                        "\n   ".join(good + bad)))
-        else:
-            out.append(("err", f"4. Bus reset OK but no sensor found by the search ({lines[-1:] or 'no reply'}). "
-                               f"Often a weak pull-up or long cable; try 2.2 kOhm or external power for the sensors."))
-    except Exception as e:
-        out.append(("warn", f"4. Read {len(devs)} line(s) but could not decode them: {e}"))
-    return out
-
-
-class ScanWorker(_Worker):
-    sample = QtCore.pyqtSignal(int, float, float)        # channel, time, voltage
-    scan_done = QtCore.pyqtSignal(float, int)            # seconds, channels
-    timing = QtCore.pyqtSignal(float, float)             # s per channel: Arduino switch, DMM read
-    ard_connected = QtCore.pyqtSignal(bool, str)
-    dmm_connected = QtCore.pyqtSignal(bool, str)
-    diagnosed = QtCore.pyqtSignal(object)                # [(level, text)]
-    stopped = QtCore.pyqtSignal(str)                     # reason ("" = by user)
-
-    def __init__(self):
-        super().__init__()
-        self.running = False
-        self.channels = list(range(N_CHANNELS))
-        self.settle_s = 0.0
-        self.names = {ch: f"Ch_{ch}" for ch in range(N_CHANNELS)}
-        self.csv: DailyCsv | None = None
-        self._idx = 0
-        self._scan_t0 = None
-        self._unflushed = False
-        self.dmm = None
-        self.t_switch = self.t_read = 0.0      # accumulated per scan, for the timing readout
-
-    # self.dev = the Arduino (also used by the 1-Wire tab and the switch), self.dmm = the 34405A.
-    # They connect independently; the voltage scan needs both.
-    def connect_arduino(self, demo: bool, port: str):
-        self.disconnect_arduino()
-        self.dev = DemoArduino() if demo else ArduinoMux(port)
-        self.ard_connected.emit(True, self.dev.info)
-
-    def disconnect_arduino(self):
-        self.running = False
-        if self.dev is not None:
-            self.dev.close()
-            self.dev = None
-            self.ard_connected.emit(False, "")
-
-    def diagnose(self):
-        try:
-            res = diagnose_slave(self.dev) if self.dev is not None else [("err", "Arduino not connected")]
-        except Exception as e:
-            res = [("err", f"test aborted: {type(e).__name__}: {e}")]
-        self.diagnosed.emit(res)
-
-    def connect_dmm(self, demo: bool, resource: str):
-        self.disconnect_dmm()
-        self.dmm = DemoMultimeter() if demo else Multimeter(resource)
-        self.dmm_connected.emit(True, self.dmm.info)
-
-    def disconnect_dmm(self):
-        self.running = False
-        if self.dmm is not None:
-            self.dmm.close()
-            self.dmm = None
-            self.dmm_connected.emit(False, "")
-
-    def set_channels(self, chans: list[int]):
-        self.channels = chans
-        self._idx = 0
-        self._scan_t0 = None
-
-    def step(self) -> bool:
-        if self.dev is None or self.dmm is None or not self.running or not self.channels:
-            if self.csv and self.csv.f and not self.csv.f.closed and self._unflushed:
-                self.csv.f.flush()
-                self._unflushed = False
-            return False
-        if self._idx >= len(self.channels):
-            self._idx = 0
-        if self._idx == 0:
-            if self._scan_t0 is not None and len(self.channels) > 1:
-                self.scan_done.emit(time.perf_counter() - self._scan_t0, len(self.channels))
-                n = len(self.channels)
-                self.timing.emit(self.t_switch / n, self.t_read / n)
-            self.t_switch = self.t_read = 0.0
-            self._scan_t0 = time.perf_counter()
-        ch = self.channels[self._idx]
-        self._idx += 1
-        t0 = time.perf_counter()
-        self.dev.select(ch)
-        if self.settle_s > 0:
-            time.sleep(self.settle_s)
-        t1 = time.perf_counter()
-        raw = self.dmm.read(ch)
-        self.t_switch += t1 - t0
-        self.t_read += time.perf_counter() - t1
-        v = convert(ch, raw)
-        t = time.time()
-        if self.csv:
-            self.csv.write(t, ch, v)
-            self._unflushed = True
-        self.sample.emit(ch, t, v)
-        return True
-
-    def on_error(self, e):
-        # Never fall back to fake data: stop and say why.
-        self.running = False
-        self.stopped.emit(f"{type(e).__name__}: {e}")
-
-    def on_quit(self):
-        if self.csv:
-            self.csv.close()
-        if self.dmm is not None:
-            self.dmm.close()
-            self.dmm = None
-        super().on_quit()
 
 
 class HmpWorker(_Worker):
@@ -1113,9 +583,6 @@ def _spin(lo, hi, dec, suffix, val, step=None):
     return w
 
 
-def _ch_color(ch: int) -> QtGui.QColor:
-    return pg.intColor(ch, hues=22, values=8, minValue=140, maxValue=255)
-
 
 class HmpChannelBox(QtWidgets.QGroupBox):
     changed = QtCore.pyqtSignal(int, float, float, bool)
@@ -1166,40 +633,22 @@ class HmpChannelBox(QtWidgets.QGroupBox):
         self.meas.setText(f"{v:.3f} V   {i:.3f} A\n{v * i:.2f} W")
 
 
+
 class BenchTab(QtCore.QObject):
-    """Provides `settings_panel` (left column) and `page` (tab content)."""
+    """HMP4040 tab. Provides `settings_panel` (left column) and `page` (tab content)."""
     log = QtCore.pyqtSignal(str, str)
     _detected = QtCore.pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, skip_ports=None):
         super().__init__(parent)
-        self.names_file = os.path.join(script_dir(), "channels.txt")
-        self.names = load_channel_names(self.names_file)
-        self.hist = {ch: (deque(maxlen=HIST_LEN), deque(maxlen=HIST_LEN)) for ch in range(N_CHANNELS)}
-        self.last = np.full(N_CHANNELS, np.nan)
-        self.vmin = np.full(N_CHANNELS, np.inf)
-        self.vmax = np.full(N_CHANNELS, -np.inf)
-        self._dirty_rows: set[int] = set()
-        self._dirty_curves: set[int] = set()
-        self._current = None
-        self._ard_ok = False
-        self._dmm_ok = False
+        self.skip_ports = skip_ports or (lambda: [])   # COM ports auto-detect must not touch (RS-485)
         self._hmp_ok = False
         self._hmp_master = False
         self.log_folder = script_dir()
-        self.folder_listeners = []   # called after the log folder changes (1-Wire log)
+        self.folder_listeners = []   # called after the log folder changes
 
-        self.scan = ScanWorker()
         self.hmp = HmpWorker()
-        for w in (self.scan, self.hmp):
-            w.log.connect(self.log)
-        self.scan.sample.connect(self._on_sample)
-        self.scan.scan_done.connect(self._on_scan_done)
-        self.scan.timing.connect(self._on_scan_timing)
-        self.scan.ard_connected.connect(self._on_ard_connected)
-        self.scan.diagnosed.connect(self._on_diagnosed)
-        self.scan.dmm_connected.connect(self._on_dmm_connected)
-        self.scan.stopped.connect(self._on_scan_stopped)
+        self.hmp.log.connect(self.log)
         self.hmp_last_state = {}   # ch -> (Vset, Iset, on), read by the Main tab
         self.hmp_last_meas = {}    # ch -> (V, I)
         self.hmp_csv: HmpCsv | None = None
@@ -1209,19 +658,11 @@ class BenchTab(QtCore.QObject):
         self.hmp.connected.connect(self._on_hmp_connected)
         self.hmp.cycle.connect(self._on_cycle)
         self._detected.connect(self._on_detected)
-        self.scan.names = dict(self.names)
 
         self.settings_panel = self._build_settings()
         self.page = self._build_page()
-        self._set_scan_connected(False)
         self._set_hmp_connected(False)
-        self._on_log_toggled(self.log_chk.isChecked())
         self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
-
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._refresh)
-        self.timer.start(250)
-        self.scan.start()
         self.hmp.start()
 
     # ------------------------------------------------------------------ build
@@ -1231,123 +672,7 @@ class BenchTab(QtCore.QObject):
         lv.setContentsMargins(4, 4, 4, 4)
 
         self.demo_chk = QtWidgets.QCheckBox("Simulated hardware (demo)")
-        self.detect_btn = QtWidgets.QPushButton("Auto-detect devices")
-        self.detect_btn.clicked.connect(self.on_detect)
         lv.addWidget(self.demo_chk)
-        lv.addWidget(self.detect_btn)
-
-        g = QtWidgets.QGroupBox("Multiplexer && multimeter")
-        f = QtWidgets.QFormLayout(g)
-        self.ard_port = QtWidgets.QComboBox()
-        self.ard_port.setEditable(True)
-        self.ard_port.setToolTip("COM port of the Arduino (115200 Bd)")
-        self.dmm_res = QtWidgets.QComboBox()
-        self.dmm_res.setEditable(True)
-        self.dmm_res.setToolTip("VISA resource of the 34405A, e.g. USB0::0x0957::0x0618::MY5327xxxx::INSTR")
-        self.ard_conn_btn = QtWidgets.QPushButton("Connect")
-        self.ard_conn_btn.setToolTip("Arduino alone is enough for the 1-Wire sensors and the switch")
-        self.ard_conn_btn.clicked.connect(self.on_ard_connect)
-        self.dmm_conn_btn = QtWidgets.QPushButton("Connect")
-        self.dmm_conn_btn.clicked.connect(self.on_dmm_connect)
-        self.ard_status = QtWidgets.QLabel("not connected")
-        self.dmm_status = QtWidgets.QLabel("not connected")
-        for lb in (self.ard_status, self.dmm_status):
-            lb.setWordWrap(True)
-            lb.setStyleSheet("color:#8a96a3;")
-        for btn in (self.ard_conn_btn, self.dmm_conn_btn):
-            btn.setMinimumWidth(100)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.ard_port, 1)
-        row.addWidget(self.ard_conn_btn)
-        f.addRow("Arduino", row)
-        f.addRow("", self.ard_status)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.dmm_res, 1)
-        row.addWidget(self.dmm_conn_btn)
-        f.addRow("Multimeter", row)
-        f.addRow("", self.dmm_status)
-        self.diag_btn = QtWidgets.QPushButton("Test slave link")
-        self.diag_btn.setToolTip("Checks PC -> master -> slave -> 1-Wire step by step and says where it stops.\n"
-                                 "Does not switch any output.")
-        self.diag_btn.clicked.connect(self.on_diagnose)
-        self.diag_btn.setEnabled(False)
-        f.addRow("", self.diag_btn)
-        note = QtWidgets.QLabel("The voltage scan needs both. 1-Wire and the switch need only the Arduino.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#8a96a3;font-size:11px;")
-        f.addRow(note)
-        lv.addWidget(g)
-
-        self.g_scan = g = QtWidgets.QGroupBox("Scan")
-        f = QtWidgets.QFormLayout(g)
-        self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["Auto scan (channel range)", "Manual (one channel)"])
-        self.first_ch = QtWidgets.QSpinBox()
-        self.last_ch = QtWidgets.QSpinBox()
-        self.manual_ch = QtWidgets.QSpinBox()
-        for w in (self.first_ch, self.last_ch, self.manual_ch):
-            w.setRange(0, N_CHANNELS - 1)
-            w.setKeyboardTracking(False)
-        self.last_ch.setValue(N_CHANNELS - 1)
-        rng = QtWidgets.QHBoxLayout()
-        rng.addWidget(self.first_ch, 1)
-        rng.addWidget(QtWidgets.QLabel("…"))
-        rng.addWidget(self.last_ch, 1)
-        self.settle = QtWidgets.QSpinBox()
-        self.settle.setRange(0, 5000)
-        self.settle.setSuffix(" ms")
-        self.settle.setToolTip("Extra wait after switching, on top of the 1 ms in the Arduino sketch")
-        self.run_btn = QtWidgets.QPushButton("▶ Start scan")
-        self.run_btn.setCheckable(True)
-        self.run_btn.toggled.connect(self.on_run)
-        self.scan_info = QtWidgets.QLabel("—")
-        self.scan_info.setStyleSheet("color:#8a96a3;")
-        for w in (self.mode,):
-            w.currentIndexChanged.connect(self._push_channels)
-        for w in (self.first_ch, self.last_ch, self.manual_ch):
-            w.valueChanged.connect(self._push_channels)
-        self.settle.valueChanged.connect(lambda v: setattr(self.scan, "settle_s", v / 1000))
-        f.addRow("Mode", self.mode)
-        f.addRow("Channels", rng)
-        self.skip_lbl = QtWidgets.QLabel("")
-        self.skip_lbl.setStyleSheet("color:#8a96a3;")
-        self.skip_lbl.setToolTip("Channels named GND in channels.txt are not polled in range mode")
-        f.addRow("", self.skip_lbl)
-        f.addRow("Manual ch.", self.manual_ch)
-        f.addRow("Settle delay", self.settle)
-        f.addRow(self.run_btn)
-        f.addRow(self.scan_info)
-        lv.addWidget(g)
-
-        g = QtWidgets.QGroupBox("Logging")
-        f = QtWidgets.QFormLayout(g)
-        self.log_chk = QtWidgets.QCheckBox("Write daily CSV log")
-        self.log_chk.setToolTip("voltage_log_YYYY-MM-DD.csv, one row per reading")
-        self.log_chk.setChecked(True)
-        self.log_chk.toggled.connect(self._on_log_toggled)
-        self.folder_btn = QtWidgets.QPushButton("Folder…")
-        self.folder_btn.clicked.connect(self.on_folder)
-        self.folder_lbl = QtWidgets.QLabel(self.log_folder)
-        self.folder_lbl.setWordWrap(True)
-        self.folder_lbl.setStyleSheet("color:#8a96a3;font-size:11px;")
-        f.addRow(self.log_chk)
-        self.hmp_log_chk = QtWidgets.QCheckBox("Write daily HMP4040 log")
-        self.hmp_log_chk.setToolTip("hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P "
-                                    "of all 4 channels, while the HMP4040 is connected")
-        self.hmp_log_chk.setChecked(True)
-        self.hmp_log_chk.toggled.connect(self._on_hmp_log_toggled)
-        self.hmp_log_int = _spin(0.5, 3600, 1, " s", 1.0)
-        self.hmp_log_int.setToolTip("Time between HMP log rows (the supply is read every 0.5 s)")
-        f.addRow(self.hmp_log_chk)
-        f.addRow("HMP log every", self.hmp_log_int)
-        f.addRow(self.folder_btn, self.folder_lbl)
-        load_btn = QtWidgets.QPushButton("Load CSV…")
-        load_btn.setToolTip("Show an old voltage_log_*.csv in the plot")
-        load_btn.clicked.connect(self.on_load_csv)
-        clear_btn = QtWidgets.QPushButton("Clear plot")
-        clear_btn.clicked.connect(self.on_clear)
-        f.addRow(load_btn, clear_btn)
-        lv.addWidget(g)
 
         g = QtWidgets.QGroupBox("HMP4040 (USB or LAN)")
         f = QtWidgets.QFormLayout(g)
@@ -1359,11 +684,36 @@ class BenchTab(QtCore.QObject):
         self.hmp_addr.lineEdit().setPlaceholderText("COM7 / IP / VISA")
         self.hmp_conn_btn = QtWidgets.QPushButton("Connect")
         self.hmp_conn_btn.clicked.connect(self.on_hmp_connect)
+        self.detect_btn = QtWidgets.QPushButton("Auto-detect (USB)")
+        self.detect_btn.setToolTip("Looks for the HMP4040 on the COM ports (MOXA RS-485 ports are skipped)")
+        self.detect_btn.clicked.connect(self.on_detect)
         self.hmp_status = QtWidgets.QLabel("not connected")
         self.hmp_status.setWordWrap(True)
         f.addRow("Address", self.hmp_addr)
-        f.addRow(self.hmp_conn_btn)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.hmp_conn_btn)
+        row.addWidget(self.detect_btn)
+        f.addRow(row)
         f.addRow(self.hmp_status)
+        lv.addWidget(g)
+
+        g = QtWidgets.QGroupBox("Logging")
+        f = QtWidgets.QFormLayout(g)
+        self.hmp_log_chk = QtWidgets.QCheckBox("Write daily HMP4040 log")
+        self.hmp_log_chk.setToolTip("hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P "
+                                    "of all 4 channels, while the HMP4040 is connected")
+        self.hmp_log_chk.setChecked(True)
+        self.hmp_log_chk.toggled.connect(self._on_hmp_log_toggled)
+        self.hmp_log_int = _spin(0.5, 3600, 1, " s", 1.0)
+        self.hmp_log_int.setToolTip("Time between HMP log rows (the supply is read every 0.5 s)")
+        self.folder_btn = QtWidgets.QPushButton("Folder…")
+        self.folder_btn.clicked.connect(self.on_folder)
+        self.folder_lbl = QtWidgets.QLabel(self.log_folder)
+        self.folder_lbl.setWordWrap(True)
+        self.folder_lbl.setStyleSheet("color:#8a96a3;font-size:11px;")
+        f.addRow(self.hmp_log_chk)
+        f.addRow("Log every", self.hmp_log_int)
+        f.addRow(self.folder_btn, self.folder_lbl)
         lv.addWidget(g)
         lv.addStretch(1)
         self._fill_ports()
@@ -1373,8 +723,6 @@ class BenchTab(QtCore.QObject):
         page = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(page)
         root.setContentsMargins(4, 4, 4, 4)
-
-        # --- HMP4040 row
         self.g_hmp = QtWidgets.QWidget()
         hrow = QtWidgets.QHBoxLayout(self.g_hmp)
         hrow.setContentsMargins(0, 0, 0, 0)
@@ -1410,83 +758,36 @@ class BenchTab(QtCore.QObject):
         hrow.addLayout(side)
         root.addWidget(self.g_hmp)
 
-        # --- current reading
-        self.cur_lbl = QtWidgets.QLabel("Channel —")
-        self.cur_lbl.setStyleSheet("font-size:20px;font-weight:700;color:#ffc400;")
-        root.addWidget(self.cur_lbl)
-
-        # --- plot + table
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        left = QtWidgets.QWidget()
-        lv = QtWidgets.QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
+        # --- measured power of the 4 outputs
         bar = QtWidgets.QHBoxLayout()
-        self.show_mode = QtWidgets.QComboBox()
-        self.show_mode.addItems(["All channels", "Selected rows"])
-        self.show_mode.setToolTip("Which channels are drawn in the plot")
-        self.show_mode.currentIndexChanged.connect(self._update_visibility)
         self.follow = QtWidgets.QCheckBox("Follow")
         self.follow.setChecked(True)
         self.window_s = QtWidgets.QSpinBox()
         self.window_s.setRange(10, 86400)
-        self.window_s.setValue(60)
+        self.window_s.setValue(300)
         self.window_s.setPrefix("Window ")
         self.window_s.setSuffix(" s")
-        for w in (self.show_mode, self.follow, self.window_s):
+        self.plot_what = QtWidgets.QComboBox()
+        self.plot_what.addItems(["Current, A", "Voltage, V", "Power, W"])
+        self.plot_what.currentIndexChanged.connect(self._redraw)
+        clear = QtWidgets.QPushButton("Clear plot")
+        clear.clicked.connect(self.on_clear)
+        for w in (QtWidgets.QLabel("Plot"), self.plot_what, self.follow, self.window_s, clear):
             bar.addWidget(w)
         bar.addStretch(1)
-        lv.addLayout(bar)
+        root.addLayout(bar)
         self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("left", "Voltage", units="V")
         self.plot.getPlotItem().setMenuEnabled(False)
-        self.plot.getPlotItem().setAutoVisible(y=True)
+        self.plot.addLegend(offset=(5, 5))
         self.plot.getViewBox().sigRangeChangedManually.connect(lambda *_: self.follow.setChecked(False))
-        self.curves = {}
-        for ch in range(N_CHANNELS):
-            c = self.plot.plot([], [], pen=pg.mkPen(_ch_color(ch), width=1))
-            c.setClipToView(True)
-            c.setDownsampling(auto=True, method="peak")
-            self.curves[ch] = c
-        lv.addWidget(self.plot, 1)
-        split.addWidget(left)
-
-        self.table = QtWidgets.QTableWidget(N_CHANNELS, 6)
-        self.table.setHorizontalHeaderLabels(["Ch", "Name", "Range", "Voltage", "Min", "Max"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked |
-                                   QtWidgets.QAbstractItemView.EditKeyPressed)
-        self.table.setToolTip("Select rows to plot them ('Plot: selected').\n"
-                              "Double-click a name to rename (saved to channels.txt).\n"
-                              "Double-click any other cell to measure that channel manually.")
-        mono = QtGui.QFont("Consolas")
-        mono.setStyleHint(QtGui.QFont.Monospace)
-        ro = QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled
-        for ch in range(N_CHANNELS):
-            cells = [str(ch), self.names[ch], GROUPS[group_of(ch)][2], "—", "—", "—"]
-            for col, text in enumerate(cells):
-                it = QtWidgets.QTableWidgetItem(text)
-                if col != 1:
-                    it.setFlags(ro)
-                if col >= 3:
-                    it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                    it.setFont(mono)
-                self.table.setItem(ch, col, it)
-            self.table.item(ch, 0).setForeground(QtGui.QBrush(_ch_color(ch)))
-            self._style_row(ch)
-        hdr = self.table.horizontalHeader()
-        for col, width in ((0, 40), (2, 72), (3, 74), (4, 74), (5, 74)):
-            self.table.setColumnWidth(col, width)
-        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        self.table.setMinimumWidth(320)
-        self.table.itemChanged.connect(self._on_name_edited)
-        self.table.itemSelectionChanged.connect(self._update_visibility)
-        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        split.addWidget(self.table)
-        split.setSizes([760, 520])
-        root.addWidget(split, 1)
+        colors = ["#f0b03e", "#79c0ff", "#4fd18b", "#d2a8ff"]
+        self.curves = {ch: self.plot.plot([], [], pen=pg.mkPen(colors[k], width=1.5), name=f"OUT {ch}")
+                       for k, ch in enumerate(HMP_CHANNELS)}
+        self.hist = {ch: ([], [], []) for ch in HMP_CHANNELS}     # t, V, I
+        root.addWidget(self.plot, 1)
+        self.timer = QtCore.QTimer(self, interval=500, timeout=self._redraw)
+        self.timer.start()
         return page
 
     # ---------------------------------------------------------------- helpers
@@ -1497,35 +798,18 @@ class BenchTab(QtCore.QObject):
                 ports = [p.device for p in serial.tools.list_ports.comports()]
             except Exception:
                 pass
-        for combo in (self.ard_port, self.hmp_addr):
-            cur = combo.currentText()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(ports)
-            combo.setEditText(cur)
-            combo.blockSignals(False)
-
-    @property
-    def _scan_ok(self) -> bool:
-        """Voltage scan possible: Arduino and multimeter both connected."""
-        return self._ard_ok and self._dmm_ok
-
-    def _set_scan_connected(self, *_):
-        ok = self._scan_ok
-        self.ard_conn_btn.setText("Disconnect" if self._ard_ok else "Connect")
-        self.dmm_conn_btn.setText("Disconnect" if self._dmm_ok else "Connect")
-        self.ard_port.setEnabled(not self._ard_ok)
-        self.dmm_res.setEnabled(not self._dmm_ok)
-        self.g_scan.setEnabled(ok)
-        if hasattr(self, "diag_btn"):
-            self.diag_btn.setEnabled(self._ard_ok)
-        if not ok and self.run_btn.isChecked():
-            self.run_btn.setChecked(False)
+        cur = self.hmp_addr.currentText()
+        self.hmp_addr.blockSignals(True)
+        self.hmp_addr.clear()
+        self.hmp_addr.addItems(ports)
+        self.hmp_addr.setEditText(cur)
+        self.hmp_addr.blockSignals(False)
 
     def _set_hmp_connected(self, on: bool):
         self._hmp_ok = on
         self.hmp_conn_btn.setText("Disconnect" if on else "Connect")
         self.hmp_addr.setEnabled(not on)
+        self.detect_btn.setEnabled(not on)
         self.g_hmp.setEnabled(on)
         if not on:
             self._show_master(False)
@@ -1543,116 +827,27 @@ class BenchTab(QtCore.QObject):
         self.master_btn.setStyleSheet("background:#1f6f43;border-color:#2ea043;font-weight:700;"
                                       if on else "font-weight:700;")
 
-    def _push_channels(self, *_):
-        if self.mode.currentIndex() == 1:
-            chans = [self.manual_ch.value()]
-        else:
-            a, b = sorted((self.first_ch.value(), self.last_ch.value()))
-            chans = [ch for ch in range(a, b + 1) if not is_skipped(self.names[ch])]
-            skipped = (b - a + 1) - len(chans)
-            self.skip_lbl.setText(f"{skipped} channel(s) named GND skipped" if skipped else "")
-        self.scan.submit(lambda: self.scan.set_channels(chans))
-
     def _on_hmp_log_toggled(self, on):
         if self.hmp_csv:
             self.hmp_csv.close()
         self.hmp_csv = HmpCsv(self.log_folder) if on else None
         self._hmp_next_log = 0.0
 
-    def _on_log_toggled(self, on):
-        folder = self.log_folder
-        self.scan.submit(lambda: setattr(self.scan, "csv", DailyCsv(folder) if on else None))
-
     # ---------------------------------------------------------------- actions
     def on_detect(self):
         self.detect_btn.setEnabled(False)
         self.detect_btn.setText("Detecting…")
-        skip = []
-        if self._ard_ok:
-            skip.append(self.ard_port.currentText())
-        if self._hmp_ok:
-            skip.append(self.hmp_addr.currentText())
-        threading.Thread(target=lambda: self._detected.emit(detect_devices(skip)), daemon=True).start()
+        skip = list(self.skip_ports())
+        threading.Thread(target=lambda: self._detected.emit(detect_hmp(skip)), daemon=True).start()
 
     def _on_detected(self, found: dict):
-        self.detect_btn.setEnabled(True)
-        self.detect_btn.setText("Auto-detect devices")
+        self.detect_btn.setText("Auto-detect (USB)")
+        self.detect_btn.setEnabled(not self._hmp_ok)
         self._fill_ports()
-        cur = self.dmm_res.currentText()
-        self.dmm_res.clear()
-        self.dmm_res.addItems(found["visa"])
-        self.dmm_res.setEditText(cur)
-        for key, combo in (("arduino", self.ard_port), ("dmm", self.dmm_res), ("hmp", self.hmp_addr)):
-            if found[key] and combo.isEnabled():
-                combo.setEditText(found[key])
-        self.log.emit(f"Detected: Arduino {found['arduino'] or '—'}, 34405A {found['dmm'] or '—'}, "
-                      f"HMP4040 {found['hmp'] or '— (enter IP for LAN)'}", "ok")
-        if VISA_INFO:
-            self.log.emit(VISA_INFO, "warn" if "pyvisa-py" in VISA_INFO else "info")
-        if found.get("visa_error"):
-            self.log.emit(f"VISA search failed: {found['visa_error']}", "err")
-
-    def on_scan_connect(self):
-        """Connect whatever of Arduino / multimeter is not connected yet."""
-        if not self._ard_ok:
-            self.on_ard_connect()
-        if not self._dmm_ok:
-            self.on_dmm_connect()
-
-    def on_diagnose(self):
-        self.diag_btn.setEnabled(False)
-        self.diag_btn.setText("Testing…")
-        self.scan.submit(self.scan.diagnose)
-
-    def _on_diagnosed(self, res):
-        self.diag_btn.setText("Test slave link")
-        self.diag_btn.setEnabled(self._ard_ok)
-        for level, text in res:
-            self.log.emit("Slave test: " + text.replace("\n", "  "), level)
-        icon = {"ok": "✓", "warn": "⚠", "err": "✗"}
-        box = QtWidgets.QMessageBox(self.page)
-        box.setWindowTitle("Slave link test")
-        worst = "err" if any(l == "err" for l, _ in res) else ("warn" if any(l == "warn" for l, _ in res) else "ok")
-        box.setIcon({"ok": QtWidgets.QMessageBox.Information, "warn": QtWidgets.QMessageBox.Warning,
-                     "err": QtWidgets.QMessageBox.Critical}[worst])
-        box.setText("\n\n".join(f"{icon[l]} {t}" for l, t in res))
-        box.exec_()
-
-    def on_ard_connect(self):
-        if self._ard_ok:
-            self.scan.submit(self.scan.disconnect_arduino)
-            return
-        demo, port = self.demo_chk.isChecked(), self.ard_port.currentText().strip()
-        if not demo and not port:
-            self.log.emit("Enter the Arduino COM port (or use Auto-detect / demo)", "warn")
-            return
-        self.ard_status.setText("connecting… (Arduino reset takes ~2 s)")
-        self.ard_conn_btn.setEnabled(False)
-
-        def job():
-            try:
-                self.scan.connect_arduino(demo, port)
-            except Exception as e:
-                self.scan.ard_connected.emit(False, f"{type(e).__name__}: {e}")
-        self.scan.submit(job)
-
-    def on_dmm_connect(self):
-        if self._dmm_ok:
-            self.scan.submit(self.scan.disconnect_dmm)
-            return
-        demo, res = self.demo_chk.isChecked(), self.dmm_res.currentText().strip()
-        if not demo and not res:
-            self.log.emit("Enter the multimeter VISA resource (or use Auto-detect / demo)", "warn")
-            return
-        self.dmm_status.setText("connecting…")
-        self.dmm_conn_btn.setEnabled(False)
-
-        def job():
-            try:
-                self.scan.connect_dmm(demo, res)
-            except Exception as e:
-                self.scan.dmm_connected.emit(False, f"{type(e).__name__}: {e}")
-        self.scan.submit(job)
+        if found["hmp"] and self.hmp_addr.isEnabled():
+            self.hmp_addr.setEditText(found["hmp"])
+        self.log.emit(f"Detected: HMP4040 {found['hmp'] or '— (enter IP for LAN)'}",
+                      "ok" if found["hmp"] else "warn")
 
     def on_hmp_connect(self):
         if self._hmp_ok:
@@ -1673,20 +868,11 @@ class BenchTab(QtCore.QObject):
                 self.hmp.connected.emit(False, f"{type(e).__name__}: {e}")
         self.hmp.submit(job)
 
-    def on_run(self, on):
-        self.run_btn.setText("■ Stop scan" if on else "▶ Start scan")
-        if on:
-            self._push_channels()
-        self.scan.running = on
-        if on:
-            self.log.emit("Voltage scan started", "ok")
-
     def on_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self.page, "CSV log folder", self.log_folder)
         if d:
             self.log_folder = d
             self.folder_lbl.setText(d)
-            self._on_log_toggled(self.log_chk.isChecked())
             self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
             for fn in self.folder_listeners:
                 fn()
@@ -1707,98 +893,13 @@ class BenchTab(QtCore.QObject):
             self.hmp.submit(self.hmp.stop_cycle)
 
     def on_clear(self):
-        for t, v in self.hist.values():
-            t.clear()
-            v.clear()
-        self.last[:] = np.nan
-        self.vmin[:] = np.inf
-        self.vmax[:] = -np.inf
-        self._dirty_rows = set(range(N_CHANNELS))
-        self._dirty_curves = set(range(N_CHANNELS))
+        for lists in self.hist.values():
+            for x in lists:
+                x.clear()
         self.follow.setChecked(True)
-
-    def on_load_csv(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self.page, "Load voltage log", self.log_folder,
-                                                        "CSV (*.csv)")
-        if not path:
-            return
-        m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(path))
-        day = _dt.date.fromisoformat(m.group(1)) if m else _dt.date.today()
-        n = 0
-        try:
-            with open(path, encoding="utf-8") as f:
-                rows = csv.reader(f)
-                next(rows, None)
-                for row in rows:
-                    if len(row) < 3 or not row[1].strip().isdigit():
-                        continue
-                    ch = int(row[1])
-                    if not 0 <= ch < N_CHANNELS:
-                        continue
-                    hh, mm, ss = (int(x) for x in row[0].split(":"))
-                    t = _dt.datetime.combine(day, _dt.time(hh, mm, ss)).timestamp()
-                    self._add(ch, t, float(row[-1]))   # old files: 4 columns, new: 3
-                    n += 1
-        except Exception as e:
-            self.log.emit(f"Could not load {path}: {type(e).__name__}: {e}", "err")
-            return
-        self.follow.setChecked(False)
-        self.plot.enableAutoRange()
-        self.log.emit(f"Loaded {n} readings from {os.path.basename(path)}", "ok")
+        self._redraw()
 
     # --------------------------------------------------------------- callbacks
-    def _add(self, ch, t, v):
-        ts, vs = self.hist[ch]
-        ts.append(t)
-        vs.append(v)
-        self.last[ch] = v
-        self.vmin[ch] = min(self.vmin[ch], v)
-        self.vmax[ch] = max(self.vmax[ch], v)
-        self._dirty_rows.add(ch)
-        self._dirty_curves.add(ch)
-
-    def _on_sample(self, ch, t, v):
-        self._add(ch, t, v)
-        self._current = ch
-        self.cur_lbl.setText(f"Channel {ch}  ·  {self.names[ch]}  ·  {v:.4f} V")
-
-    def _on_scan_done(self, secs, n):
-        self._scan_text = f"Last scan: {n} ch in {secs:.1f} s  ({n / secs:.1f} ch/s)"
-        self.scan_info.setText(self._scan_text)
-
-    def _on_scan_timing(self, sw, rd):
-        self.scan_info.setText(f"{getattr(self, '_scan_text', '')}\n"
-                               f"per channel: switch {sw * 1000:.1f} ms · DMM {rd * 1000:.1f} ms")
-
-    def _on_ard_connected(self, ok, info):
-        self._on_part_connected("Arduino", ok, info, self.ard_conn_btn, self.ard_status)
-        self._ard_ok = ok
-        self._set_scan_connected()
-
-    def _on_dmm_connected(self, ok, info):
-        self._on_part_connected("34405A", ok, info, self.dmm_conn_btn, self.dmm_status)
-        self._dmm_ok = ok
-        self._set_scan_connected()
-
-    def _on_part_connected(self, what, ok, info, btn, status):
-        btn.setEnabled(True)
-        if ok:
-            status.setText(f"✓ {info}")
-            status.setStyleSheet("color:#4fd18b;")
-            self.log.emit(f"{what} connected: {info}", "ok")
-        else:
-            status.setText(info or "not connected")
-            status.setStyleSheet(f"color:{'#ff6b6b' if info else '#8a96a3'};")
-            if info:
-                self.log.emit(f"{what}: {info}", "err")
-
-    def _on_scan_stopped(self, reason):
-        if self.run_btn.isChecked():
-            self.run_btn.setChecked(False)
-        if reason:
-            self.log.emit(f"Scan stopped: {reason}", "err")
-            self.scan_info.setText(f"⚠ {reason}")
-
     def _on_hmp_connected(self, ok, info):
         self.hmp_conn_btn.setEnabled(True)
         self._set_hmp_connected(ok)
@@ -1827,7 +928,29 @@ class BenchTab(QtCore.QObject):
                 self.hmp_log_chk.setChecked(False)
         for ch, (v, i) in meas.items():
             self.hmp_boxes[ch].set_meas(v, i)
+            ts, vs, is_ = self.hist[ch]
+            ts.append(now)
+            vs.append(v)
+            is_.append(i)
+            if len(ts) > 200_000:
+                for x in (ts, vs, is_):
+                    del x[:50_000]
         self._show_master(master)
+
+    def _redraw(self, *_):
+        k = self.plot_what.currentIndex()
+        self.plot.setLabel("left", ("Current", "Voltage", "Power")[k], units=("A", "V", "W")[k])
+        for ch, (ts, vs, is_) in self.hist.items():
+            if k == 0:
+                y = is_
+            elif k == 1:
+                y = vs
+            else:
+                y = [a * b for a, b in zip(vs, is_)]
+            self.curves[ch].setData(np.asarray(ts, float), np.asarray(y, float))
+        if self.follow.isChecked():
+            now = time.time()
+            self.plot.setXRange(now - self.window_s.value(), now, padding=0)
 
     def _on_cycle(self, active, text, remaining, n):
         self.cyc_status.setText(text)
@@ -1839,67 +962,6 @@ class BenchTab(QtCore.QObject):
             self.cyc_btn.setText("▶ Start cycling")
             self.cyc_btn.blockSignals(False)
 
-    def _on_name_edited(self, item):
-        if item.column() != 1:
-            return
-        ch, name = item.row(), item.text().strip() or f"Ch_{item.row()}"
-        if name == self.names[ch]:
-            return
-        self.names[ch] = name
-        self._style_row(ch)
-        self._push_channels()
-        names = dict(self.names)
-        self.scan.submit(lambda: setattr(self.scan, "names", names))
-        try:
-            save_channel_names(self.names_file, self.names)
-        except OSError as e:
-            self.log.emit(f"Could not save {self.names_file}: {e}", "err")
-
-    def _style_row(self, ch: int):
-        """Grey out channels that the range scan skips."""
-        grey = is_skipped(self.names[ch])
-        for col in range(1, 6):
-            it = self.table.item(ch, col)
-            if it is not None:
-                it.setForeground(QtGui.QBrush(QtGui.QColor("#666")) if grey else QtGui.QBrush())
-        self.table.item(ch, 1).setToolTip("Skipped by the range scan (named GND)" if grey else "")
-
-    def _on_cell_double_clicked(self, row, col):
-        if col != 1:
-            self.manual_ch.setValue(row)
-            self.mode.setCurrentIndex(1)
-
-    def _selected_channels(self) -> set[int]:
-        return {i.row() for i in self.table.selectionModel().selectedRows()}
-
-    def _update_visibility(self, *_):
-        sel = self._selected_channels() if self.show_mode.currentIndex() == 1 else None
-        for ch, c in self.curves.items():
-            c.setVisible(sel is None or ch in sel)
-
-    def _refresh(self):
-        """4 Hz GUI refresh: table rows and curves that got new data."""
-        if self._dirty_rows:
-            tbl = self.table
-            tbl.blockSignals(True)
-            for ch in self._dirty_rows:
-                if np.isfinite(self.last[ch]):
-                    tbl.item(ch, 3).setText(f"{self.last[ch]:.4f}")
-                    tbl.item(ch, 4).setText(f"{self.vmin[ch]:.4f}")
-                    tbl.item(ch, 5).setText(f"{self.vmax[ch]:.4f}")
-                else:
-                    for col in (3, 4, 5):
-                        tbl.item(ch, col).setText("—")
-            tbl.blockSignals(False)
-            self._dirty_rows.clear()
-        for ch in self._dirty_curves:
-            ts, vs = self.hist[ch]
-            self.curves[ch].setData(np.fromiter(ts, float, len(ts)), np.fromiter(vs, float, len(vs)))
-        self._dirty_curves.clear()
-        if self.follow.isChecked():
-            now = time.time()
-            self.plot.setXRange(now - self.window_s.value(), now, padding=0)
-
     # ---------------------------------------------------------------- shutdown
     def confirm_close(self, parent) -> bool:
         if not self.cyc_btn.isChecked():
@@ -1910,17 +972,14 @@ class BenchTab(QtCore.QObject):
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
         if r != QtWidgets.QMessageBox.Yes:
             return False
-
         self.hmp.submit(lambda: self.hmp.stop_cycle("stopped: application closed", power_off=True))
         return True
 
     def shutdown(self):
         self.timer.stop()
-        self.scan.running = False
         deadline = time.monotonic() + 2.0
         while not self.hmp.jobs.empty() and time.monotonic() < deadline:
             time.sleep(0.02)                 # let a pending "power off" job run
-        self.scan.shutdown()
         self.hmp.shutdown()
         if self.hmp_csv:
             self.hmp_csv.close()
@@ -1947,7 +1006,7 @@ STYLE = """
 class BenchWindow(QtWidgets.QMainWindow):
     def __init__(self, demo=False):
         super().__init__()
-        self.setWindowTitle("Bench monitor: 176 channels + HMP4040")
+        self.setWindowTitle("HMP4040 control")
         self.resize(1500, 900)
         pg.setConfigOptions(antialias=False, background="#0f1216", foreground="#c9d1d9")
         self.bench = BenchTab(self)
@@ -1987,7 +1046,7 @@ class BenchWindow(QtWidgets.QMainWindow):
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="176-channel voltage monitor + HMP4040")
+    ap = argparse.ArgumentParser(description="HMP4040 control")
     ap.add_argument("--demo", action="store_true", help="simulated hardware")
     args = ap.parse_args()
     app = QtWidgets.QApplication(sys.argv)

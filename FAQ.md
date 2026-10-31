@@ -2,9 +2,8 @@
 
 Bench program for controlling and monitoring the test setup: R&S FSW spectrum analyzer,
 R&S SMW200A, Keysight N5183B and Suin TFG6806 generators, R&S HMP4040 power supply,
-176-channel voltage scanner (Arduino + multiplexers + Agilent 34405A), 1-Wire temperature
-sensors and a switch on a second ("slave") Arduino, three CAN lines (CANable + IXXAT) with
-telemetry decoding, test sequences and CSV logging.
+RS-485 communication with the FRM through a MOXA UPort 1450I (4 ports) with telemetry
+decoding, test sequences and CSV logging.
 
 ---
 
@@ -12,17 +11,15 @@ telemetry decoding, test sequences and CSV logging.
 
 ### Which Python packages are needed?
 ```
-pip install PyQt5 pyqtgraph numpy pyvisa pyvisa-py pyserial python-can
+pip install PyQt5 pyqtgraph numpy pyvisa pyvisa-py pyserial
 ```
-Optional: `pip install pyinstaller` (to build the EXE), `pip install gs_usb pyusb` (only for a
-CANable with *candleLight* firmware).
+Optional: `pip install pyinstaller` (to build the EXE).
 
 ### What else must be installed on the PC?
 | For | Install |
 |---|---|
-| Instruments over **USB** (34405A, TFG6806 / N5183B via USB) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
-| IXXAT CAN adapter | **IXXAT VCI 4** driver |
-| Uploading the Arduino sketches | Arduino IDE + library **OneWire** (Paul Stoffregen) |
+| Instruments over **USB** (TFG6806 / N5183B / HMP4040 via USB-TMC) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
+| MOXA UPort 1450I (RS-485) | **MOXA UPort 1200/1400/1600 Windows driver** (moxa.com). Then set each port to **RS-485 2W** (see section 5). |
 
 Instruments on **LAN** (FSW, SMW200A, N5183B, TFG6806, HMP4040) need no driver.
 
@@ -39,13 +36,13 @@ python fsw_vsa_monitor.py --ip 192.168.0.10 --protocol socket
 ```
 
 ### Can I try the program without instruments?
-Yes: `--demo`. FSW, generators, scanner, HMP4040, 1-Wire sensors, switch and three CAN lines
-(BOS / AFAR / UPNG) are simulated. Demo mode never overwrites your saved CAN line settings.
+Yes: `--demo`. FSW, generators, HMP4040 and the FRM on RS-485 port 1 are simulated.
+Demo mode never overwrites your saved RS-485 port settings.
 
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -61,22 +58,16 @@ folder instead.
 
 ## 2. Files the program creates
 
-All next to the program / EXE (logs: in the log folder chosen on the Bench tab, default the same).
+All next to the program / EXE (HMP log: in the log folder chosen on the HMP4040 tab, default the same).
 
 | File | Contents |
 |---|---|
-| `channels.txt` | Names of the 176 voltage channels (`17=VCC_CORE`). Name a channel `GND` to skip it in scans. |
-| `onewire_names.txt` | Names of the 1-Wire sensors (`28FF4A1B931603D8=Cold plate`) |
 | `dashboard.json` | Test sequences, telemetry watch list, Main-tab settings |
-| `switch.json` | Switch output names, watchdog settings |
-| `can_commands.json` | CAN command library and CAN scripts |
-| `can_lines.json` | CAN line setup (adapter, channel, bitrate per line) |
-| `voltage_log_YYYY-MM-DD.csv` | Voltage scan: Time, Channel, Voltage |
+| `rs485_ports.json` | RS-485 port setup (name, COM port, baud rate, data bits, parity, stop bits, frame gap) |
+| `rs485_commands.json` | RS-485 command library |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
-| `temperature_log_YYYY-MM-DD.csv` | 1-Wire: ROM, name, temperature, CRC checks, status, bus |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
-| `switch_log_YYYY-MM-DD.csv` | Every switch action and its reason (manual / sequence / watchdog) |
-| `can_log_*.log` | CAN recording (candump format, line name as interface) |
+| `rs485_log_*.log` | RS-485 recording: one line per frame (time, port, RX/TX, hex bytes) |
 
 Every log starts a new file each day. All CSV logs can be plotted together on the **Logs** tab
 ("Today's logs" loads today's files in one click).
@@ -130,20 +121,7 @@ Select *Built-in / arb #* and enter the waveform number (the manual does not lis
 
 ---
 
-## 5. Bench: voltage scanner, multimeter, HMP4040
-
-### Do the Arduino and the multimeter have to be connected together?
-No — each has its own Connect button. 1-Wire and the switch need only the Arduino; the voltage
-scan needs both.
-
-### Auto-detect does not find the 34405A.
-1. Install **Keysight IO Libraries Suite**, restart Windows, re-plug USB.
-2. Device Manager must show the 34405A under **"USB Test and Measurement Devices"**
-   (not "Other devices" — then the driver is missing; an IVI/MATLAB driver package is *not* the
-   USB driver).
-3. Check the log line after Auto-detect:
-   `VISA: Visa Library at C:\WINDOWS\system32\visa32.dll` → correct.
-   `VISA: pyvisa-py …` → the installed VISA could not be loaded; the line says why.
+## 5. HMP4040 and VISA
 
 ### Error "PyUSB does not seem to be properly installed … No backend available".
 The program used pyvisa's pure-Python fallback instead of the installed VISA. Make sure the
@@ -159,124 +137,56 @@ import pyvisa; rm = pyvisa.ResourceManager(); print(rm); print(rm.list_resources
 ```
 
 ### How do I connect the HMP4040?
-USB: the COM port (virtual COM, 9600 Bd), e.g. `COM7`. LAN: the IP (`192.168.1.20` or
-`192.168.1.20:5025`). A VISA string also works.
+USB: the COM port (virtual COM, 9600 Bd), e.g. `COM7` (*Auto-detect* finds it; the MOXA ports
+are skipped). LAN: the IP (`192.168.1.20` or `192.168.1.20:5025`). A VISA string also works.
 
 ### Power cycling
-Bench tab → *Power cycling*: ON time, OFF time, total duration. It switches the master output.
+HMP4040 tab → *Power cycling*: ON time, OFF time, total duration. It switches the master output.
 If the program is closed while cycling runs, it asks first and then switches the master output OFF.
 
 ### "CC" on the Main tab
 The channel is in current limit (current at the set limit and voltage below the set value).
 
-### How are the −5…0 V and 16 V channels converted?
-* Channels **144–159**: an op-amp inverter (−3 V in → +3 V at the multiplexer); the program flips
-  the sign.
-* Channels **160–175**: divider 100 kΩ (to the source) / 33 kΩ (to GND); the program multiplies by
-  (100 + 33) / 33 = 4.03. The values are `R_TOP` / `R_BOTTOM` at the top of `bench_monitor.py`.
+## 6. RS-485 (MOXA UPort 1450I) and telemetry
 
-### How do I skip unused channels?
-Name them `GND` in `channels.txt` (or double-click the name in the table). They are greyed out and
-left out of range scans; manual mode can still read them.
+### How do I set up the MOXA UPort 1450I?
+1. Install the MOXA UPort Windows driver and plug the UPort in: four new COM ports appear
+   (Device Manager → *Ports (COM & LPT)* → *MOXA USB Serial Port*).
+2. For each port used: Device Manager → MOXA UPort 1450I → port → *Properties / Port
+   Settings* (or MOXA's port configuration utility) → **Interface = RS-485 2W** (2-wire, half
+   duplex; RS-485 4W for 4-wire wiring). This is a driver setting — the program only opens the COM port.
+3. RS-485 tab: tick *Use*, give the port a name (port 1 is **FRM**), choose the COM port
+   (⟳ lists MOXA ports first), baud rate, data bits, parity, stop bits → *Connect*.
 
-### The scan is slow.
-The timing line under *Last scan* shows *switch* and *DMM* time per channel.
-* *switch* ≈ 16–20 ms → set the USB-serial adapter's **Latency Timer** to 1 ms
-  (Device Manager → COM port → Port Settings → Advanced).
-* *DMM* is the multimeter's own speed (NPLC 1 + auto-zero); scan fewer channels if needed.
+### Nothing is received / garbage is received.
+* Baud rate, parity, stop bits must match the FRM.
+* A/B (D+/D−) swapped is the most common wiring fault — swap them. Common GND recommended.
+* Termination (120 Ω) at both ends of long lines; see the UPort 1450I manual for its built-in
+  termination / pull-up / pull-down settings.
+* Interface left at RS-232 in the driver → no RS-485 signals at all.
 
-### Voltages drop when many units are connected.
-Usually signals outside the multiplexer's 0…5 V supply range (leaking through the CD74HC4067
-protection diodes even when switched off), high-impedance sources, or ground loops. Every input
-must stay within 0…5 V at the multiplexer pin; all grounds should meet at one point.
+### How are bytes grouped into frames?
+A pause longer than *Frame gap* (default 5 ms) between received bytes ends a frame. Increase it
+if one telegram is split into several rows, decrease it if several telegrams are merged.
 
----
-
-## 6. Arduinos, 1-Wire sensors and switch
-
-### How are the two Arduinos wired?
-| Master | | Slave |
-|---|---|---|
-| A5 (TX) | → | D2 (RX) |
-| A4 (RX) | ← | D3 (TX) |
-| GND | — | GND (required) |
-
-Sketches: `arduino/sketch_sep24a` on the **master**, `arduino/slave_onewire_switch` on the
-**slave** (needs the OneWire library). Link speed 19200 on both sides.
-
-### Switch or 1-Wire does not work — where is the problem?
-Bench tab → Arduino connected → **Test slave link**. It checks PC → master → slave → 1-Wire step
-by step and tells where it stops (wrong COM port, old master sketch, slave not answering =
-wiring/GND/baud, no 1-Wire device, sensors and their readings). It does not switch any output.
-
-You can also test the slave alone: Serial Monitor on its USB, 115200, "Newline":
-`SW:SET:0:1` → `SW:STATE:10`, `OW:CONV` then `OW:READ` → one `OW:DEV:…` line per sensor.
-
-### 1-Wire: "No 1-Wire device answers"
-* Line **LOW (0 V)**: short to GND, missing pull-up, or a sensor connected the wrong way round
-  (it gets warm). **Swapped GND and +5 V** is a common cause.
-* Line **+5 V but no answer**: data wire broken, sensor GND not connected to the slave's GND,
-  legs swapped, or VDD floating (with parasitic power VDD must be tied to **GND** at the sensor).
-* DS18B20 pins (flat side facing you, legs down): **GND – DQ – VDD**.
-* For a standalone check upload `arduino/onewire_check` and read the Serial Monitor (115200).
-
-### Long cables (10 m) with parasitic power
-Use **2.2 kΩ** pull-up (not below ~1.5 kΩ) from each data line to +5 V of the slave, twisted pair
-data + GND, no branches. Most reliable: power the sensors from a third wire (VDD → +5 V).
-"85 °C power-on value" = the conversion did not get enough power.
-
-### How do I rename a sensor?
-1-Wire Temp tab → double-click the name. Names are kept in `onewire_names.txt`.
-
-### Can the Arduino output 3.3 V?
-No — a 5 V Arduino pin is 5 V when high. Use a divider (1 kΩ series + 2 kΩ to GND ≈ 3.33 V) for a
-high-impedance input, a 3.3 V logic buffer / level shifter, or a transistor switching the 3V3 rail.
-
-### The switch is active-low (relay module).
-Set `SW_ACTIVE_LOW = true` in the slave sketch and upload it again.
-
-### What does the BOS watchdog do?
-If no BOS data arrives for the set time (default 60 min) it switches an output (pulse or ON).
-"BOS data" = CAN frames with the BOS ID prefix `0x1A46` and/or FSW VSA results with MER above the
-threshold (default 10 dB). Choose *CAN or FSW*, *both*, *CAN only* or *FSW only*. The time counts
-from arming / the last trigger. Every trigger goes to `switch_log`.
-
----
-
-## 7. CAN and telemetry
-
-### How are the three lines set up?
-CAN tab → *CAN lines*: one row per line (default **BOS** = CANable, **AFAR** = IXXAT CAN1,
-**UPNG** = IXXAT CAN2) with interface, channel/port, bitrate. *Connect* opens all ticked lines;
-each runs in its own thread, so all are captured at the same time.
-
-### Can the IXXAT read both channels at once?
-Yes — CAN1 and CAN2 are separate controllers; each line has its own reader. A single-channel
-IXXAT model has only CAN1. The IXXAT driver has **no listen-only mode**.
-
-### Listen-only — on or off?
-On: the adapter is invisible on the bus. **Off** if the adapter is the only other node on that
-line (otherwise the unit retransmits its first frame forever, because nobody ACKs it).
-
-### How do I see only one line?
-Untick the other lines under *Show lines* next to the ID filter. The ID filter accepts
-`100-1FF, 7E8, !7DF, 18FEF100, 700/700`.
-
-### On which line is a command sent?
-A library command with a fixed line (*Send on line* in its dialog) always goes there; otherwise the
-line selected in the Transmit panel. Commands captured from received frames take that frame's line.
+### Command library
+Commands are hex bytes with a key, a name and optionally a fixed port; double-click or *Send*
+transmits them, *→ Library* stores the bytes from the Transmit panel, double-clicking a trace row
+copies it to Transmit. The FRM command layout will be added later — until then commands are typed
+as raw hex.
 
 ### Telemetry shows nothing.
-Telemetry is decoded from the CAN frames of BOS (`0x1A46…`), UPNG (`0x1A86…`) and AFAR (`0x1AC6…`).
-Check that the line carrying the unit is connected and frames arrive (Monitor view).
+The Telemetry tab listens to the RS-485 port named **FRM**. Until the FRM telemetry layout is
+entered it shows the received frames as raw bytes (*Received frames*). Check that the FRM port
+is connected and frames appear on the RS-485 tab.
 
 ---
 
-## 8. Main tab and test sequences
+## 7. Main tab and test sequences
 
 ### Which steps can a sequence contain?
-HMP outputs, SMW, CAN command, Pause, FSW (run / stop / single / auto level), FSW settings,
-voltage Scan start/stop, Repeat … End, Log message, **Switch** (ON / OFF / pulse), **TFG**
+HMP outputs, SMW, RS-485 command (from the RS-485 library), Pause, FSW (run / stop / single /
+auto level), FSW settings, Repeat … End, Log message, **TFG**
 (channel(s), any parameters, trigger / align / recall), **MXG** (any parameters, single sweep /
 trigger / recall / preset).
 
@@ -290,7 +200,7 @@ Pick unit → array → value → *+ Add*. *Log to CSV* writes `telemetry_log_*.
 
 ---
 
-## 9. Where do I get help?
+## 8. Where do I get help?
 Check the log at the bottom of the window first — almost every error is reported there with the
 reason. For instrument problems compare with Keysight Connection Expert / the instrument's own
 error queue (`SYSTem:ERRor?` in the SCPI console).

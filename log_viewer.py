@@ -2,10 +2,7 @@
 Logs tab: load any of the program's CSV logs and overlay them on one time plot.
 
 Understood formats (detected from the header, any number of files and days):
-* voltage_log_YYYY-MM-DD*.csv   Time, Channel, Voltage  (old 4-column files too)
 * hmp_log_YYYY-MM-DD.csv        Time, Master, CHn_On, CHn_Vset_V, ... per channel
-* switch_log_YYYY-MM-DD.csv      Time, Output, Pin, Name, Action, State, Reason  (0/1 steps)
-* temperature_log_YYYY-MM-DD.csv Time, ROM, Name, Temperature_C, ...  (1-Wire sensors)
 * telemetry_log_YYYY-MM-DD.csv  Time, Unit, Array, Designation, Byte, Value, Meaning, Warning
 * any other CSV whose first column is a time: every numeric column becomes a series
 
@@ -26,7 +23,7 @@ import pyqtgraph as pg
 
 PALETTE = ["#58a6ff", "#f0b03e", "#4fd18b", "#ff6b6b", "#d2a8ff", "#79c0ff", "#ffa657",
            "#7ee787", "#f778ba", "#a5d6ff", "#e3b341", "#56d4dd", "#bc8cff", "#ff7b72"]
-GROUPS = ("Voltage", "HMP4040", "Temperature", "Switch", "Telemetry", "Other")
+GROUPS = ("HMP4040", "Telemetry", "Other")
 
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -36,20 +33,6 @@ def _app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
-
-
-def _channel_names(folder: str) -> dict[int, str]:
-    names = {}
-    for d in (folder, _app_dir()):
-        try:
-            with open(os.path.join(d, "channels.txt"), encoding="utf-8") as f:
-                for line in f:
-                    k, _, v = line.strip().partition("=")
-                    if k.strip().isdigit() and v.strip():
-                        names.setdefault(int(k), v.strip())
-        except OSError:
-            pass
-    return names
 
 
 def _time_parser(path: str):
@@ -110,22 +93,8 @@ def parse_log(path: str) -> dict[tuple[str, str], tuple[list, list]]:
         if not head:
             return out
         h = [c.strip() for c in head]
-        base = os.path.basename(path).lower()
 
-        if h[:3] == ["Time", "Channel", "Voltage"] or (base.startswith("voltage_log") and len(h) == 4):
-            names = _channel_names(os.path.dirname(path))
-            for row in rows:
-                if len(row) < 3 or not row[1].strip().isdigit():
-                    continue
-                t = tp(row[0])
-                if t is None:
-                    continue
-                ch = int(row[1])
-                try:
-                    add("Voltage", f"Ch {ch:3d}  {names.get(ch, '')}".rstrip(), t, float(row[-1]))
-                except ValueError:
-                    pass
-        elif h[:2] == ["Time", "Master"]:
+        if h[:2] == ["Time", "Master"]:
             cols = [(k, c) for k, c in enumerate(h) if k > 0]
             for row in rows:
                 t = tp(row[0]) if row else None
@@ -139,40 +108,6 @@ def parse_log(path: str) -> dict[tuple[str, str], tuple[list, list]]:
                     label = c.replace("_V_V", " V").replace("_I_A", " I (A)").replace("_P_W", " P (W)") \
                              .replace("_Vset_V", " Vset").replace("_Iset_A", " Iset").replace("_On", " On")
                     add("HMP4040", label, t, y)
-        elif h[:4] == ["Time", "Output", "Pin", "Name"]:          # switch_log: one row per action
-            ia, ist = h.index("Action"), h.index("State")
-            for row in rows:
-                if len(row) <= ist:
-                    continue
-                t = tp(row[0])
-                if t is None:
-                    continue
-                name = f"{row[2]} {row[3]}".strip()
-                m = re.match(r"pulse (\d+) ms", row[ia])
-                try:
-                    st = float(row[ist])
-                except ValueError:
-                    continue
-                add("Switch", name, t - 1e-3, 0.0 if m or st else 1.0)   # edge, so steps show the change
-                add("Switch", name, t, st)
-                if m:                                                    # the slave ends the pulse itself
-                    add("Switch", name, t + int(m.group(1)) / 1000, 0.0)
-        elif h[:4] == ["Time", "ROM", "Name", "Temperature_C"]:
-            last_name, pts = {}, []
-            for row in rows:
-                if len(row) < 4 or not row[3].strip():
-                    continue
-                t = tp(row[0])
-                if t is None:
-                    continue
-                try:
-                    pts.append((row[1], t, float(row[3])))
-                except ValueError:
-                    continue
-                if row[2].strip():
-                    last_name[row[1]] = row[2].strip()
-            for rom, t, y in pts:                  # one series per sensor, named by its latest name
-                add("Temperature", f"{last_name.get(rom, rom)} [{rom[-4:]}] (°C)", t, y)
         elif h[:4] == ["Time", "Unit", "Array", "Designation"]:
             iv, im = h.index("Value"), h.index("Meaning")
             for row in rows:
@@ -221,7 +156,7 @@ class LogsTab(QtWidgets.QWidget):
         add_b = QtWidgets.QPushButton("Add CSV files…")
         add_b.clicked.connect(self.on_add)
         today_b = QtWidgets.QPushButton("Today's logs")
-        today_b.setToolTip("Load voltage, HMP4040, temperature, switch and telemetry logs of today from the log folders")
+        today_b.setToolTip("Load HMP4040 and telemetry logs of today from the log folders")
         today_b.clicked.connect(self.on_today)
         clr_b = QtWidgets.QPushButton("Clear")
         clr_b.clicked.connect(self.on_clear)
@@ -234,7 +169,7 @@ class LogsTab(QtWidgets.QWidget):
         lv.addWidget(self.file_list)
 
         self.filter = QtWidgets.QLineEdit()
-        self.filter.setPlaceholderText("Filter series…  (e.g. CH1, Ch  12, BOS)")
+        self.filter.setPlaceholderText("Filter series…  (e.g. CH1, FRM)")
         self.filter.setClearButtonEnabled(True)
         self.filter.textChanged.connect(self._apply_filter)
         lv.addWidget(self.filter)
@@ -304,7 +239,7 @@ class LogsTab(QtWidgets.QWidget):
         for d in self._folders():
             try:
                 for n in sorted(os.listdir(d)):
-                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("voltage", "hmp", "telemetry", "temperature", "switch"):
+                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("hmp", "telemetry"):
                         paths.append(os.path.join(d, n))
             except OSError:
                 pass

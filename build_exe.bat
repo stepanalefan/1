@@ -17,7 +17,7 @@ if not defined PY (
   exit /b 1
 )
 echo Using Python: %PY%
-%PY% -m pip install --upgrade pyinstaller pyqt5 pyqtgraph numpy pyvisa pyvisa-py pyserial python-can
+%PY% -m pip install --upgrade pyinstaller pyqt5 pyqtgraph numpy pyvisa pyvisa-py pyserial
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
@@ -28,15 +28,14 @@ for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! -
 
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --name FSW_Monitor %ICONARGS% ^
-  --hidden-import bench_monitor --hidden-import canable_analyzer ^
-  --hidden-import can_commands --hidden-import telemetry ^
-  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab ^
+  --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import telemetry ^
+  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab ^
   --hidden-import pyvisa_py --hidden-import serial.tools.list_ports ^
-  --collect-submodules pyvisa --collect-submodules pyvisa_py --hidden-import pyvisa.ctwrapper --collect-submodules can ^
+  --collect-submodules pyvisa --collect-submodules pyvisa_py --hidden-import pyvisa.ctwrapper ^
   --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib ^
   fsw_vsa_monitor.py
 
 echo.
 echo Done: dist\FSW_Monitor.exe
-echo channels.txt, can_commands.json, dashboard.json and CSV logs live next to the EXE.
+echo rs485_ports.json, rs485_commands.json, dashboard.json and CSV logs live next to the EXE.
 pause

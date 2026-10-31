@@ -25,14 +25,14 @@ Features
   channel power. Switching tabs switches the FSW channel (only the selected one
   measures).
 
-* Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / CAN /
-  FSW / scan, constellation + MER/Power/CFE, voltages, telemetry watch list),
+* Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / RS-485 /
+  FSW, constellation + MER/Power/CFE, HMP output plot, telemetry watch list),
   Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), TFG6806 (tfg_generator.py),
-  N5183B (mxg_generator.py),
-  Bench, CAN, Telemetry.
-* Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
-  scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
-  daily CSV log, plus HMP4040 control (USB / LAN) with timed power cycling.
+  N5183B (mxg_generator.py), HMP4040, RS-485, Telemetry (FRM), Logs, Help.
+* HMP4040 tab (bench_monitor.py, keep it in the same folder): HMP4040 control
+  (USB / LAN) with timed power cycling, output plot and daily CSV log.
+* RS-485 tab (rs485_monitor.py): MOXA UPort 1450I, 4 RS-485 ports, trace, transmit,
+  command library.
 
 Install
 -------
@@ -207,7 +207,7 @@ try:
 except ImportError:  # pragma: no cover - demo mode still works
     pyvisa = None
 
-try:  # Bench tab (176-channel voltage monitor + HMP4040), file next to this script
+try:  # HMP4040 tab, file next to this script
     import bench_monitor
     _BENCH_ERR = None
 except Exception as _e:  # pragma: no cover
@@ -239,32 +239,22 @@ try:  # Main (dashboard) tab
 except Exception:  # pragma: no cover
     dashboard = None
 
-try:  # 1-Wire temperature tab (sensors on the bench Arduino, pin A3)
-    import onewire_temp
-except Exception:  # pragma: no cover
-    onewire_temp = None
-
-try:  # switch outputs on the slave Arduino + BOS watchdog (panel on the Main tab)
-    import slave_switch
-except Exception:  # pragma: no cover
-    slave_switch = None
-
 try:  # Logs tab (all CSV logs on one plot)
     import log_viewer
 except Exception:  # pragma: no cover
     log_viewer = None
 
-try:  # Telemetry tab (decodes unit arrays received on the CAN tab)
+try:  # Telemetry tab (decodes FRM telemetry received on the RS-485 tab)
     import telemetry
 except Exception:  # pragma: no cover
     telemetry = None
 
-try:  # CAN tab (CANable sniffer), canable_analyzer.py + can_commands.py next to this script
-    import canable_analyzer
-    _CAN_ERR = None
+try:  # RS-485 tab (MOXA UPort 1450I), rs485_monitor.py next to this script
+    import rs485_monitor
+    _RS485_ERR = None
 except Exception as _e:  # pragma: no cover
-    canable_analyzer = None
-    _CAN_ERR = f"{type(_e).__name__}: {_e}"
+    rs485_monitor = None
+    _RS485_ERR = f"{type(_e).__name__}: {_e}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1342,16 +1332,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.bench:
             self.bench.log.connect(self.logmsg)
         else:
-            self.logmsg(f"Bench tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
+            self.logmsg(f"HMP4040 tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
-        if not self.can_win:
-            self.logmsg(f"CAN tab disabled - canable_analyzer.py / can_commands.py could not be "
-                        f"loaded ({_CAN_ERR}). Put them in the same folder as this script.", "warn")
+        if self.rs485:
+            self.rs485.log.connect(self.logmsg)
+        else:
+            self.logmsg(f"RS-485 tab disabled - rs485_monitor.py could not be loaded ({_RS485_ERR}). "
+                        f"Put it in the same folder as this script.", "warn")
         if args.demo:
             self.proto.setCurrentIndex(3)
-            if self.can_win:
-                self.can_win.demo_setup()           # BOS / AFAR / UPNG each on its own simulated line
-                QtCore.QTimer.singleShot(300, self.can_win.toggle_connect)
+            if self.rs485:
+                self.rs485.demo_setup()             # simulated FRM on port 1
+                QtCore.QTimer.singleShot(300, self.rs485.connect_all)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
             if self.smw:
@@ -1373,7 +1365,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
         # Top-level tabs span the whole window, so the tab bar never moves; the settings
-        # columns live inside the Spectrum Analyzer and Bench pages.
+        # columns live inside the Spectrum Analyzer and HMP4040 pages.
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
         root.addWidget(self.tabs, 1)
@@ -1543,19 +1535,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # left column: connection (shared) + settings of the active tab
         self.settings_stack = QtWidgets.QStackedWidget()
-        self.bench = bench_monitor.BenchTab(self) if bench_monitor else None
+        self.rs485 = rs485_monitor.Rs485Tab() if rs485_monitor else None
+        self.bench = bench_monitor.BenchTab(self, skip_ports=lambda: [
+            p["com"] for p in (self.rs485.cfg if self.rs485 else [])]) if bench_monitor else None
         pages = [left, self._build_spec_settings()]
-        self.can_win = None
-        if canable_analyzer:
-            # The sniffer is a complete QMainWindow; embedded as a plain widget it keeps
-            # its own adapter bar, command library and log. No left settings column.
-            self.can_win = canable_analyzer.SnifferWindow(argparse.Namespace(
-                demo=False, port=None, interface=None, bitrate=None, connect=False))
-            self.can_win.setWindowFlags(QtCore.Qt.Widget)
         self.telem = None
-        if telemetry and self.can_win:
+        if telemetry and self.rs485:
             self.telem = telemetry.TelemetryTab()
-            self.can_win.frame_listeners.append(self.telem.on_frames)
+            self.rs485.frame_listeners.append(self.telem.on_frames)
         for page in pages:
             scroll = QtWidgets.QScrollArea()
             scroll.setWidget(page)
@@ -1708,11 +1695,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mxg = mxg_generator.MxgTab() if mxg_generator else None
         if self.mxg:
             self.mxg.log.connect(self.logmsg)
-        self.switch = None
-        if slave_switch and self.bench:
-            self.switch = slave_switch.SwitchController(self.bench, self.logmsg, self)
-            if self.can_win:
-                self.can_win.frame_listeners.append(self.switch.on_frames)
         self.dash = dashboard.Dashboard(self) if dashboard else None
         if self.dash:
             self.tabs.addTab(page(self.dash), "Main")
@@ -1734,14 +1716,9 @@ class MainWindow(QtWidgets.QMainWindow):
             bench_split.addWidget(bscroll)
             bench_split.addWidget(page(self.bench.page))
             bench_split.setSizes([390, 1170])
-            self.tabs.addTab(bench_split, "Bench: 176 ch + HMP4040")
-        self.temps = None
-        if onewire_temp and self.bench:
-            self.temps = onewire_temp.TempTab(self.bench)
-            self.bench.folder_listeners.append(self.temps.folder_changed)
-            self.tabs.addTab(page(self.temps), "1-Wire Temp")
-        if self.can_win:
-            self.tabs.addTab(page(self.can_win), "CAN")
+            self.tabs.addTab(bench_split, "HMP4040")
+        if self.rs485:
+            self.tabs.addTab(page(self.rs485), "RS-485")
         if self.telem:
             self.tabs.addTab(page(self.telem), "Telemetry")
         if self.telem and self.dash:
@@ -1980,9 +1957,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return "spec" if self.fsw_tabs.currentIndex() == 1 else "vsa"
 
     def on_tab(self, idx):
-        w = self.tabs.widget(idx)
-        shown = w.widget() if isinstance(w, QtWidgets.QScrollArea) else w
-        self.log.setVisible(not (self.can_win is not None and shown is self.can_win))   # CAN has its own
+        pass
 
     def on_fsw_tab(self, idx):
         self.settings_stack.setCurrentIndex(idx)
@@ -2335,8 +2310,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_vsa(self, r: dict):
         if self.dash:
             self.dash.update_vsa(r)
-        if self.switch:
-            self.switch.on_vsa(r)
         now = r["t"]
         if self.t_start is None:
             self.t_start = now
@@ -2390,17 +2363,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         if self.dash:
             self.dash.shutdown()
-        if self.temps:
-            self.temps.shutdown()
-        if self.switch:
-            self.switch.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()
                 return
             self.bench.shutdown()
-        if self.can_win:
-            self.can_win.close()            # stops worker, script, recording
+        if self.rs485:
+            self.rs485.shutdown()           # stops port workers, periodic send, recording
         if self.smw:
             self.smw.shutdown()
         if self.tfg:
