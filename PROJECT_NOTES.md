@@ -33,7 +33,10 @@ tested on the bench. Keep that workflow: **every device has a Demo class**.
 ## 2. Architecture
 
 ```
-fsw_vsa_monitor.py   start file: main window (QTabWidget), FSW driver/worker + VSA & Spectrum views,
+iq_demod.py          software demodulator (power-M CFO, RRC matched filter, Oerder&Meyr timing with
+                     clock drift, DD phase/frequency, MER/EVM/I/Q offset) + signal simulator
+fsw_vsa_monitor.py   start file: main window (QTabWidget), FSW driver/worker + VSA, Spectrum and
+                     I/Q (software demod) views,
                      early VISA opening (see 6), creates all other tabs, closeEvent shuts them down
 dashboard.py         Main tab: device status, HMP panel, test sequences, constellation,
                      HMP output plot, telemetry watch (stored in dashboard.json)
@@ -76,7 +79,7 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 
 | Item | Details |
 |---|---|
-| R&S FSW-50 | LAN, HiSLIP/VXI-11/socket. VSA (K70) + Spectrum. SCPI verified against R&S's RsFsw driver. |
+| R&S FSW-50 | LAN, HiSLIP/VXI-11/socket. **This bench's FSW has no K70**: constellation via the I/Q Analyzer (`INST:CRE IQ`, `TRAC:IQ:SRAT/RLEN`, `TRAC:IQ:DATA:FORM IQP`, `INIT:IMM;*OPC`, `TRAC:IQ:DATA:MEM?`, FORM REAL,32) + `iq_demod.py`. K70 detected from `*OPT?` (or by trying `INST:CRE DDEM`). SCPI verified against R&S's RsFsw driver (6.31). |
 | R&S SMW200A | LAN. SCPI verified against RsSmw. |
 | Keysight N5183B | LAN or USB (VISA). X-Series SCPI; *OPT? gates AM/FM/ΦM (UNT) and pulse (UNU/UNW). Full SCPI PDF could not be downloaded — commands validated through SYSTem:ERRor? on the device. |
 | Suin TFG6806 | 2 ch, 65 MHz. LAN raw socket **5025** or USB-TMC (`USB0::1267::260::<serial>::0::INSTR`). SCPI from the CD's Programmer's Guide (12/2024); amplitude unit forced to Vpp on connect. |
@@ -98,6 +101,11 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * **FRM master**: one request at a time, response matched by port + function code + address;
   timeout default 100 ms (protocol 1.75 ms + USB latency); ≥ 4 ms between commands (protocol:
   2.75 ms silence). No answer → main → backup → main → backup (protocol 4.4).
+* **No K70 → software demodulation**: I/Q captured as back-to-back single captures (also in
+  "Continuous"), demodulated in the worker thread; results use the K70 result keys, so the Main
+  tab, CSV log and sequence steps work unchanged. Sample rate is an integer multiple of the symbol
+  rate (no resampler). RRC span 24 symbols (10 gave a 41 dB MER floor). Tested with the simulator
+  (all modulations, ±100 ppm, CFO, SNR) and a fake SCPI FSW (TCP), not yet on the real FSW.
 * **Telemetry byte numbers** are shown as in the protocol tables (array 1 starts at byte 1, array 2
   at byte 63, array 5 at byte 1 of Table 6.7); `DOC_OFFSET` in telemetry.py.
 * **Language**: UI and docs in English.
@@ -105,6 +113,9 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 ---
 
 ## 5. Open points / to do
+
+* I/Q software demod on the real FSW: check the absolute power scaling (I/Q volts into 50 Ω
+  assumed) against the Spectrum channel power, and the maximum record length / transfer time.
 
 * FRM conversions not in the protocol: temperature codes (array 1 bytes 43–50), voltage codes
   (57–62), power levels (array 2), PLL/JESD flags (51–56), frequency letter → Hz. Shown as raw codes;

@@ -43,7 +43,7 @@ Demo mode never overwrites your saved RS-485 port settings.
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -84,6 +84,24 @@ string (`TCPIP0::…::INSTR`) can be typed instead.
 ### Continuous or single measurement?
 *Run* uses the FSW's continuous mode; *Single* makes one synchronised sweep and waits for it.
 Only changed settings are sent to the FSW.
+
+### The FSW has no K70 option — can I still see a constellation?
+Yes: sub-tab **I/Q (software demod)**. The FSW's I/Q Analyzer (standard firmware) records raw
+I/Q samples; `iq_demod.py` demodulates them in the program. When the FSW reports no K70, the VSA
+tab is disabled and this tab is selected automatically.
+* Set **center**, **ref level** (or *Auto Level*), then the signal: **modulation** (BPSK, QPSK,
+  OQPSK, 8PSK, 16QAM), **symbol rate**, **Tx filter** (RRC / RC / none) and **roll-off α** — they
+  must match the transmitter. *Apply* sets the FSW sample rate = symbol rate × *samples per symbol*
+  and the record length = *capture length* × samples per symbol.
+* Results: MER, EVM, power, carrier frequency error, symbol rate error, I/Q offset (+ trend and the
+  spectrum of the capture). They feed the Main tab and the sequence step *FSW single*;
+  *FSW set* can change the I/Q settings too.
+* Limits: continuous signals only (no burst / pattern search, no equalizer); the constellation may
+  be rotated by a multiple of 90° (BPSK 180°) because there is no sync pattern; MER/EVM are not a
+  calibrated measurement (implementation floor > 45 dB). A wrong modulation / symbol rate / filter
+  gives a smeared constellation and a low MER.
+* The absolute power assumes the FSW I/Q data in volts into 50 Ω — compare once with the Spectrum
+  tab's channel power or a known SMW200A level.
 
 ### "Function not available" / errors about burst or pattern search.
 Burst search and pattern search are only sent when they apply to the selected signal/modulation.

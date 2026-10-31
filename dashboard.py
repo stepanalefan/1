@@ -130,6 +130,22 @@ def fsw_params(host, app: str):
             ("pattern", "Pattern search", "b", None),
             ("trig_source", "Trigger source", "c", [(t, t) for t in hm.TRIGGERS]),
         ]
+    if app == "iq":
+        dm = getattr(hm, "iq_demod", None)
+        return [
+            ("center", "Center frequency, Hz", "hz", None),
+            ("ref_level", "Ref level, dBm", "f", None),
+            ("att_auto", "Attenuation auto", "b", None),
+            ("att", "Attenuation, dB", "f", None),
+            ("preamp", "Preamplifier", "b", None),
+            ("modulation", "Modulation (software demod)", "c",
+             [(m, m) for m in (dm.MODULATIONS if dm else ["QPSK"])]),
+            ("symbol_rate", "Symbol rate, sym/s", "hz", None),
+            ("filter", "Tx filter", "c", list(dm.FILTERS) if dm else [("RRC", "RRC")]),
+            ("alpha", "Roll-off alpha", "f", None),
+            ("sps", "Samples per symbol", "c", [(o, int(o)) for o in hm.IQ_SPS]),
+            ("nsym", "Capture length, symbols", "i", None),
+        ]
     return [
         ("center", "Center frequency, Hz", "hz", None),
         ("span", "Span, Hz", "hz", None),
@@ -399,10 +415,11 @@ class StepDialog(QtWidgets.QDialog):
             self.app = QtWidgets.QComboBox()
             self.app.addItem("VSA (K70)", "vsa")
             self.app.addItem("Spectrum", "spec")
+            self.app.addItem("I/Q (software demod)", "iq")
             f.addRow("FSW application", self.app)
             self.pages = QtWidgets.QStackedWidget()
             self.fields = {}
-            for app in ("vsa", "spec"):
+            for app in ("vsa", "spec", "iq"):
                 pw = QtWidgets.QWidget()
                 pf = QtWidgets.QFormLayout(pw)
                 pf.setContentsMargins(0, 0, 0, 0)
@@ -435,7 +452,7 @@ class StepDialog(QtWidgets.QDialog):
                 sc.setMinimumSize(460, 420)
                 self.pages.addWidget(sc)
             self.app.currentIndexChanged.connect(self.pages.setCurrentIndex)
-            self.app.setCurrentIndex(0 if step.get("app", "vsa") == "vsa" else 1)
+            self.app.setCurrentIndex(max(0, self.app.findData(step.get("app", "vsa"))))
             f.addRow(self.pages)
             f.addRow(QtWidgets.QLabel("Only ticked parameters are sent; the rest stay as they are."))
         elif op == "fsw":
@@ -1159,7 +1176,7 @@ class Dashboard(QtWidgets.QWidget):
                     parts.append(f"OVS ×{v}" + (f" (sample rate {fmt_hz(sr * v)})" if sr else ""))
                 else:
                     parts.append(f"{name} {v:g}" if isinstance(v, float) else f"{name} {v}")
-            return f"〰 FSW {'VSA' if s['app'] == 'vsa' else 'Spectrum'}   " + ", ".join(parts)
+            return f"〰 FSW {({'vsa': 'VSA', 'spec': 'Spectrum', 'iq': 'I/Q'})[s['app']]}   " + ", ".join(parts)
         if op == "repeat":
             return f"⟳ Repeat {'forever' if s['count'] == 0 else str(s['count']) + ' ×'}"
         if op == "end":
@@ -1504,14 +1521,15 @@ class Dashboard(QtWidgets.QWidget):
             if not h.connected:
                 raise RuntimeError("FSW not connected")
             app, params = s["app"], dict(s["params"])
-            h.fsw_tabs.setCurrentIndex(0 if app == "vsa" else 1)     # GUI follows the FSW channel
-            known = h.last_read if app == "vsa" else h.last_read_spec
+            h.fsw_tabs.setCurrentIndex({"vsa": 0, "spec": 1, "iq": 2}[app])     # GUI follows the FSW channel
+            known = {"vsa": h.last_read, "spec": h.last_read_spec, "iq": h.last_read_iq}[app]
             prev = {k: v for k, v in known.items() if k not in params}   # dependencies only
             box = Token(f"FSW {app.upper()} settings")
 
             def job():
                 dev = h.worker.dev
-                fn = dev.apply_settings if app == "vsa" else dev.apply_spec_settings
+                fn = {"vsa": dev.apply_settings, "spec": dev.apply_spec_settings,
+                      "iq": dev.apply_iq_settings}[app]
                 cmds, errors, notes = fn(params, prev)
                 if errors:
                     raise RuntimeError("; ".join(errors))

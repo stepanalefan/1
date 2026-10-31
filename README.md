@@ -20,7 +20,7 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | Tab | What it does |
 |---|---|
 | **Main** | Overview: device status (green = connected), HMP4040 outputs, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, HMP4040 output plot, telemetry watch list. |
-| **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (demodulation: modulation, symbol rate, filters, constellation, results, trend) and **Spectrum**. Run continuously or single sweeps; only changed settings are sent. |
+| **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (only if FSW-K70 is installed), **Spectrum**, and **I/Q (software demod)**: the FSW I/Q Analyzer captures raw I/Q and the program demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM): constellation, MER, EVM, power, carrier frequency error, symbol rate error, I/Q offset, trend, captured spectrum. Without K70 the I/Q tab is selected automatically. Run continuously or single captures; only changed settings are sent. |
 | **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
 | **TFG6806** | Suin TFG6806, both channels: waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
@@ -94,6 +94,7 @@ the HMP4040 tab: `python bench_monitor.py [--demo]`.
 | File | Part |
 |---|---|
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
+| `iq_demod.py` | Software demodulator for I/Q captures (constellation without K70), signal simulator |
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA loader |
 | `rs485_monitor.py` | RS-485 tab (MOXA UPort 1450I), FRM control, command library |

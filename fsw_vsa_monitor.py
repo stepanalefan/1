@@ -214,6 +214,11 @@ except Exception as _e:  # pragma: no cover
     bench_monitor = None
     _BENCH_ERR = f"{type(_e).__name__}: {_e}"
 
+try:  # software demodulator for the I/Q Analyzer (constellation without FSW-K70)
+    import iq_demod
+except Exception:  # pragma: no cover
+    iq_demod = None
+
 try:  # SMW200A generator tab
     import smw_generator
 except Exception:  # pragma: no cover
@@ -308,6 +313,10 @@ DETECTORS = [("Auto", "AUTO"), ("Positive peak", "POS"), ("RMS", "RMS"), ("Avera
              ("Negative peak", "NEG"), ("Sample", "SAMP"), ("Auto peak", "APE")]
 TRACE_MODES = [("Clear/Write", "WRIT"), ("Max hold", "MAXH"), ("Min hold", "MINH"),
                ("Average", "AVER"), ("View", "VIEW")]
+IQ_DEFAULTS = {"modulation": "QPSK", "symbol_rate": 16e3, "sps": 8, "filter": "RRC", "alpha": 0.35,
+               "nsym": 2000}
+IQ_SOFT = tuple(IQ_DEFAULTS)            # demodulator parameters kept in the program, not on the FSW
+IQ_SPS = ["2", "4", "8", "16"]
 PROTOCOLS = ["HiSLIP (hislip0)", "VXI-11 (INSTR)", "Raw socket (5025)", "Demo (no instrument)"]
 
 
@@ -396,6 +405,25 @@ def ideal_points(mod: str) -> np.ndarray:
     return p / np.sqrt(np.mean(np.abs(p) ** 2))
 
 
+def iq_result(x, fs, p: dict, mode: str, timing: dict) -> dict:
+    """Software-demodulated I/Q capture -> result dict with the K70 result keys (+ capture spectrum)."""
+    t0 = time.perf_counter()
+    err = ""
+    try:
+        r = iq_demod.demodulate(x, fs, p["symbol_rate"], p["modulation"], p["filter"], p["alpha"])
+    except Exception as e:                       # bad settings / no signal: show the spectrum anyway
+        err = f"{type(e).__name__}: {e}"
+        r = {"i": np.array([]), "q": np.array([]), "nsym": 0}
+        r.update({k: float("nan") for k, *_ in RESULTS})
+        pw = float(np.mean(np.abs(x) ** 2)) / iq_demod.R_LOAD if len(x) else 0.0
+        r["power"] = 10 * math.log10(pw * 1e3) if pw > 0 else float("nan")
+    f, sp = iq_demod.spectrum(x, fs)
+    r.update(app="iq", mode=mode, t=time.time(), spec_f=f, spec_p=sp, error=err, nsamp=len(x), fs=fs,
+             t_res=time.perf_counter() - t0, **timing)
+    r.setdefault("sweep_time", r.get("t_acq", 0.0) + r.get("t_trace", 0.0) + r["t_res"])
+    return r
+
+
 class _CmdDiff:
     """Builds the SCPI commands for the settings that differ from the last read."""
 
@@ -447,7 +475,11 @@ class FswVsa:
         self._unsupported: set[str] = set()   # queries the firmware does not know (-113)
         self._batch_results = True            # fetch all results in one round trip
         self.continuous = False               # FSW sweeping in INIT:CONT ON mode
-        self.app = "vsa"                      # active FSW channel: "vsa" (K70) or "spec"
+        self.app = "vsa"                      # active FSW channel: "vsa" (K70), "spec" or "iq"
+        self.k70 = True                       # FSW-K70 (VSA) available
+        self.options = ""
+        self.iq = dict(IQ_DEFAULTS)           # software demodulator settings (I/Q Analyzer)
+        self.iq_fs = None                     # sample rate the FSW really uses
         self.channels: dict[str, str] = {}    # app -> FSW channel name
         self._last_raw = None                 # last trace, to detect "no new sweep yet"
         if resource.upper().endswith("::SOCKET"):
@@ -572,12 +604,46 @@ class FswVsa:
 
     def _setup(self) -> str:
         self.write("*CLS")
-        name = self._open_channel(("DDEM",), "DDEM", "VSA")
-        self.channels["vsa"] = name
-        self.app = "vsa"
-        self.preset_layout()
+        try:
+            self.options = self.query("*OPT?")
+        except Exception:
+            self._clear_io()
+        self.k70 = self._k70_available()
+        if self.k70:
+            name = self._open_channel(("DDEM",), "DDEM", "VSA")
+            self.channels["vsa"] = name
+            self.app = "vsa"
+            self.preset_layout()
+        else:                                      # no K70: I/Q Analyzer + software demodulator
+            self.app = None
+            self.select_app("iq")
+            name = self.channels["iq"]
         self.errors()
         return name
+
+    def _k70_available(self) -> bool:
+        """K70 present: a VSA (DDEM) channel exists or can be created."""
+        if self._find_channel(("DDEM",)):
+            return True
+        opts = [o.strip().strip('"').upper() for o in self.options.split(",") if o.strip()]
+        if opts and not any(o.endswith("K70") for o in opts):
+            return False                               # option list known and without K70
+        self.write("*CLS")                             # unknown: try to create a VSA channel
+        self.write("INST:CRE DDEM, 'VSA'")
+        try:
+            self.query("*OPC?")
+        except Exception:
+            self._clear_io()
+        self.errors()
+        return self._find_channel(("DDEM",)) is not None
+
+    def _iq_setup(self):
+        """I/Q Analyzer channel: I,Q pairs, sample rate and record length from the demod settings."""
+        self.write("TRAC:IQ:DATA:FORM IQP")
+        self.write(f"TRAC:IQ:SRAT {self.iq['symbol_rate'] * self.iq['sps']:.10g}")
+        self.write(f"TRAC:IQ:RLEN {int(self.iq['nsym'] * self.iq['sps'])}")
+        self.query("*OPC?")
+        self.iq_fs = self._qf("TRAC:IQ:SRAT?")
 
     def select_app(self, app: str):
         """Switch the FSW to the K70 (vsa) or the Spectrum (spec) channel. Only the
@@ -592,11 +658,18 @@ class FswVsa:
             self.write("INIT:CONT OFF")
         elif app == "spec":
             self.channels["spec"] = self._open_channel(("SANALYZER", "SAN"), "SANALYZER", "Spectrum")
+        elif app == "iq":
+            self.channels["iq"] = self._open_channel(("IQ",), "IQ", "IQ Analyzer")
+            self._iq_setup()
+        elif app == "vsa" and not self.k70:
+            raise RuntimeError("FSW-K70 (VSA) is not installed - use the I/Q (software demod) tab")
         self.app = app
         self._last_raw = None
         self.errors()
 
     def preset_layout(self):
+        if not self.k70:
+            return
         self.select_app("vsa")
         self.write("DDEM:PRES:CALC")               # W1 mag, W2 spectrum, W3 summary, W4 constellation
         self.query("*OPC?")
@@ -812,6 +885,68 @@ class FswVsa:
             d.cmds.append(f"SWE:COUN {int(s['count'])}")
         return self._send(d)
 
+    # -- I/Q Analyzer channel (software demodulator) --------------------------
+    def read_iq_settings(self) -> dict:
+        self.select_app("iq")
+        old = self.inst.timeout
+        self.inst.timeout = min(old, 3000)
+        try:
+            s = {
+                "center":    self._qf("FREQ:CENT?"),
+                "ref_level": self._qf("DISP:WIND:TRAC:Y:SCAL:RLEV?"),
+                "att_auto":  self._qb("INP:ATT:AUTO?"),
+                "att":       self._qf("INP:ATT?"),
+                "preamp":    self._qb("INP:GAIN:STAT?"),
+            }
+            s.update(self.iq)
+            self.iq_fs = self._qf("TRAC:IQ:SRAT?")
+            s["info"] = {"srate": self.iq_fs, "rlen": self._qi("TRAC:IQ:RLEN?"), "bw": self._qf("TRAC:IQ:BWID?")}
+            return s
+        finally:
+            self.inst.timeout = old
+            try:
+                self.errors()
+            except Exception:
+                pass
+
+    def apply_iq_settings(self, s: dict, prev: dict | None = None):
+        self.select_app("iq")
+        d = _CmdDiff(s, prev)
+        d.num("center", "FREQ:CENT")
+        d.num("ref_level", "DISP:WIND:TRAC:Y:SCAL:RLEV")
+        d.onoff("att_auto", "INP:ATT:AUTO")
+        if not d.eff("att_auto"):
+            d.num("att", "INP:ATT")
+        d.onoff("preamp", "INP:GAIN:STAT")
+        soft = [f"demod {k} = {s[k]}" for k in IQ_SOFT if k in s and d.changed(k)]
+        self.iq.update({k: s[k] for k in IQ_SOFT if s.get(k) is not None})
+        fs = self.iq["symbol_rate"] * self.iq["sps"]
+        if any(d.changed(k) for k in ("symbol_rate", "sps")) or not self.iq_fs or \
+                not math.isclose(self.iq_fs, fs, rel_tol=1e-9):
+            d.cmds.append(f"TRAC:IQ:SRAT {fs:.10g}")
+        if any(d.changed(k) for k in ("nsym", "sps", "symbol_rate")):
+            d.cmds.append(f"TRAC:IQ:RLEN {int(self.iq['nsym'] * self.iq['sps'])}")
+        cmds, errors, notes = self._send(d)
+        self.iq_fs = self._qf("TRAC:IQ:SRAT?")
+        if self.iq_fs and not math.isclose(self.iq_fs, fs, rel_tol=1e-6):
+            notes.append(f"FSW uses sample rate {self.iq_fs:.10g} Hz instead of {fs:.10g} Hz - "
+                         f"demodulation needs an integer number of samples per symbol")
+        return cmds + soft, errors, notes
+
+    def _iq_capture(self, mode, should_abort):
+        t0 = time.perf_counter()
+        self.write("*CLS;:INIT:IMM;*OPC")                  # one capture, non-blocking
+        if not self._wait_sweep(should_abort):
+            return None
+        t1 = time.perf_counter()
+        raw = np.asarray(self.inst.query_binary_values("TRAC:IQ:DATA:MEM?", datatype="f", is_big_endian=False,
+                                                       container=np.array), dtype=np.float64)
+        t2 = time.perf_counter()
+        n = raw.size // 2 * 2
+        x = raw[0:n:2] + 1j * raw[1:n:2]
+        fs = self.iq_fs or self.iq["symbol_rate"] * self.iq["sps"]
+        return iq_result(x, fs, self.iq, mode, {"t_acq": t1 - t0, "t_trace": t2 - t1})
+
     # -- measurement -------------------------------------------------------
     def abort(self):
         try:
@@ -892,6 +1027,9 @@ class FswVsa:
     # Continuous mode: the FSW sweeps back-to-back on its own (INIT:CONT ON) and we
     # just pick up the latest completed result. No per-sweep handshake.
     def start_continuous(self):
+        if self.app == "iq":                       # I/Q: back-to-back single captures (no INIT:CONT)
+            self.continuous = True
+            return
         self.write("INIT:CONT ON")
         self.write("INIT:IMM")                 # (re)start the continuous sweep
         self.continuous = True
@@ -899,6 +1037,8 @@ class FswVsa:
 
     def stop_continuous(self):
         self.continuous = False
+        if self.app == "iq":
+            return
         try:
             self.write("INIT:CONT OFF")
         finally:
@@ -907,6 +1047,8 @@ class FswVsa:
     def fetch(self):
         """Latest result of the continuous sweep, or None if no new sweep finished
         since the last call (identical trace data)."""
+        if self.app == "iq":
+            return self._iq_capture("cont", lambda: False)
         t0 = time.perf_counter()
         raw = self._read_trace()
         key = raw.tobytes()
@@ -921,6 +1063,8 @@ class FswVsa:
     def measure(self, should_abort=lambda: False):
         if self.continuous:
             self.stop_continuous()
+        if self.app == "iq":
+            return self._iq_capture("sync", should_abort)
         t0 = time.perf_counter()
         self.write("*CLS;:INIT:IMM;*OPC")                  # one single sweep, non-blocking
         if not self._wait_sweep(should_abort):
@@ -947,9 +1091,14 @@ class FswVsa:
 #  Simulated instrument (DEMO mode)                                            #
 # --------------------------------------------------------------------------- #
 class DemoFsw:
+    k70 = False                   # like the bench FSW of this project: I/Q Analyzer + software demod
+    options = "B13,B24,B160 (demo, no K70)"
+
     def __init__(self):
         self.idn = "Rohde&Schwarz,FSW-50,DEMO,simulated"
-        self.channel = "VSA (demo)"
+        self.channel = "IQ Analyzer (demo)"
+        self.iq = dict(IQ_DEFAULTS)
+        self.iq_lvl = {"center": 2.2e9, "ref_level": -20.0, "att_auto": True, "att": 10.0, "preamp": False}
         self.rng = np.random.default_rng()
         self.snr = 30.0
         self.cfe = 150.0
@@ -965,10 +1114,24 @@ class DemoFsw:
                      "rbw_auto": True, "rbw": 100e3, "vbw_auto": True, "vbw": 100e3,
                      "swt_auto": True, "swt": 0.01, "points": 1001, "detector": "AUTO",
                      "trace_mode": "WRIT", "count": 0}
-        self.app = "vsa"
+        self.app = "iq"
 
     def select_app(self, app):
+        if app == "vsa" and not self.k70:
+            raise RuntimeError("FSW-K70 (VSA) is not installed - use the I/Q (software demod) tab")
         self.app = app
+
+    def read_iq_settings(self):
+        self.app = "iq"
+        fs = self.iq["symbol_rate"] * self.iq["sps"]
+        return {**self.iq_lvl, **self.iq,
+                "info": {"srate": fs, "rlen": int(self.iq["nsym"] * self.iq["sps"]), "bw": 0.8 * fs}}
+
+    def apply_iq_settings(self, s, prev=None):
+        self.app = "iq"
+        cmds, _, _ = self._apply(self.iq_lvl, {k: v for k, v in s.items() if k in self.iq_lvl})
+        soft, _, _ = self._apply(self.iq, {k: v for k, v in s.items() if k in IQ_SOFT})
+        return cmds + soft, [], []
 
     @staticmethod
     def _apply(target, s):
@@ -980,7 +1143,7 @@ class DemoFsw:
         return cmds, [], []
 
     def read_settings(self):
-        self.app = "vsa"
+        self.select_app("vsa")
         return dict(self.s)
 
     def apply_settings(self, s, prev=None):
@@ -1005,7 +1168,7 @@ class DemoFsw:
 
     def auto_level(self, app="vsa"):
         time.sleep(0.3)
-        (self.s if app == "vsa" else self.spec)["ref_level"] = -12.0
+        {"vsa": self.s, "spec": self.spec, "iq": self.iq_lvl}[app]["ref_level"] = -12.0
 
     continuous = False
     _next = 0.0
@@ -1018,6 +1181,8 @@ class DemoFsw:
         self.continuous = False
 
     def _sweep_s(self):
+        if self.app == "iq":
+            return 0.03 + self.iq["nsym"] / self.iq["symbol_rate"]
         n = int(self.s["result_len"] or 1000)
         return 0.04 + min(0.3, (self.s["capture_len"] or n) / (self.s["symbol_rate"] or 1e6))
 
@@ -1043,6 +1208,8 @@ class DemoFsw:
     def _gen(self):
         if self.app == "spec":
             return self._gen_spec()
+        if self.app == "iq":
+            return self._gen_iq()
         n = int(self.s["result_len"] or 1000)
         pts = ideal_points(self.s["modulation"] or "QPSK")
         sym = pts[self.rng.integers(len(pts), size=n)]
@@ -1058,6 +1225,16 @@ class DemoFsw:
                 "cfe": self.cfe, "srerr": self.rng.normal(0, 0.5),
                 "iqoff": -45 + self.rng.normal(0, 0.5), "t_trace": 0.0, "t_res": 0.0,
                 "app": "vsa"}
+
+    def _gen_iq(self):
+        p = self.iq
+        self.snr = float(np.clip(self.snr + self.rng.normal(0, 0.4), 14, 30))
+        self.cfe = float(np.clip(self.cfe + self.rng.normal(0, 8), -800, 800))
+        x = iq_demod.simulate(p["modulation"], p["symbol_rate"], int(p["sps"]), int(p["nsym"]), self.snr,
+                              self.cfe, p["filter"], p["alpha"],
+                              clock_ppm=12.0, delay=self.rng.random(), phase=self.rng.random() * 6.28,
+                              power_dbm=self.iq_lvl["ref_level"] - 10, iq_offset=0.01, rng=self.rng)
+        return iq_result(x, p["symbol_rate"] * p["sps"], p, "", {"t_acq": 0.0, "t_trace": 0.0})
 
     def _gen_spec(self):
         sp = self.spec
@@ -1292,7 +1469,7 @@ class RunningStat:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
-        self.setWindowTitle("FSW VSA Monitor (K70) + Bench")
+        self.setWindowTitle("FSW Monitor - FRM bench")
         self.resize(1560, 940)
         self.connected = False
         self.supported: set[str] = set()
@@ -1311,6 +1488,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rate = 0.0
         self.sweeps = 0
         self._range = None
+        self.last_read_iq: dict = {}       # I/Q (software demod) tab
+        self.iq_persist: deque = deque(maxlen=3)
+        self.iq_stats = {k: RunningStat() for k, *_ in RESULTS}
+        self.iq_trend: deque = deque(maxlen=600)
+        self.iq_t0 = None
+        self._iq_range = None
+        self._iq_mod = None
 
         self._build_ui()
         self.on_tab(self.tabs.currentIndex())     # Main tab: no left column
@@ -1538,7 +1722,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rs485 = rs485_monitor.Rs485Tab() if rs485_monitor else None
         self.bench = bench_monitor.BenchTab(self, skip_ports=lambda: [
             p["com"] for p in (self.rs485.cfg if self.rs485 else [])]) if bench_monitor else None
-        pages = [left, self._build_spec_settings()]
+        pages = [left, self._build_spec_settings(), self._build_iq_settings()]
         self.telem = None
         if telemetry and self.rs485:
             self.telem = telemetry.TelemetryTab()
@@ -1685,6 +1869,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fsw_tabs = QtWidgets.QTabWidget()
         self.fsw_tabs.addTab(page(vsa_page), "VSA (K70)")
         self.fsw_tabs.addTab(page(self._build_spec_page()), "Spectrum")
+        self.fsw_tabs.addTab(page(self._build_iq_page()), "I/Q (software demod)")
+        if iq_demod is None:
+            self.fsw_tabs.setTabEnabled(2, False)
         self.fsw_tabs.currentChanged.connect(self.on_fsw_tab)
         self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
         if self.smw:
@@ -1952,9 +2139,295 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spec_tiles["chp"].value.setText("—")
             self.spec_tiles["chp"].sub.setText("set a channel BW")
 
+    # ------------------------------------------------------- I/Q (software demod)
+    def _build_iq_settings(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(4, 4, 4, 4)
+        wi = self.wi = {}
+        note = QtWidgets.QLabel("No FSW-K70 needed: the FSW I/Q Analyzer captures raw I/Q, this program "
+                                "demodulates it (continuous signals; MER/EVM not calibrated).")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8a96a3;font-size:11px;")
+        lv.addWidget(note)
+
+        self.g_iq_level = g = QtWidgets.QGroupBox("Frequency / level (FSW)")
+        f = QtWidgets.QFormLayout(g)
+        wi["center"] = SIEdit("Hz", "e.g. 2.2 GHz")
+        wi["ref_level"] = QtWidgets.QDoubleSpinBox()
+        wi["ref_level"].setRange(-130, 30)
+        wi["ref_level"].setDecimals(2)
+        wi["ref_level"].setSuffix(" dBm")
+        wi["att_auto"] = QtWidgets.QCheckBox("Auto")
+        wi["att"] = QtWidgets.QDoubleSpinBox()
+        wi["att"].setRange(0, 79)
+        wi["att"].setDecimals(0)
+        wi["att"].setSuffix(" dB")
+        wi["preamp"] = QtWidgets.QCheckBox("Preamplifier (B24)")
+        wi["att_auto"].toggled.connect(lambda on: wi["att"].setEnabled(not on))
+        b = QtWidgets.QPushButton("Auto Level")
+        b.clicked.connect(self.on_autolevel)
+        f.addRow("Center", wi["center"])
+        f.addRow("Ref level", wi["ref_level"])
+        f.addRow("Attenuation", with_auto(wi["att"], wi["att_auto"]))
+        f.addRow(wi["preamp"])
+        f.addRow(b)
+        lv.addWidget(g)
+
+        self.g_iq_sig = g = QtWidgets.QGroupBox("Signal (software demodulator)")
+        f = QtWidgets.QFormLayout(g)
+        wi["modulation"] = QtWidgets.QComboBox()
+        wi["modulation"].addItems(iq_demod.MODULATIONS if iq_demod else ["QPSK"])
+        wi["symbol_rate"] = SIEdit("sym/s", "e.g. 16k")
+        wi["filter"] = combo(iq_demod.FILTERS if iq_demod else [("RRC", "RRC")])
+        wi["alpha"] = QtWidgets.QDoubleSpinBox()
+        wi["alpha"].setRange(0.05, 1.0)
+        wi["alpha"].setDecimals(3)
+        wi["alpha"].setSingleStep(0.05)
+        f.addRow("Modulation", wi["modulation"])
+        f.addRow("Symbol rate", wi["symbol_rate"])
+        f.addRow("Tx filter", wi["filter"])
+        f.addRow("Roll-off α", wi["alpha"])
+        lv.addWidget(g)
+
+        self.g_iq_cap = g = QtWidgets.QGroupBox("Capture")
+        f = QtWidgets.QFormLayout(g)
+        wi["sps"] = QtWidgets.QComboBox()
+        wi["sps"].addItems(IQ_SPS)
+        wi["sps"].setToolTip("Samples per symbol: FSW sample rate = symbol rate × N")
+        wi["nsym"] = QtWidgets.QSpinBox()
+        wi["nsym"].setRange(200, 200_000)
+        wi["nsym"].setSingleStep(500)
+        wi["nsym"].setSuffix(" symbols")
+        self.iq_derived = QtWidgets.QLabel("—")
+        self.iq_derived.setStyleSheet("color:#8a96a3;")
+        self.iq_derived.setWordWrap(True)
+        f.addRow("Samples / symbol", wi["sps"])
+        f.addRow("Capture length", wi["nsym"])
+        f.addRow(self.iq_derived)
+        lv.addWidget(g)
+        for k in ("symbol_rate",):
+            wi[k].editingFinished.connect(self._update_iq_derived)
+        wi["sps"].currentIndexChanged.connect(self._update_iq_derived)
+        wi["nsym"].valueChanged.connect(self._update_iq_derived)
+
+        btns = QtWidgets.QGridLayout()
+        self.iq_apply_btn = QtWidgets.QPushButton("Apply ▶ FSW")
+        self.iq_apply_btn.setStyleSheet("font-weight:700;")
+        self.iq_read_btn = QtWidgets.QPushButton("Read ◀ FSW")
+        self.iq_apply_btn.clicked.connect(self.on_apply)
+        self.iq_read_btn.clicked.connect(self.on_read)
+        btns.addWidget(self.iq_apply_btn, 0, 0)
+        btns.addWidget(self.iq_read_btn, 0, 1)
+        lv.addLayout(btns)
+        lv.addStretch(1)
+        self.populate_iq({"center": 2.2e9, "ref_level": -20.0, "att_auto": True, "att": 10.0, "preamp": False,
+                          **IQ_DEFAULTS}, quiet=True)
+        return page
+
+    def _build_iq_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        left = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        cw = QtWidgets.QWidget()
+        cv = QtWidgets.QVBoxLayout(cw)
+        cv.setContentsMargins(4, 4, 4, 4)
+        bar = QtWidgets.QHBoxLayout()
+        self.iq_persist_spin = QtWidgets.QSpinBox()
+        self.iq_persist_spin.setRange(1, 50)
+        self.iq_persist_spin.setValue(3)
+        self.iq_persist_spin.setPrefix("Persistence: ")
+        self.iq_persist_spin.setSuffix(" captures")
+        self.iq_persist_spin.valueChanged.connect(
+            lambda n: setattr(self, "iq_persist", deque(self.iq_persist, maxlen=n)))
+        self.iq_ideal_chk = QtWidgets.QCheckBox("Ideal points")
+        self.iq_ideal_chk.setChecked(True)
+        reset = QtWidgets.QPushButton("Reset stats")
+        reset.clicked.connect(self.on_iq_reset)
+        for wdg in (self.iq_persist_spin, self.iq_ideal_chk, reset):
+            bar.addWidget(wdg)
+        bar.addStretch(1)
+        cv.addLayout(bar)
+        self.iq_const = pg.PlotWidget(title="Constellation (software demodulated I/Q)")
+        self.iq_const.setAspectLocked(True)
+        self.iq_const.showGrid(x=True, y=True, alpha=0.25)
+        for ax in ("left", "bottom"):
+            self.iq_const.getAxis(ax).enableAutoSIPrefix(False)
+        self.iq_const.addLine(x=0, pen=pg.mkPen("#3a424c"))
+        self.iq_const.addLine(y=0, pen=pg.mkPen("#3a424c"))
+        self.iq_const.getPlotItem().setMenuEnabled(False)
+        self.iq_pts = pg.ScatterPlotItem(size=3, pen=None, symbol="s", pxMode=True, brush=pg.mkBrush(255, 196, 0, 150))
+        self.iq_ideal = pg.ScatterPlotItem(size=11, symbol="+", pen=pg.mkPen("#ff6b6b", width=2), brush=None)
+        self.iq_const.addItem(self.iq_pts)
+        self.iq_const.addItem(self.iq_ideal)
+        self.iq_const.setRange(xRange=(-1.6, 1.6), yRange=(-1.6, 1.6))
+        cv.addWidget(self.iq_const, 1)
+        left.addWidget(cw)
+        self.iq_spec = pg.PlotWidget(title="Captured spectrum (I/Q data)")
+        self.iq_spec.showGrid(x=True, y=True, alpha=0.25)
+        self.iq_spec.setLabel("bottom", "Offset from center", units="Hz")
+        self.iq_spec.setLabel("left", "dBm / bin")
+        self.iq_spec.getPlotItem().setMenuEnabled(False)
+        self.iq_spec_curve = self.iq_spec.plot([], [], pen=pg.mkPen("#58a6ff", width=1))
+        left.addWidget(self.iq_spec)
+        left.setSizes([620, 220])
+        page.addWidget(left)
+
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(4, 4, 4, 4)
+        colors = {"mer": "#4fd18b", "power": "#58a6ff", "cfe": "#f0883e"}
+        self.iq_tiles = {k: Tile(RESULT_LABEL[k][0], colors[k]) for k in PRIMARY}
+        for t in self.iq_tiles.values():
+            rv.addWidget(t)
+        extra = QtWidgets.QGroupBox("Additional results")
+        ef = QtWidgets.QFormLayout(extra)
+        self.iq_extra = {}
+        for k, _, lbl, _ in RESULTS:
+            if k not in PRIMARY:
+                self.iq_extra[k] = QtWidgets.QLabel("—")
+                self.iq_extra[k].setStyleSheet("font-size:14px;font-weight:600;")
+                ef.addRow(lbl, self.iq_extra[k])
+        self.iq_nsym_lbl = QtWidgets.QLabel("—")
+        ef.addRow("Symbols", self.iq_nsym_lbl)
+        rv.addWidget(extra)
+        self.iq_err = QtWidgets.QLabel("")
+        self.iq_err.setWordWrap(True)
+        self.iq_err.setStyleSheet("color:#ff6b6b;")
+        rv.addWidget(self.iq_err)
+        trow = QtWidgets.QHBoxLayout()
+        trow.addWidget(QtWidgets.QLabel("Trend:"))
+        self.iq_trend_sel = QtWidgets.QComboBox()
+        for k, _, lbl, unit in RESULTS:
+            self.iq_trend_sel.addItem(f"{lbl} [{unit}]", k)
+        self.iq_trend_sel.currentIndexChanged.connect(self._redraw_iq_trend)
+        trow.addWidget(self.iq_trend_sel, 1)
+        rv.addLayout(trow)
+        self.iq_trend_plot = pg.PlotWidget()
+        self.iq_trend_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.iq_trend_plot.setLabel("bottom", "time", units="s")
+        self.iq_trend_curve = self.iq_trend_plot.plot([], [], pen=pg.mkPen("#4fd18b", width=2))
+        rv.addWidget(self.iq_trend_plot, 1)
+        right.setMinimumWidth(270)
+        page.addWidget(right)
+        page.setSizes([820, 380])
+        return page
+
+    def populate_iq(self, s: dict, quiet=False):
+        wi = self.wi
+        for key in ("center", "ref_level", "att_auto", "att", "preamp", "symbol_rate", "alpha", "nsym"):
+            if s.get(key) is not None:
+                wset(wi[key], s[key])
+        if s.get("modulation"):
+            self._set_combo(wi["modulation"], s["modulation"])
+        if s.get("filter"):
+            self._set_combo_data(wi["filter"], s["filter"])
+        if s.get("sps"):
+            self._set_combo(wi["sps"], str(int(s["sps"])))
+        wi["att"].setEnabled(not wi["att_auto"].isChecked())
+        self._iq_info = s.get("info") or {}
+        self._update_iq_derived()
+        self.last_read_iq = self.collect_iq()
+        if not quiet:
+            fs, want = self._iq_info.get("srate"), s.get("symbol_rate", 0) * s.get("sps", 0)
+            if fs and want and not math.isclose(fs, want, rel_tol=1e-6):
+                self.logmsg(f"FSW sample rate {fmt_si(fs, 'Hz', 8)} ≠ symbol rate × sps ({fmt_si(want, 'Hz', 8)}) - "
+                            f"press Apply", "warn")
+
+    def collect_iq(self) -> dict:
+        wi = self.wi
+        return {"center": wi["center"].value(), "ref_level": wi["ref_level"].value(),
+                "att_auto": wi["att_auto"].isChecked(), "att": wi["att"].value(),
+                "preamp": wi["preamp"].isChecked(), "modulation": wi["modulation"].currentText(),
+                "symbol_rate": wi["symbol_rate"].value(), "filter": wi["filter"].currentData(),
+                "alpha": round(wi["alpha"].value(), 6), "sps": int(wi["sps"].currentText()),
+                "nsym": wi["nsym"].value()}
+
+    def _update_iq_derived(self, *_):
+        try:
+            sr = self.wi["symbol_rate"].value()
+            sps = int(self.wi["sps"].currentText())
+            n = self.wi["nsym"].value()
+        except Exception:
+            self.iq_derived.setText("—")
+            return
+        info = getattr(self, "_iq_info", {}) or {}
+        txt = (f"Sample rate {fmt_si(sr * sps, 'Hz', 8)} · {n * sps:,} samples · "
+               f"capture {fmt_si(n / sr if sr else float('nan'), 's', 4)}")
+        if info.get("bw"):
+            txt += f"\nFSW analysis bandwidth {fmt_si(info['bw'], 'Hz', 5)}"
+        self.iq_derived.setText(txt)
+
+    def on_iq_reset(self):
+        for st in self.iq_stats.values():
+            st.reset()
+        self.iq_trend.clear()
+        self.iq_t0 = None
+        self.iq_persist.clear()
+        for k in PRIMARY:
+            self.iq_tiles[k].sub.setText("mean —   min —   max —")
+        self._redraw_iq_trend()
+
+    def _draw_iq(self, r: dict):
+        if self.dash and r["i"].size:
+            self.dash.update_vsa(r)
+        self.iq_err.setText(("Demodulation failed: " + r["error"]) if r.get("error") else "")
+        if r.get("spec_f") is not None:
+            self.iq_spec_curve.setData(r["spec_f"], r["spec_p"])
+        mod = self.wi["modulation"].currentText()
+        if mod != self._iq_mod or not self.iq_ideal_chk.isChecked():
+            self._iq_mod = mod if self.iq_ideal_chk.isChecked() else None
+            p = iq_demod.ideal_points(mod) if self.iq_ideal_chk.isChecked() else np.array([])
+            self.iq_ideal.setData(p.real, p.imag)
+        if r["i"].size:
+            self.iq_persist.append((r["i"], r["q"]))
+        if self.iq_persist:
+            I = np.concatenate([a for a, _ in self.iq_persist])
+            Q = np.concatenate([b for _, b in self.iq_persist])
+            if I.size > MAX_PLOT_POINTS:
+                st = int(math.ceil(I.size / MAX_PLOT_POINTS))
+                I, Q = I[::st], Q[::st]
+            self.iq_pts.setData(x=I, y=Q)
+            m = float(np.percentile(np.maximum(np.abs(I), np.abs(Q)), 99.9)) * 1.15 or 1.0
+            if self._iq_range is None or not 0.85 < m / self._iq_range < 1.15:
+                self._iq_range = m
+                self.iq_const.setRange(xRange=(-m, m), yRange=(-m, m), padding=0)
+        now = r["t"]
+        if self.iq_t0 is None:
+            self.iq_t0 = now
+        vals = {}
+        for k, *_ in RESULTS:
+            v = r.get(k, float("nan"))
+            vals[k] = v
+            if r["i"].size:
+                self.iq_stats[k].add(v)
+        self.iq_trend.append((now - self.iq_t0, vals))
+        for k in PRIMARY:
+            st = self.iq_stats[k]
+            self.iq_tiles[k].value.setText(fmt_result(k, r.get(k)))
+            if st.n:
+                self.iq_tiles[k].sub.setText(f"mean {fmt_result(k, st.mean)}   min {fmt_result(k, st.min)}   "
+                                             f"max {fmt_result(k, st.max)}")
+        for k, lbl in self.iq_extra.items():
+            lbl.setText(fmt_result(k, r.get(k)))
+        self.iq_nsym_lbl.setText(f"{r.get('nsym', 0):,} of {r.get('nsamp', 0):,} samples")
+        self._redraw_iq_trend()
+        if self.csv_writer and r["i"].size:
+            self.csv_writer.writerow([_dt.datetime.fromtimestamp(now).isoformat(timespec="milliseconds")]
+                                     + [f"{r.get(k, float('nan')):.6g}" for k, *_ in RESULTS])
+            self.csv_file.flush()
+
+    def _redraw_iq_trend(self, *_):
+        k = self.iq_trend_sel.currentData()
+        pts = [(t, v[k]) for t, v in self.iq_trend if math.isfinite(v.get(k, float("nan")))]
+        if pts:
+            t, v = zip(*pts)
+            self.iq_trend_curve.setData(np.array(t), np.array(v))
+        else:
+            self.iq_trend_curve.setData([], [])
+
     def app(self) -> str:
-        """FSW application of the Spectrum Analyzer sub-tab: 'vsa' or 'spec'."""
-        return "spec" if self.fsw_tabs.currentIndex() == 1 else "vsa"
+        """FSW application of the Spectrum Analyzer sub-tab: 'vsa', 'spec' or 'iq'."""
+        return ("vsa", "spec", "iq")[self.fsw_tabs.currentIndex()]
 
     def on_tab(self, idx):
         pass
@@ -1963,7 +2436,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_stack.setCurrentIndex(idx)
         self.last_rx = None
         if self.connected:
-            self.logmsg("FSW channel: " + ("Spectrum" if idx == 1 else "VSA (K70)"))
+            self.logmsg("FSW channel: " + ("VSA (K70)", "Spectrum", "I/Q Analyzer (software demod)")[idx])
             self.on_read()              # also switches the FSW to that channel
 
     # ------------------------------------------------------------ helpers
@@ -1977,7 +2450,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connected = on
         for wdg in (self.g_level, self.g_sig, self.g_cap, self.g_dem, self.apply_btn, self.read_btn,
                     self.layout_btn, self.run_btn, self.single_btn, self.g_spec_freq,
-                    self.g_spec_level, self.g_spec_bw, self.spec_apply_btn, self.spec_read_btn):
+                    self.g_spec_level, self.g_spec_bw, self.spec_apply_btn, self.spec_read_btn,
+                    self.g_iq_level, self.g_iq_sig, self.g_iq_cap, self.iq_apply_btn, self.iq_read_btn):
             wdg.setEnabled(on)
         self.connect_btn.setText("Disconnect" if on else "Connect")
         self.ip_edit.setEnabled(not on)
@@ -2127,12 +2601,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.submit("disconnect", job)
 
     def on_read(self):
-        if self.app() == "spec":
+        if self.app() == "iq":
+            self.worker.submit("read_iq", lambda: self.worker.dev.read_iq_settings())
+        elif self.app() == "spec":
             self.worker.submit("read_spec", lambda: self.worker.dev.read_spec_settings())
         else:
             self.worker.submit("read", lambda: self.worker.dev.read_settings())
 
     def on_apply(self):
+        if self.app() == "iq":
+            try:
+                s = self.collect_iq()
+            except ValueError as e:
+                QtWidgets.QMessageBox.warning(self, "Invalid value", f"Could not parse a field: {e}")
+                return
+            prev = dict(self.last_read_iq)
+            self.worker.submit("apply_iq", lambda: self.worker.dev.apply_iq_settings(s, prev))
+            return
         if self.app() == "spec":
             try:
                 s = self.collect_spec()
@@ -2232,12 +2717,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if tag == "connect":
             self._set_connected(True)
             self.connect_btn.setEnabled(True)
-            self.idn_label.setText(f"{result.idn}\nChannel: {result.channel}")
+            k70 = getattr(result, "k70", True)
+            self.idn_label.setText(f"{result.idn}\nChannel: {result.channel}"
+                                   + ("" if k70 else "\nNo FSW-K70: constellation from the I/Q Analyzer"))
             self.logmsg(f"Connected: {result.idn}", "ok")
+            if getattr(result, "options", ""):
+                self.logmsg(f"FSW options: {result.options}")
             self.on_display_update(self.disp_upd.isChecked())
+            if not k70:
+                self.logmsg("FSW-K70 not installed - VSA tab disabled; using I/Q Analyzer + software "
+                            "demodulator (tab 'I/Q (software demod)')", "warn")
+                if self.fsw_tabs.currentIndex() != 1:       # keep Spectrum if it is shown
+                    self.fsw_tabs.blockSignals(True)
+                    self.fsw_tabs.setCurrentIndex(2)        # before disabling VSA (Qt would jump to Spectrum)
+                    self.fsw_tabs.blockSignals(False)
+                    self.settings_stack.setCurrentIndex(2)
+            self.fsw_tabs.setTabEnabled(0, k70)
             self.on_read()
         elif tag == "disconnect":
             self._set_connected(False)
+            self.fsw_tabs.setTabEnabled(0, True)
             self.logmsg("Disconnected")
         elif tag == "read":
             self.populate(result)
@@ -2245,7 +2744,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif tag == "read_spec":
             self.populate_spec(result)
             self.logmsg("Spectrum settings read from FSW", "ok")
-        elif tag in ("apply", "apply_spec"):
+        elif tag == "read_iq":
+            self.populate_iq(result)
+            self.logmsg("I/Q Analyzer settings read from FSW", "ok")
+        elif tag in ("apply", "apply_spec", "apply_iq"):
             cmds, errors, notes = result
             for n in notes:
                 self.logmsg(n, "warn")
@@ -2287,6 +2789,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if r.get("app") == "spec":
             self._draw_spec(r)
             npts = r["f"].size
+        elif r.get("app") == "iq":
+            self._draw_iq(r)
+            npts = r["i"].size
         else:
             self._draw_vsa(r)
             npts = r["i"].size
@@ -2297,7 +2802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_rx = now
         ms = lambda k: r.get(k, 0) * 1e3
         draw = (time.perf_counter() - t_draw) * 1e3
-        what = "results" if r.get("app") != "spec" else "axis"
+        what = {"spec": "axis", "iq": "demod"}.get(r.get("app"), "results")
         if r.get("mode") == "cont":
             detail = (f"Continuous   read: trace {ms('t_trace'):.0f} · {what} {ms('t_res'):.0f}"
                       f" · draw {draw:.0f} ms")
