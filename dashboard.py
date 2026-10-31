@@ -32,6 +32,10 @@ try:
     import telemetry
 except Exception:  # pragma: no cover
     telemetry = None
+try:
+    import frm_protocol
+except Exception:  # pragma: no cover
+    frm_protocol = None
 
 
 def _app_dir() -> str:
@@ -76,7 +80,7 @@ class TelemetryCsv:
             self.f = None
             self.day = None
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
-STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "rs485": "#79c0ff", "wait": "#8a96a3",
+STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "rs485": "#79c0ff", "frm": "#ffa657", "wait": "#8a96a3",
                "fsw": "#58a6ff", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
                "tfg": "#56d4dd", "mxg": "#f778ba"}
 SMW_KEYS = [  # key, label
@@ -198,7 +202,7 @@ class StepDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.step = dict(step)
         op = step["op"]
-        self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "rs485": "RS-485 command",
+        self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "rs485": "RS-485 command", "frm": "FRM command",
                              "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "repeat": "Repeat",
                              "log": "Log message",
                              "tfg": "TFG6806 generator", "mxg": "N5183B signal generator"}.get(op, op))
@@ -376,6 +380,15 @@ class StepDialog(QtWidgets.QDialog):
             f.addRow("Command (RS-485 library)", self.cmd)
             if not cmds:
                 f.addRow(QtWidgets.QLabel("The RS-485 command library is empty - add commands on the RS-485 tab."))
+        elif op == "frm":
+            rs = getattr(host, "rs485", None)
+            src = {"settings": lambda: rs.frm_last.get(3), "pwr_corr": lambda: rs.frm_last.get(5)} if rs else {}
+            self.frm_ed = frm_protocol.make_editor(self, step.get("key", "standby"), step.get("p", {}), src) \
+                if frm_protocol else None
+            if self.frm_ed:
+                f.addRow(self.frm_ed)
+            f.addRow(QtWidgets.QLabel("The step waits for the FRM's answer; no answer or an error code stops "
+                                      "the sequence."))
         elif op == "wait":
             self.ms = QtWidgets.QSpinBox()
             self.ms.setRange(1, 86_400_000)
@@ -486,6 +499,11 @@ class StepDialog(QtWidgets.QDialog):
                 if self.cmd.currentData() is None:
                     raise ValueError("no RS-485 command selected")
                 s["cmd"] = self.cmd.currentData()
+            elif op == "frm":
+                if self.frm_ed is None:
+                    raise ValueError("frm_protocol.py is missing")
+                s["key"], s["p"] = self.frm_ed.get()
+                frm_protocol.command(s["key"], s["p"])          # validates the parameters
             elif op == "wait":
                 s["ms"] = self.ms.value()
             elif op == "fsw_set":
@@ -557,7 +575,7 @@ def _smw_filters():
 #  Dashboard                                                                   #
 # --------------------------------------------------------------------------- #
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "RS-485"]
+    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "RS-485", "FRM"]
 
     def __init__(self, host):
         super().__init__()
@@ -674,13 +692,15 @@ class Dashboard(QtWidgets.QWidget):
         self.list.setToolTip("Double-click to edit a step")
         sv.addWidget(self.list, 1)
         add = QtWidgets.QGridLayout()
-        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ RS-485", "rs485"),
+        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ FRM", "frm"), ("+ RS-485", "rs485"),
                                         ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW set", "fsw_set"),
                                         ("+ Repeat", "repeat"), ("+ Log", "log"),
                                         ("+ TFG", "tfg"), ("+ MXG", "mxg"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
-            b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)"}.get(op, ""))
+            b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)",
+                          "frm": "FRM command (mode, session parameters, read arrays …), waits for the answer",
+                          "rs485": "Raw RS-485 command from the library (no answer check)"}.get(op, ""))
             b.clicked.connect(lambda _, op=op: self.add_step(op))
             add.addWidget(b, k // 5, k % 5)
         add.setSpacing(3)
@@ -885,6 +905,12 @@ class Dashboard(QtWidgets.QWidget):
             ok = bool(c.connected_ports())
             self._set_status("RS-485", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
+            fresh = ok and c.frm_answer_t and time.time() - c.frm_answer_t < 5
+            mode = {0: "Standby", 1: "Session", 2: "Service"}.get(c.frm_mode, "")
+            self._set_status("FRM", "ok" if fresh else ("err" if ok and c.frm_answer_t else "off"),
+                             (f"answers on {c.frm_line}" if fresh else
+                              "no answer for > 5 s" if c.frm_answer_t else "no answer yet") if ok else "not connected",
+                             mode if fresh else "")
         self._refresh_hmp_plot()
 
     def _refresh_hmp(self, b):
@@ -972,14 +998,15 @@ class Dashboard(QtWidgets.QWidget):
             if u == unit:
                 for t, name, _ in arrays:
                     if (unit, t) in self._layouts():
-                        self.w_arr.addItem(f"{name} (0x{t:02X})", t)
+                        self.w_arr.addItem(name, t)
 
     def _fill_fields(self, *_):
         self.w_field.clear()
         key = (self.w_unit.currentData(), self.w_arr.currentData())
         for f in self._layouts().get(key, ([], ""))[0]:
             if f.kind != "res":
-                self.w_field.addItem(f"{f.name}  [byte {f.pos()[0]}]", (f.byte, f.name))
+                off = telemetry.DOC_OFFSET.get(key[1], 0) if hasattr(telemetry, "DOC_OFFSET") else 0
+                self.w_field.addItem(f"{f.name}  [byte {f.pos(off)[0]}]", (f.byte, f.name))
 
     def _find_field(self, unit, t, byte, name):
         for f in self._layouts().get((unit, t), ([], ""))[0]:
@@ -1089,6 +1116,9 @@ class Dashboard(QtWidgets.QWidget):
         if op == "rs485":
             c = next((c for c in self._cmds() if c.uid == s.get("cmd")), None)
             return ("✉ RS-485   " + (f"{c.label()}: {c.data_str()}" if c else "<missing command>"))
+        if op == "frm":
+            d = frm_protocol.describe(s.get("key", ""), s.get("p", {})) if frm_protocol else s.get("key", "")
+            return f"◆ FRM   {d}"
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
         if op == "mxg":
@@ -1176,7 +1206,7 @@ class Dashboard(QtWidgets.QWidget):
                     "smw": {"freq": 2.4e9, "level": -30.0, "rf": True}, "wait": {"ms": 1000},
                     "fsw": {"action": "run"},
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
-                    "log": {"text": ""}, "rs485": {},
+                    "log": {"text": ""}, "rs485": {}, "frm": {"key": "read", "p": {"array": 1}},
                     "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}},
                     "mxg": {"p": {"freq": 1e9, "power": -20.0, "rf": True}}}
         dlg = StepDialog(self, {"op": op, **defaults[op]}, self._cmds(), self.host)
@@ -1434,6 +1464,20 @@ class Dashboard(QtWidgets.QWidget):
                     for ch in (1, 2):
                         w.read(ch)
             return run_in(w.submit, job, "TFG6806")
+        elif op == "frm":
+            c = getattr(h, "rs485", None)
+            if c is None or not c.connected_ports():
+                raise RuntimeError("RS-485 not connected")
+            tok = Token(f"FRM {s.get('key')}", timeout=30)
+
+            def done(r):
+                if not r["ok"]:
+                    tok.error = r["text"]
+                else:
+                    tok.msg = f"FRM {frm_protocol.describe(s['key'], s.get('p', {}))}: {r['text']}"
+                tok.done = True
+            c.frm_send(s["key"], s.get("p", {}), done)
+            return tok
         elif op == "rs485":
             c = getattr(h, "rs485", None)
             cmd = c.store.by_uid(s.get("cmd")) if c else None

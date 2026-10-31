@@ -10,7 +10,8 @@ Origin: repository `stepanalefan/1`, branch `claude/fsw50-gui-freeze-errors-7qq3
 **This branch (`claude/inspiring-tesla-st1o8m`) is the RS-485 / FRM edition**, derived from it:
 removed the Arduino multiplexer scanner, Agilent 34405A multimeter, 1-Wire sensors, slave switch +
 BOS watchdog and the CAN tab (CANable / IXXAT) with BOS / AFAR / UPNG telemetry. Added the RS-485
-tab (MOXA UPort 1450I, `rs485_monitor.py`); Telemetry now has only **FRM** (layout still to come).
+tab (MOXA UPort 1450I, `rs485_monitor.py`) with FRM control per the FRM RS-485 protocol
+(`frm_protocol.py`, protocol edition 3.0); Telemetry now has only **FRM** (state arrays 1–5).
 The original branch is unchanged.
 
 ---
@@ -38,11 +39,14 @@ dashboard.py         Main tab: device status, HMP panel, test sequences, constel
                      HMP output plot, telemetry watch (stored in dashboard.json)
 bench_monitor.py     HMP4040 tab: HmpWorker (HMP4040, power cycling), output plot, daily CSV,
                      auto-detect; visa_manager() (shared VISA ResourceManager)
-rs485_monitor.py     RS-485 tab: up to 4 MOXA ports, one PortWorker thread per port (frames split by
-                     a gap timeout), trace, transmit, command library (rs485_commands.json)
+rs485_monitor.py     RS-485 tab: up to 4 MOXA ports, one PortWorker thread per port (FRM frames by
+                     length + CRC, otherwise gap timeout), trace, FRM master (request -> response,
+                     timeout, main/backup fallback, polling), raw transmit, library
+frm_protocol.py      FRM protocol: CRC-16/MODBUS, build/parse/split frames, command catalogue,
+                     decode_text (trace), FrmSimulator (demo), make_editor() (shared command editor)
 smw_generator.py     R&S SMW200A tab        tfg_generator.py   Suin TFG6806 tab (LAN + USB)
 mxg_generator.py     Keysight N5183B tab    log_viewer.py      Logs tab (all CSV logs on one plot)
-telemetry.py         Field layouts + views, FRM tab (raw frames until the layout is entered),
+telemetry.py         Field layouts of FRM arrays 1–5 + views, FRM tab,
                      array_listeners (Main-tab watch list)
 help_tab.py          Help tab: FAQ / Readme / About from the .md files (own Markdown -> HTML)
 rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
@@ -78,7 +82,7 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 | Suin TFG6806 | 2 ch, 65 MHz. LAN raw socket **5025** or USB-TMC (`USB0::1267::260::<serial>::0::INSTR`). SCPI from the CD's Programmer's Guide (12/2024); amplitude unit forced to Vpp on connect. |
 | R&S HMP4040 | USB virtual COM 9600 Bd, or LAN socket 5025. pymeasure-style SCPI. |
 | MOXA UPort 1450I | USB → 4 × RS-232/422/485, each port its own COM port. RS-485 2W/4W is selected in the MOXA driver per port; the program opens the COM port with pyserial (baud, data bits, parity, stop bits per port, stored in rs485_ports.json). |
-| FRM | On RS-485 port 1 (port name "FRM"). **Command and telemetry layout not received yet** — the user will send it. |
+| FRM | RS-485, 115200 8N1, address 0x79 (answers 0xF9). Main + backup line (two MOXA ports). Protocol: "information-logical conjugation, RS485 interface", edition 3.0 (27.11.2025) — implemented in `frm_protocol.py`. Mode change ≤ 2 s; Session ↔ Service not allowed. |
 
 ---
 
@@ -89,20 +93,26 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * **Logs**: one CSV per day per kind; long format where columns would change (telemetry).
 * **UI**: dark theme; top tab bar spans the window and is pinned left (tabs must not jump);
   Main tab compact (devices in two columns, 5 step buttons per row).
-* **RS-485 framing**: no protocol known yet, so a frame = bytes without a pause longer than the
-  frame gap (default 5 ms). Replace / extend with real framing (start byte, length, CRC) once the
-  FRM layout is known.
+* **RS-485 framing**: a frame is cut as soon as the FRM length field + CRC say it is complete;
+  otherwise by the frame gap (default 2 ms; the protocol's 750 µs is below Windows/USB timing).
+* **FRM master**: one request at a time, response matched by port + function code + address;
+  timeout default 100 ms (protocol 1.75 ms + USB latency); ≥ 4 ms between commands (protocol:
+  2.75 ms silence). No answer → main → backup → main → backup (protocol 4.4).
+* **Telemetry byte numbers** are shown as in the protocol tables (array 1 starts at byte 1, array 2
+  at byte 63, array 5 at byte 1 of Table 6.7); `DOC_OFFSET` in telemetry.py.
 * **Language**: UI and docs in English.
 
 ---
 
 ## 5. Open points / to do
 
-* **FRM command layout** (user will send it): add the commands to the RS-485 library / a proper
-  command builder in `rs485_monitor.py`, the framing (start byte, length, checksum), and the
-  telemetry in `telemetry.py` (`FRM_ARRAYS`, `frm_parse()`, `TelemetryTab.LAYOUTS` with `Field`s).
-  The Main-tab telemetry watch list and the telemetry CSV log then work automatically.
-* RS-485 on the real UPort 1450I not tested yet (developed against the demo port).
+* FRM conversions not in the protocol: temperature codes (array 1 bytes 43–50), voltage codes
+  (57–62), power levels (array 2), PLL/JESD flags (51–56), frequency letter → Hz. Shown as raw codes;
+  add scaling in the `Field`s of telemetry.py when known. Signedness of temperature codes assumed.
+* Unclear in the protocol: SETTINGS array length (command table: 0xE8 = 232 B, but the protocol
+  says data ≤ 32 B); the mode command data (Standby 01, Service 03) differs from the mode codes in
+  array 1 (0 / 1 / 2) — implemented as written.
+* RS-485 on the real UPort 1450I and FRM not tested yet (developed against the simulator).
 * TFG6806: reply formats of queries were not documented — verify read-back on the real unit;
   percentages are sent without "%" (switch to "%" if the unit answers -104); DC/PRBS only by number.
 * N5183B: confirm the less common commands on the device (AM/FM source names, :POWer:OFFSet,

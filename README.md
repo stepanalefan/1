@@ -25,8 +25,8 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | **TFG6806** | Suin TFG6806, both channels: waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
 | **HMP4040** | 4 channels (V, I limit, on/off), master output, power cycling, plot of current / voltage / power, daily log. USB (COM / USB-TMC) or LAN. |
-| **RS-485** | MOXA UPort 1450I, up to 4 ports at once (port 1 = **FRM**): COM port, baud rate, data bits, parity, stop bits per port. Trace of every frame (hex + ASCII, RX / TX), port filter, transmit once or periodically, command library, record to a log file. |
-| **Telemetry** | FRM telemetry. Until the FRM layout is entered: the frames received on the FRM port (raw). |
+| **RS-485** | MOXA UPort 1450I, up to 4 ports at once (FRM main + backup line): COM port, baud rate, data bits, parity, stop bits per port. **FRM control**: all protocol commands (mode, session parameters, read arrays, reset, DAC settings, SETTINGS / power correction, data parking) with answer check, main/backup line fallback, polling. Trace of every frame with decoded FRM header, raw transmit (+CRC), command library, record to a log file. |
+| **Telemetry** | FRM state arrays decoded field by field: 1 (state), 2 (receiver), 3 (SETTINGS), 4 (DAC), 5 (power correction); all FRM frames. |
 | **Logs** | Load the program's CSV logs (HMP, telemetry …) and overlay them on one time plot; filter, steps / points, cursor readout. |
 
 The log window at the bottom shows every action and error of all tabs.
@@ -39,7 +39,8 @@ The log window at the bottom shows every action and error of all tabs.
 |---|---|
 | **+ HMP** | Set HMP4040 channels (V, I, on/off) and/or master output |
 | **+ SMW** | Set SMW200A parameters / RF on-off |
-| **+ RS-485** | Send a command from the RS-485 library (on its port) |
+| **+ FRM** | FRM command (mode, session parameters, read array, reset, DAC …); waits for the answer |
+| **+ RS-485** | Send a raw command from the RS-485 library (on its port), no answer check |
 | **+ Pause** | Wait N ms |
 | **+ FSW** | FSW run / stop / single measurement (waits for the result) / auto level |
 | **+ FSW set** | Set FSW VSA or Spectrum parameters (frequency, symbol rate, modulation …) |
@@ -67,9 +68,24 @@ the HMP4040 tab: `python bench_monitor.py [--demo]`.
 
 ## RS-485 / FRM protocol
 
-The FRM command layout is **not entered yet** — commands in the library are raw hex bytes.
-When the layout is available it goes into `rs485_monitor.py` (commands) and `telemetry.py`
-(`FRM_ARRAYS`, `frm_parse()`, `TelemetryTab.LAYOUTS`).
+`frm_protocol.py` implements the protocol (edition 3.0, 27.11.2025): 115200 8N1, FRM address 0x79.
+
+| | Frame |
+|---|---|
+| Command | `79` · function (2 B, LE) · length · data · CRC-16/MODBUS (LE) |
+| Response | `F9` · function · response code (00 accepted, 02 cannot be executed) · state · length · data · CRC |
+
+| Command | Function | Data |
+|---|---|---|
+| Standby / Service | `01 15` | `01 00` / `03 00` |
+| Session | `01 15` | 14 B = Table 5.1 bytes 25…38 |
+| Reset counters | `0A 15` | 2 B bit mask (Table 6.2) |
+| DAC OG control | `0D 15` | DATA_DAC_OG, 12 bit |
+| DAC encoder 1 / 2 setup | `07 15` / `06 15` | 8 B (Table 6.4) / pll_vco |
+| SETTINGS array | `09 15` | 232 B (Table 6.6) |
+| Power temperature correction | `0F 15` | 47 B (Table 6.7) |
+| Data parking | `F7 37` | `E4 00` |
+| FRM state, array 1…5 | `0B 15` | `0N 00` → answer 62 / 16 / 234 / 16 / 42 B |
 
 ---
 
@@ -80,7 +96,8 @@ When the layout is available it goes into `rs485_monitor.py` (commands) and `tel
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA loader |
-| `rs485_monitor.py` | RS-485 tab (MOXA UPort 1450I), command library |
+| `rs485_monitor.py` | RS-485 tab (MOXA UPort 1450I), FRM control, command library |
+| `frm_protocol.py` | FRM protocol: frames, CRC, commands, decoder, simulator, command editor |
 | `smw_generator.py`, `tfg_generator.py`, `mxg_generator.py` | Generator tabs |
 | `telemetry.py`, `log_viewer.py` | Telemetry and Logs tabs |
 | `help_tab.py` | Help tab (FAQ / Readme / About) |

@@ -36,13 +36,14 @@ python fsw_vsa_monitor.py --ip 192.168.0.10 --protocol socket
 ```
 
 ### Can I try the program without instruments?
-Yes: `--demo`. FSW, generators, HMP4040 and the FRM on RS-485 port 1 are simulated.
+Yes: `--demo`. FSW, generators, HMP4040 and the FRM are simulated (the FRM answers on port 1
+"FRM"; port 2 "FRM-B" is a backup line that does not answer).
 Demo mode never overwrites your saved RS-485 port settings.
 
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -63,7 +64,7 @@ All next to the program / EXE (HMP log: in the log folder chosen on the HMP4040 
 | File | Contents |
 |---|---|
 | `dashboard.json` | Test sequences, telemetry watch list, Main-tab settings |
-| `rs485_ports.json` | RS-485 port setup (name, COM port, baud rate, data bits, parity, stop bits, frame gap) |
+| `rs485_ports.json` | RS-485 port setup (name, COM port, baud rate, data bits, parity, stop bits, frame gap) and FRM settings (main / backup line, address, timeout, poll interval) |
 | `rs485_commands.json` | RS-485 command library |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
@@ -165,27 +166,50 @@ The channel is in current limit (current at the set limit and voltage below the 
   termination / pull-up / pull-down settings.
 * Interface left at RS-232 in the driver → no RS-485 signals at all.
 
-### How are bytes grouped into frames?
-A pause longer than *Frame gap* (default 5 ms) between received bytes ends a frame. Increase it
-if one telegram is split into several rows, decrease it if several telegrams are merged.
+### Which port settings does the FRM need?
+115200 bit/s, 8 data bits, no parity, 1 stop bit (protocol 2, Table 1.1). FRM address **0x79**
+(answers come from 0xF9).
 
-### Command library
-Commands are hex bytes with a key, a name and optionally a fixed port; double-click or *Send*
-transmits them, *→ Library* stores the bytes from the Transmit panel, double-clicking a trace row
-copies it to Transmit. The FRM command layout will be added later — until then commands are typed
-as raw hex.
+### How are bytes grouped into frames?
+A complete FRM frame (its length field says how long it is, and the CRC-16/MODBUS is correct) is
+shown at once. Anything else is cut by a pause longer than *Frame gap* (default 2 ms; the
+protocol ends a frame after 750 µs, which Windows/USB timing cannot resolve).
+
+### FRM control
+RS-485 tab → *FRM control*:
+* **Main line / Backup**: the ports of the FRM's main and backup RS-485 lines. If the FRM does not
+  answer on one line within *Timeout*, the command is repeated main → backup → main → backup
+  (protocol 4.4); the line that answered is used for the next commands.
+* **Standby / Service / Read 1 / Read 2** quick buttons; *Poll arrays 1 + 2 every …* reads the
+  telemetry periodically (*+ 3, 4, 5* also the technological arrays).
+* **Command**: any FRM command with its parameters — mode, **Session** (function, PRM / PRD
+  frequency codes, modulation, speed, index, PRD data, attenuator), read array 1–5, reset counters,
+  DAC OG, DAC encoder 1 / 2, SETTINGS array, power temperature correction, data parking.
+  *Send command* sends it and shows the FRM's answer (accepted / cannot be executed / no response).
+  *Copy from last array 3 / 5* fills the SETTINGS / power correction data from what was read.
+* The trace shows every frame decoded in the **FRM** column (red = error code or CRC error).
+
+### Mode changes are refused ("cannot be executed").
+Session ↔ Service is not allowed (protocol Table 5.4): go through Standby. Resetting the
+"total time" counters works only in Service mode. A mode change can take up to 2 s.
+
+### Command library (raw)
+*Raw transmit / library*: hex bytes with a key, a name and optionally a fixed port; double-click or
+*Send* transmits them without waiting for an answer. *+ CRC-16* appends the checksum to typed bytes.
+*→ Library* on the FRM control page stores a complete built command.
 
 ### Telemetry shows nothing.
-The Telemetry tab listens to the RS-485 port named **FRM**. Until the FRM telemetry layout is
-entered it shows the received frames as raw bytes (*Received frames*). Check that the FRM port
-is connected and frames appear on the RS-485 tab.
+The Telemetry tab decodes the answers to "FRM state" (arrays 1–5) from any RS-485 port. Read an
+array (*Read 1*) or switch on polling. *All frames* lists every FRM frame with its decoded header.
+Temperature, voltage and PLL values are shown as raw codes — the protocol gives no conversion.
 
 ---
 
 ## 7. Main tab and test sequences
 
 ### Which steps can a sequence contain?
-HMP outputs, SMW, RS-485 command (from the RS-485 library), Pause, FSW (run / stop / single /
+HMP outputs, SMW, **FRM** command (any command of the FRM control page; waits for the answer,
+an error code or no answer stops the sequence), raw RS-485 command (from the library), Pause, FSW (run / stop / single /
 auto level), FSW settings, Repeat … End, Log message, **TFG**
 (channel(s), any parameters, trigger / align / recall), **MXG** (any parameters, single sweep /
 trigger / recall / preset).
