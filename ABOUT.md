@@ -12,8 +12,8 @@
 | Developed with | Claude Code (Anthropic) |
 
 ## What it does
-Controls and monitors the test bench: R&S FSW spectrum analyzer, R&S SMW200A, Keysight N5183B and
-Suin TFG6806 generators, R&S HMP4040 power supply, RS-485 communication with the FRM through a
+Controls and monitors the test bench: R&S FSW spectrum analyzer (constellation without K70 via
+software demodulation), R&S SMW200A and Keysight N5183B generators, R&S HMP4040 power supply, RS-485 communication with the FRM through a
 MOXA UPort 1450I with telemetry decoding, test sequences and daily CSV logs.
 
 ## Built with

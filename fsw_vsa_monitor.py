@@ -27,7 +27,7 @@ Features
 
 * Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / RS-485 /
   FSW, constellation + MER/Power/CFE, HMP output plot, telemetry watch list),
-  Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), TFG6806 (tfg_generator.py),
+  Spectrum Analyzer (VSA + Spectrum + I/Q software demod), SMW200A (smw_generator.py),
   N5183B (mxg_generator.py), HMP4040, RS-485, Telemetry (FRM), Logs, Help.
 * HMP4040 tab (bench_monitor.py, keep it in the same folder): HMP4040 control
   (USB / LAN) with timed power cycling, output plot and daily CSV log.
@@ -224,11 +224,6 @@ try:  # SMW200A generator tab
 except Exception:  # pragma: no cover
     smw_generator = None
 
-try:  # Suin TFG6806 function generator tab
-    import tfg_generator
-except Exception:  # pragma: no cover
-    tfg_generator = None
-
 try:  # Keysight N5183B MXG signal generator tab
     import mxg_generator
 except Exception:  # pragma: no cover
@@ -422,6 +417,43 @@ def iq_result(x, fs, p: dict, mode: str, timing: dict) -> dict:
              t_res=time.perf_counter() - t0, **timing)
     r.setdefault("sweep_time", r.get("t_acq", 0.0) + r.get("t_trace", 0.0) + r["t_res"])
     return r
+
+
+class FswCsv:
+    """fsw_log_YYYY-MM-DD.csv: one row per interval with the latest FSW result (VSA, I/Q or Spectrum)."""
+    HEADER = ["Time", "App", "Center_Hz", "Modulation", "SymbolRate_Hz", "MER_dB", "Power_dBm", "CFE_Hz",
+              "EVM_pct", "SRErr_ppm", "IQOffset_dB", "PeakFreq_Hz", "PeakLevel_dBm", "ChannelPower_dBm"]
+
+    def __init__(self, folder: str):
+        self.folder, self.f, self.day = folder, None, None
+
+    def write(self, t: float, row: dict):
+        day = time.strftime("%Y-%m-%d", time.localtime(t))
+        if day != self.day:
+            self.close()
+            path = os.path.join(self.folder, f"fsw_log_{day}.csv")
+            new = not os.path.isfile(path)
+            self.f = open(path, "a", newline="", encoding="utf-8")
+            self.w = csv.writer(self.f)
+            if new:
+                self.w.writerow(self.HEADER)
+            self.day = day
+
+        def fmt(v):
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                return v
+            return "" if not math.isfinite(v) else f"{v:.10g}"
+        stamp = time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d}"
+        self.w.writerow([stamp] + [fmt(row.get(k)) for k in self.HEADER[1:]])
+        self.f.flush()
+
+    def close(self):
+        if self.f:
+            self.f.close()
+            self.f = None
+            self.day = None
 
 
 class _CmdDiff:
@@ -1493,6 +1525,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.iq_stats = {k: RunningStat() for k, *_ in RESULTS}
         self.iq_trend: deque = deque(maxlen=600)
         self.iq_t0 = None
+        self.fsw_csv: FswCsv | None = None
+        self._fsw_next_log = 0.0
+        self._spec_vals: dict = {}
         self._iq_range = None
         self._iq_mod = None
 
@@ -1515,6 +1550,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.proto.setCurrentIndex({"hislip": 0, "vxi11": 1, "socket": 2}[args.protocol])
         if self.bench:
             self.bench.log.connect(self.logmsg)
+            self.bench.folder_listeners.append(lambda: self._on_fsw_log_toggled())
         else:
             self.logmsg(f"HMP4040 tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
@@ -1533,9 +1569,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.smw:
                 self.smw.proto.setCurrentIndex(3)
                 QtCore.QTimer.singleShot(400, self.smw.on_connect)
-            if self.tfg:
-                self.tfg.demo.setChecked(True)
-                QtCore.QTimer.singleShot(500, self.tfg.on_connect)
             if self.mxg:
                 self.mxg.demo.setChecked(True)
                 QtCore.QTimer.singleShot(600, self.mxg.on_connect)
@@ -1589,6 +1622,21 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.connect_btn)
         f.addRow(self.idn_label)
         f.addRow(self.disp_upd)
+        lrow = QtWidgets.QHBoxLayout()
+        self.fsw_log_chk = QtWidgets.QCheckBox("Daily FSW log, every")
+        self.fsw_log_chk.setToolTip("fsw_log_YYYY-MM-DD.csv in the log folder (HMP4040 tab): MER, power, CFE,\n"
+                                    "EVM … (VSA / I/Q) or peak and channel power (Spectrum) while measuring")
+        self.fsw_log_chk.setChecked(True)
+        self.fsw_log_chk.toggled.connect(self._on_fsw_log_toggled)
+        self.fsw_log_int = QtWidgets.QDoubleSpinBox()
+        self.fsw_log_int.setRange(0.1, 3600)
+        self.fsw_log_int.setDecimals(1)
+        self.fsw_log_int.setValue(1.0)
+        self.fsw_log_int.setSuffix(" s")
+        lrow.addWidget(self.fsw_log_chk)
+        lrow.addWidget(self.fsw_log_int)
+        lrow.addStretch(1)
+        f.addRow(lrow)
         conn_group = g
 
         # frequency & level
@@ -1876,9 +1924,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
         if self.smw:
             self.smw.log.connect(self.logmsg)
-        self.tfg = tfg_generator.TfgTab() if tfg_generator else None
-        if self.tfg:
-            self.tfg.log.connect(self.logmsg)
         self.mxg = mxg_generator.MxgTab() if mxg_generator else None
         if self.mxg:
             self.mxg.log.connect(self.logmsg)
@@ -1889,8 +1934,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(split, "Spectrum Analyzer")
         if self.smw:
             self.tabs.addTab(page(self.smw), "SMW200A")
-        if self.tfg:
-            self.tabs.addTab(self.tfg, "TFG6806")
         if self.mxg:
             self.tabs.addTab(self.mxg, "N5183B")
         if self.bench:
@@ -2113,6 +2156,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not np.isfinite(p).any():
             return
         k = int(np.nanargmax(p))
+        self._spec_vals = {"peak_f": float(f[k]), "peak_p": float(p[k]), "chp": None}
         self.spec_peak.setData([f[k]], [p[k]])
         self.spec_tiles["peak_f"].value.setText(fmt_si(f[k], "Hz", 9))
         self.spec_tiles["peak_p"].value.setText(f"{p[k]:.2f} dBm")
@@ -2133,6 +2177,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 df = (f[-1] - f[0]) / (f.size - 1)
                 mw = np.sum(10 ** (p[sel] / 10)) * df / (1.065 * rbw)
                 self.spec_tiles["chp"].value.setText(f"{10 * math.log10(mw):.2f} dBm")
+                self._spec_vals["chp"] = 10 * math.log10(mw)
                 self.spec_tiles["chp"].sub.setText(f"in {fmt_si(cbw, 'Hz', 6)}  (RMS detector recommended)")
         else:
             self.spec_chan.hide()
@@ -2424,6 +2469,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self.iq_trend_curve.setData(np.array(t), np.array(v))
         else:
             self.iq_trend_curve.setData([], [])
+
+    # ------------------------------------------------------------ FSW log
+    def _log_folder(self) -> str:
+        b = getattr(self, "bench", None)
+        if b is not None:
+            return b.log_folder
+        return os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+
+    def _on_fsw_log_toggled(self, on=None):
+        if self.fsw_csv:
+            self.fsw_csv.close()
+        on = self.fsw_log_chk.isChecked() if on is None else on
+        self.fsw_csv = FswCsv(self._log_folder()) if on else None
+        self._fsw_next_log = 0.0
+
+    def _fsw_log(self, r: dict):
+        if self.fsw_log_chk.isChecked() and self.fsw_csv is None:
+            self._on_fsw_log_toggled(True)
+        if not self.fsw_csv or r["t"] < self._fsw_next_log:
+            return
+        self._fsw_next_log = r["t"] + self.fsw_log_int.value()
+        app = r.get("app", "vsa")
+        if app == "spec":
+            f = r["f"]
+            row = {"App": "Spectrum", "Center_Hz": 0.5 * (f[0] + f[-1]) if f.size else None,
+                   "PeakFreq_Hz": self._spec_vals.get("peak_f"), "PeakLevel_dBm": self._spec_vals.get("peak_p"),
+                   "ChannelPower_dBm": self._spec_vals.get("chp")}
+        else:
+            src = self.last_read_iq if app == "iq" else self.last_read
+            row = {"App": "I/Q" if app == "iq" else "VSA", "Center_Hz": src.get("center"),
+                   "Modulation": src.get("modulation"), "SymbolRate_Hz": src.get("symbol_rate")}
+            for key, col in (("mer", "MER_dB"), ("power", "Power_dBm"), ("cfe", "CFE_Hz"), ("evm", "EVM_pct"),
+                             ("srerr", "SRErr_ppm"), ("iqoff", "IQOffset_dB")):
+                v = r.get(key)
+                row[col] = float(v) if v is not None else None
+        try:
+            self.fsw_csv.write(r["t"], row)
+        except OSError as e:
+            self.logmsg(f"FSW log stopped: {e}", "err")
+            self.fsw_log_chk.setChecked(False)
 
     def app(self) -> str:
         """FSW application of the Spectrum Analyzer sub-tab: 'vsa', 'spec' or 'iq'."""
@@ -2795,6 +2880,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._draw_vsa(r)
             npts = r["i"].size
+        self._fsw_log(r)
         if self.last_rx is not None:
             dt = now - self.last_rx
             if dt > 0:
@@ -2877,8 +2963,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rs485.shutdown()           # stops port workers, periodic send, recording
         if self.smw:
             self.smw.shutdown()
-        if self.tfg:
-            self.tfg.shutdown()
         if self.mxg:
             self.mxg.shutdown()
         self.worker.running = False
@@ -2892,6 +2976,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         if self.csv_file:
             self.csv_file.close()
+        if self.fsw_csv:
+            self.fsw_csv.close()
         ev.accept()
 
 

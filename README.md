@@ -20,14 +20,13 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | Tab | What it does |
 |---|---|
 | **Main** | Overview: device status (green = connected), HMP4040 outputs, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, HMP4040 output plot, telemetry watch list. |
-| **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (only if FSW-K70 is installed), **Spectrum**, and **I/Q (software demod)**: the FSW I/Q Analyzer captures raw I/Q and the program demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM): constellation, MER, EVM, power, carrier frequency error, symbol rate error, I/Q offset, trend, captured spectrum. Without K70 the I/Q tab is selected automatically. Run continuously or single captures; only changed settings are sent. |
+| **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (only if FSW-K70 is installed), **Spectrum**, and **I/Q (software demod)**: the FSW I/Q Analyzer captures raw I/Q and the program demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM): constellation, MER, EVM, power, carrier frequency error, symbol rate error, I/Q offset, trend, captured spectrum. Without K70 the I/Q tab is selected automatically. Run continuously or single captures; only changed settings are sent. Daily FSW log `fsw_log_YYYY-MM-DD.csv`. |
 | **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
-| **TFG6806** | Suin TFG6806, both channels: waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
 | **HMP4040** | 4 channels (V, I limit, on/off), master output, power cycling, plot of current / voltage / power, daily log. USB (COM / USB-TMC) or LAN. |
 | **RS-485** | MOXA UPort 1450I, up to 4 ports at once (FRM main + backup line): COM port, baud rate, data bits, parity, stop bits per port. **FRM control**: all protocol commands (mode, session parameters, read arrays, reset, DAC settings, SETTINGS / power correction, data parking) with answer check, main/backup line fallback, polling. Trace of every frame with decoded FRM header, raw transmit (+CRC), command library, record to a log file. |
 | **Telemetry** | FRM state arrays decoded field by field: 1 (state), 2 (receiver), 3 (SETTINGS), 4 (DAC), 5 (power correction); all FRM frames. |
-| **Logs** | Load the program's CSV logs (HMP, telemetry …) and overlay them on one time plot; filter, steps / points, cursor readout. |
+| **Logs** | Load the program's CSV logs (FSW, HMP, telemetry …) and overlay them on one time plot; filter, steps / points, cursor readout. |
 
 The log window at the bottom shows every action and error of all tabs.
 
@@ -46,7 +45,6 @@ The log window at the bottom shows every action and error of all tabs.
 | **+ FSW set** | Set FSW VSA or Spectrum parameters (frequency, symbol rate, modulation …) |
 | **+ Repeat** | Repeat the following steps N times (0 = forever) up to *End repeat* |
 | **+ Log** | Write a message to the log |
-| **+ TFG** | TFG6806 CH1 / CH2 / both: any ticked parameters, then trigger / align / recall |
 | **+ MXG** | N5183B: any ticked parameters; recall / preset first, single sweep / trigger after |
 
 ▲ ▼ move, *Copy*, *Edit* (or double-click), *Delete*; *Run sequence*, *Loop*. A step that fails
@@ -99,11 +97,11 @@ the HMP4040 tab: `python bench_monitor.py [--demo]`.
 | `bench_monitor.py` | HMP4040 tab, VISA loader |
 | `rs485_monitor.py` | RS-485 tab (MOXA UPort 1450I), FRM control, command library |
 | `frm_protocol.py` | FRM protocol: frames, CRC, commands, decoder, simulator, command editor |
-| `smw_generator.py`, `tfg_generator.py`, `mxg_generator.py` | Generator tabs |
+| `smw_generator.py`, `mxg_generator.py` | Generator tabs |
 | `telemetry.py`, `log_viewer.py` | Telemetry and Logs tabs |
 | `help_tab.py` | Help tab (FAQ / Readme / About) |
 | `build_exe.bat`, `rthook_visa.py` | Build `dist\FSW_Monitor.exe` (the hook opens VISA before Qt in the EXE) |
 | `FAQ.md` | Installation, troubleshooting, wiring |
 
 Settings (`dashboard.json`, `rs485_ports.json`, `rs485_commands.json`) and daily logs
-(`hmp_log_YYYY-MM-DD.csv`, `telemetry_log_YYYY-MM-DD.csv`, `rs485_log_*.log`) are kept next to the program.
+(`fsw_log_YYYY-MM-DD.csv`, `hmp_log_YYYY-MM-DD.csv`, `telemetry_log_YYYY-MM-DD.csv`, `rs485_log_*.log`) are kept next to the program.

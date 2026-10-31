@@ -9,3 +9,4 @@ dist/
 *.spec
 rs485_log_*.log
 rs485_ports.json
+fsw_log_*.csv

@@ -8,7 +8,7 @@ Origin: repository `stepanalefan/1`, branch `claude/fsw50-gui-freeze-errors-7qq3
 (~55 commits; every commit message explains the change and its reason — `git log` is worth reading).
 
 **This branch (`claude/inspiring-tesla-st1o8m`) is the RS-485 / FRM edition**, derived from it:
-removed the Arduino multiplexer scanner, Agilent 34405A multimeter, 1-Wire sensors, slave switch +
+removed the Suin TFG6806 generator, the Arduino multiplexer scanner, Agilent 34405A multimeter, 1-Wire sensors, slave switch +
 BOS watchdog and the CAN tab (CANable / IXXAT) with BOS / AFAR / UPNG telemetry. Added the RS-485
 tab (MOXA UPort 1450I, `rs485_monitor.py`) with FRM control per the FRM RS-485 protocol
 (`frm_protocol.py`, protocol edition 3.0); Telemetry now has only **FRM** (state arrays 1–5).
@@ -47,7 +47,7 @@ rs485_monitor.py     RS-485 tab: up to 4 MOXA ports, one PortWorker thread per p
                      timeout, main/backup fallback, polling), raw transmit, library
 frm_protocol.py      FRM protocol: CRC-16/MODBUS, build/parse/split frames, command catalogue,
                      decode_text (trace), FrmSimulator (demo), make_editor() (shared command editor)
-smw_generator.py     R&S SMW200A tab        tfg_generator.py   Suin TFG6806 tab (LAN + USB)
+smw_generator.py     R&S SMW200A tab
 mxg_generator.py     Keysight N5183B tab    log_viewer.py      Logs tab (all CSV logs on one plot)
 telemetry.py         Field layouts of FRM arrays 1–5 + views, FRM tab,
                      array_listeners (Main-tab watch list)
@@ -82,7 +82,6 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 | R&S FSW-50 | LAN, HiSLIP/VXI-11/socket. **This bench's FSW has no K70**: constellation via the I/Q Analyzer (`INST:CRE IQ`, `TRAC:IQ:SRAT/RLEN`, `TRAC:IQ:DATA:FORM IQP`, `INIT:IMM;*OPC`, `TRAC:IQ:DATA:MEM?`, FORM REAL,32) + `iq_demod.py`. K70 detected from `*OPT?` (or by trying `INST:CRE DDEM`). SCPI verified against R&S's RsFsw driver (6.31). |
 | R&S SMW200A | LAN. SCPI verified against RsSmw. |
 | Keysight N5183B | LAN or USB (VISA). X-Series SCPI; *OPT? gates AM/FM/ΦM (UNT) and pulse (UNU/UNW). Full SCPI PDF could not be downloaded — commands validated through SYSTem:ERRor? on the device. |
-| Suin TFG6806 | 2 ch, 65 MHz. LAN raw socket **5025** or USB-TMC (`USB0::1267::260::<serial>::0::INSTR`). SCPI from the CD's Programmer's Guide (12/2024); amplitude unit forced to Vpp on connect. |
 | R&S HMP4040 | USB virtual COM 9600 Bd, or LAN socket 5025. pymeasure-style SCPI. |
 | MOXA UPort 1450I | USB → 4 × RS-232/422/485, each port its own COM port. RS-485 2W/4W is selected in the MOXA driver per port; the program opens the COM port with pyserial (baud, data bits, parity, stop bits per port, stored in rs485_ports.json). |
 | FRM | RS-485, 115200 8N1, address 0x79 (answers 0xF9). Main + backup line (two MOXA ports). Protocol: "information-logical conjugation, RS485 interface", edition 3.0 (27.11.2025) — implemented in `frm_protocol.py`. Mode change ≤ 2 s; Session ↔ Service not allowed. |
@@ -93,7 +92,8 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 
 * **FSW continuous mode** (`INIT:CONT ON`) for live view, single synced sweeps (`INIT:IMM;*OPC`)
   for sequences; burst/pattern search only sent when applicable (otherwise "Function not available").
-* **Logs**: one CSV per day per kind; long format where columns would change (telemetry).
+* **Logs**: one CSV per day per kind (fsw, hmp, telemetry; FSW log written from the main window
+  every N s, folder = HMP4040 tab's log folder); long format where columns would change (telemetry).
 * **UI**: dark theme; top tab bar spans the window and is pinned left (tabs must not jump);
   Main tab compact (devices in two columns, 5 step buttons per row).
 * **RS-485 framing**: a frame is cut as soon as the FRM length field + CRC say it is complete;
@@ -124,8 +124,6 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
   says data ≤ 32 B); the mode command data (Standby 01, Service 03) differs from the mode codes in
   array 1 (0 / 1 / 2) — implemented as written.
 * RS-485 on the real UPort 1450I and FRM not tested yet (developed against the simulator).
-* TFG6806: reply formats of queries were not documented — verify read-back on the real unit;
-  percentages are sent without "%" (switch to "%" if the unit answers -104); DC/PRBS only by number.
 * N5183B: confirm the less common commands on the device (AM/FM source names, :POWer:OFFSet,
   :LFOutput:AMPLitude) — errors appear in the log if not accepted.
 * `ABOUT.md` organization / author fields are placeholders.
@@ -170,7 +168,7 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
   `QT_QPA_PLATFORM=offscreen`, drive the GUI with QTimer.singleShot, `w.grab().save(...)` for
   screenshots.
 * Fake instruments for driver tests: a small threaded TCP server answering SCPI with an error queue
-  (see git history of tfg_generator / mxg_generator commits for examples).
+  (see git history of the mxg_generator commits for examples).
 * New device tab: copy the structure of `mxg_generator.py` (driver + demo + worker + Field table +
   tab), add the optional import + tab + shutdown in `fsw_vsa_monitor.py`, a device row and a step
   type in `dashboard.py`, `--hidden-import` in `build_exe.bat`, a line in README/FAQ.

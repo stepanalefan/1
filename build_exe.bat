@@ -29,7 +29,7 @@ for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! -
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --name FSW_Monitor %ICONARGS% ^
   --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry ^
-  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab ^
+  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import mxg_generator --hidden-import help_tab ^
   --hidden-import pyvisa_py --hidden-import serial.tools.list_ports ^
   --collect-submodules pyvisa --collect-submodules pyvisa_py --hidden-import pyvisa.ctwrapper ^
   --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib ^

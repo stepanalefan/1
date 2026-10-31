@@ -1,7 +1,7 @@
 # FSW Monitor — FAQ
 
 Bench program for controlling and monitoring the test setup: R&S FSW spectrum analyzer,
-R&S SMW200A, Keysight N5183B and Suin TFG6806 generators, R&S HMP4040 power supply,
+R&S SMW200A and Keysight N5183B generators, R&S HMP4040 power supply,
 RS-485 communication with the FRM through a MOXA UPort 1450I (4 ports) with telemetry
 decoding, test sequences and CSV logging.
 
@@ -18,10 +18,10 @@ Optional: `pip install pyinstaller` (to build the EXE).
 ### What else must be installed on the PC?
 | For | Install |
 |---|---|
-| Instruments over **USB** (TFG6806 / N5183B / HMP4040 via USB-TMC) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
+| Instruments over **USB** (N5183B / HMP4040 via USB-TMC) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
 | MOXA UPort 1450I (RS-485) | **MOXA UPort 1200/1400/1600 Windows driver** (moxa.com). Then set each port to **RS-485 2W** (see section 5). |
 
-Instruments on **LAN** (FSW, SMW200A, N5183B, TFG6806, HMP4040) need no driver.
+Instruments on **LAN** (FSW, SMW200A, N5183B, HMP4040) need no driver.
 
 ### How do I start the program?
 Run **`fsw_vsa_monitor.py`** (in PyCharm: right-click → Run). All other `.py` files must be in
@@ -43,7 +43,7 @@ Demo mode never overwrites your saved RS-485 port settings.
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -66,6 +66,7 @@ All next to the program / EXE (HMP log: in the log folder chosen on the HMP4040 
 | `dashboard.json` | Test sequences, telemetry watch list, Main-tab settings |
 | `rs485_ports.json` | RS-485 port setup (name, COM port, baud rate, data bits, parity, stop bits, frame gap) and FRM settings (main / backup line, address, timeout, poll interval) |
 | `rs485_commands.json` | RS-485 command library |
+| `fsw_log_YYYY-MM-DD.csv` | FSW results: app (VSA / I/Q / Spectrum), center, modulation, symbol rate, MER, power, CFE, EVM, symbol rate error, I/Q offset, peak and channel power (Spectrum). Every *N* s while measuring (*Daily FSW log* in the FSW connection box). |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
 | `rs485_log_*.log` | RS-485 recording: one line per frame (time, port, RX/TX, hex bytes) |
@@ -109,7 +110,7 @@ If the error still appears, check the K70 settings on the FSW itself.
 
 ---
 
-## 4. Generators (SMW200A, N5183B, TFG6806)
+## 4. Generators (SMW200A, N5183B)
 
 ### General behaviour
 * **Apply** sends only the values that differ from the instrument; output/RF switches are sent last.
@@ -122,21 +123,6 @@ LAN (HiSLIP / VXI-11 / socket 5025) with the IP address, or *USB / GPIB / VISA a
 instruments (★ = Keysight). After connecting, the status shows the frequency/power range and
 installed options. Sections greyed out = option not installed (AM/FM/ΦM need **UNT**, pulse needs
 **UNU/UNW**).
-
-### TFG6806: how do I connect?
-* **LAN:** IP from the generator's Utility → LAN menu, port **5025**.
-* **USB:** rear **USB Device** port (the front port is only for flash drives), Interface = USB,
-  press ⟳ and pick the ★ entry. Do **not** type the example address from the manual
-  (`…CH372USB…`) — every unit has its own.
-* Connecting sets the amplitude unit to **Vpp** on both channels.
-
-### TFG6806: `VI_ERROR_RSRC_NFOUND`
-The VISA address does not exist. Press ⟳ and pick the listed device; if nothing is listed, VISA
-does not see the generator (cable, power, Keysight IO Libraries — it must appear in Keysight
-Connection Expert).
-
-### DC or PRBS waveform on the TFG6806?
-Select *Built-in / arb #* and enter the waveform number (the manual does not list the numbers).
 
 ---
 
@@ -228,8 +214,8 @@ Temperature, voltage and PLL values are shown as raw codes — the protocol give
 ### Which steps can a sequence contain?
 HMP outputs, SMW, **FRM** command (any command of the FRM control page; waits for the answer,
 an error code or no answer stops the sequence), raw RS-485 command (from the library), Pause, FSW (run / stop / single /
-auto level), FSW settings, Repeat … End, Log message, **TFG**
-(channel(s), any parameters, trigger / align / recall), **MXG** (any parameters, single sweep /
+auto level), FSW settings, Repeat … End, Log message,
+**MXG** (any parameters, single sweep /
 trigger / recall / preset).
 
 ### What happens when a step fails?
