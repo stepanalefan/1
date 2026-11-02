@@ -1488,7 +1488,7 @@ class RunningStat:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
-        self.setWindowTitle("FSW VSA Monitor (K70) + Bench")
+        self.setWindowTitle("KTR RAD TEST")
         self.resize(1560, 940)
         self.connected = False
         self.supported: set[str] = set()
@@ -1932,16 +1932,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.mxg:
             self.tabs.addTab(self.mxg, "N5183B")
         if self.bench:
-            bench_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-            bscroll = QtWidgets.QScrollArea()
-            bscroll.setWidget(self.bench.settings_panel)
-            bscroll.setWidgetResizable(True)
-            bscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-            bscroll.setMinimumWidth(380)
-            bench_split.addWidget(bscroll)
-            bench_split.addWidget(page(self.bench.page))
-            bench_split.setSizes([390, 1170])
-            self.tabs.addTab(bench_split, "Bench: 176 ch + HMP4040")
+            for panel, pg_, title in ((self.bench.hmp_settings_panel, self.bench.hmp_page, "HMP4040"),
+                                      (self.bench.volt_settings_panel, self.bench.volt_page, "Voltage Control")):
+                b_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+                bscroll = QtWidgets.QScrollArea()
+                bscroll.setWidget(panel)
+                bscroll.setWidgetResizable(True)
+                bscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+                bscroll.setMinimumWidth(380)
+                b_split.addWidget(bscroll)
+                b_split.addWidget(page(pg_))
+                b_split.setSizes([390, 1170])
+                self.tabs.addTab(b_split, title)
         if self.n67:
             n_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
             nscroll = QtWidgets.QScrollArea()
@@ -2962,7 +2964,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 # --------------------------------------------------------------------------- #
-APP_ID = "FSW.VSAMonitor.Bench.1"      # any unique string: Company.Product.SubProduct.Version
+APP_ID = "KTR.RadTest.1"      # any unique string: Company.Product.SubProduct.Version
 ICON_FILE = "app.ico"
 
 
@@ -3008,7 +3010,7 @@ def main():
     if not icon.isNull():
         # System tray (notification area) icon - Windows shows nothing there by default.
         win.tray = QtWidgets.QSystemTrayIcon(icon, win)
-        win.tray.setToolTip("FSW VSA Monitor + Bench")
+        win.tray.setToolTip("KTR RAD TEST")
         win.tray.activated.connect(lambda *_: (win.showNormal(), win.raise_(), win.activateWindow()))
         win.tray.show()
     win.show()

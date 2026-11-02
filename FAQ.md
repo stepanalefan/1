@@ -1,4 +1,4 @@
-# FSW Monitor — FAQ
+# KTR RAD TEST — FAQ
 
 Bench program for controlling and monitoring the test setup: R&S FSW spectrum analyzer,
 R&S SMW200A, Keysight N5183B and Suin TFG6806 generators, R&S HMP4040 power supply,
@@ -45,23 +45,23 @@ Yes: `--demo`. FSW, generators, scanner, HMP4040, 1-Wire sensors, switch and thr
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name KTR_RAD_TEST --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
-Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
+Result: `dist\KTR_RAD_TEST.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
 
 ### The EXE closes immediately / shows nothing.
 Build once **without** `--windowed` and start it from a terminal — the error is printed there.
 
 ### The EXE starts slowly.
-`--onefile` unpacks itself on every start. Use `--onedir` and copy the whole `dist\FSW_Monitor`
+`--onefile` unpacks itself on every start. Use `--onedir` and copy the whole `dist\KTR_RAD_TEST`
 folder instead.
 
 ---
 
 ## 2. Files the program creates
 
-All next to the program / EXE (logs: in the log folder chosen on the Bench tab, default the same).
+All next to the program / EXE (logs: in the log folder chosen on the Voltage Control tab, default the same).
 
 | File | Contents |
 |---|---|
@@ -139,7 +139,7 @@ Select *Built-in / arb #* and enter the waveform number (the manual does not lis
 
 ---
 
-## 5. Bench: voltage scanner, multimeter, HMP4040
+## 5. Voltage Control (scanner, multimeter) and HMP4040
 
 ### Do the Arduino and the multimeter have to be connected together?
 No — each has its own Connect button. 1-Wire and the switch need only the Arduino; the voltage
@@ -172,7 +172,7 @@ USB: the COM port (virtual COM, 9600 Bd), e.g. `COM7`. LAN: the IP (`192.168.1.2
 `192.168.1.20:5025`). A VISA string also works.
 
 ### Power cycling
-Bench tab → *Power cycling*: ON time, OFF time, total duration. It switches the master output.
+HMP4040 tab → *Power cycling*: ON time, OFF time, total duration. It switches the master output.
 If the program is closed while cycling runs, it asks first and then switches the master output OFF.
 
 ### "CC" on the Main tab
@@ -229,7 +229,7 @@ Sketches: `arduino/sketch_sep24a` on the **master**, `arduino/slave_onewire_swit
 **slave** (needs the OneWire library). Link speed 19200 on both sides.
 
 ### Switch or 1-Wire does not work — where is the problem?
-Bench tab → Arduino connected → **Test slave link**. It checks PC → master → slave → 1-Wire step
+Voltage Control tab → Arduino connected → **Test slave link**. It checks PC → master → slave → 1-Wire step
 by step and tells where it stops (wrong COM port, old master sketch, slave not answering =
 wiring/GND/baud, no 1-Wire device, sensors and their readings). It does not switch any output.
 

@@ -2,7 +2,7 @@
 1-Wire temperature sensors (DS18B20 / DS18S20 / DS1822) on the slave Arduino,
 three buses on pins A3, A4, A5.
 
-The slave is reached through the master Arduino on the Bench tab (one USB link); see the sketches:
+The slave is reached through the master Arduino on the Voltage Control tab (one USB link); see the sketches:
   OW:CONV  -> starts a conversion on all buses, strong pull-up for parasitic power
   OW:READ  -> one line per sensor "OW:DEV:<bus>:<ROM 8 bytes>:<scratchpad 9 bytes>:<1 ext / 0 parasitic>",
               then "OW:END:<n>"  (lines without <bus> from the old single-bus sketch are accepted too)
@@ -195,7 +195,7 @@ class TempTab(QtWidgets.QWidget):
             top.addWidget(w)
         top.addStretch(1)
         v.addLayout(top)
-        self.status = QtWidgets.QLabel("Connect the Arduino on the Bench tab (sensors on the slave Arduino, A3/A4/A5).")
+        self.status = QtWidgets.QLabel("Connect the Arduino on the Voltage Control tab (sensors on the slave Arduino, A3/A4/A5).")
         self.status.setStyleSheet(f"color:{C_DIM};")
         v.addWidget(self.status)
 
@@ -214,7 +214,7 @@ class TempTab(QtWidgets.QWidget):
         self.table.itemChanged.connect(self._on_item_changed)
         v.addWidget(self.table, 1)
         note = QtWidgets.QLabel("Unique ID = 64-bit ROM in bus order: family code, 48-bit serial, CRC.  "
-                                "Sensors are read through the master Arduino on the Bench tab; voltage scanning keeps running.")
+                                "Sensors are read through the master Arduino on the Voltage Control tab; voltage scanning keeps running.")
         note.setStyleSheet(f"color:{C_DIM};font-size:11px;")
         v.addWidget(note)
 
@@ -239,7 +239,7 @@ class TempTab(QtWidgets.QWidget):
             return          # each failed poll blocks the master ~1.5 s, which would slow the voltage scan
         scan = self.bench.scan
         if scan.dev is None or not hasattr(scan.dev, "ow"):
-            self.status.setText("Arduino not connected - connect it on the Bench tab.")
+            self.status.setText("Arduino not connected - connect it on the Voltage Control tab.")
             return
         self.busy_since = time.monotonic()
         self.poll_btn.setEnabled(False)

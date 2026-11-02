@@ -11,6 +11,8 @@ Origin: repository `stepanalefan/1`, branch `claude/fsw50-gui-freeze-errors-7qq3
 
 ## 1. What the program is
 
+Name: **KTR RAD TEST** (EXE `KTR_RAD_TEST.exe`; start file still `fsw_vsa_monitor.py`).
+
 A PyQt5 desktop program (Windows, run from PyCharm or as a PyInstaller EXE) that controls and
 monitors one test bench: spectrum analyzer, three signal generators, a power supply, a 176-channel
 voltage scanner, 1-Wire temperature sensors, switch outputs, three CAN lines with telemetry decoding,
@@ -30,7 +32,7 @@ fsw_vsa_monitor.py   start file: main window (QTabWidget), FSW driver/worker + V
                      early VISA opening (see 6), creates all other tabs, closeEvent shuts them down
 dashboard.py         Main tab: device status, HMP / switch / temperature panels, test sequences,
                      constellation, voltage plot, telemetry watch (stored in dashboard.json)
-bench_monitor.py     Bench tab: ScanWorker (ArduinoMux + Multimeter), HmpWorker (HMP4040, power
+bench_monitor.py     HMP4040 + Voltage Control tabs (one BenchTab object): ScanWorker (ArduinoMux + Multimeter), HmpWorker (HMP4040, power
                      cycling), daily CSVs, auto-detect, "Test slave link"; visa_manager()
 onewire_temp.py      1-Wire tab (sensors read through the master Arduino -> slave)
 slave_switch.py      SwitchController + panel on Main: outputs A0/A1, BOS watchdog, switch_log

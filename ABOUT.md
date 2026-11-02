@@ -1,4 +1,4 @@
-# FSW Monitor
+# KTR RAD TEST
 
 **Test bench control and monitoring software**
 
@@ -13,7 +13,7 @@
 
 ## What it does
 Controls and monitors the test bench: R&S FSW spectrum analyzer, R&S SMW200A, Keysight N5183B and
-Suin TFG6806 generators, R&S HMP4040 power supply, 176-channel voltage scanner (Arduino +
+Suin TFG6806 generators, R&S HMP4040 and Keysight N6701C power supplies, 176-channel voltage scanner (Arduino +
 multiplexers + Agilent 34405A), 1-Wire temperature sensors, switch outputs with BOS watchdog,
 three CAN lines (CANable + IXXAT) with telemetry decoding, test sequences and daily CSV logs.
 

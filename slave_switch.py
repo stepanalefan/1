@@ -1,7 +1,7 @@
 """
 Switch outputs on the slave Arduino (pins A0, A1) + BOS watchdog.
 
-The slave is reached through the master Arduino on the Bench tab (see the sketches):
+The slave is reached through the master Arduino on the Voltage Control tab (see the sketches):
   SW:SET:<i>:<0|1>, SW:PULSE:<i>:<ms>, SW:STATE?  ->  "SW:STATE:<one 0/1 per output>"
 Pulses are timed by the slave itself, so a pulse ends even if the PC stops talking.
 
@@ -181,7 +181,7 @@ class SwitchController(QtCore.QObject):
     def command(self, cmds: list[str], done=None):
         """Send slave commands in order (one worker job). done(ok: bool) runs in the GUI thread."""
         if self._dev() is None:
-            self.error = "Arduino not connected (Bench tab)"
+            self.error = "Arduino not connected (Voltage Control tab)"
             self.changed.emit()
             if done:
                 done(False)

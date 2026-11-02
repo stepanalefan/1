@@ -2008,7 +2008,7 @@ class Dashboard(QtWidgets.QWidget):
             if sw is None:
                 raise RuntimeError("switch control not available")
             if sw._dev() is None:
-                raise RuntimeError("Arduino not connected (Bench tab)")
+                raise RuntimeError("Arduino not connected (Voltage Control tab)")
             i = s.get("out", 0)
             tok = Token(f"Switch {sw_pins(sw)[i]}", timeout=15)
 

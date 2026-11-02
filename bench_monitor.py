@@ -1167,7 +1167,9 @@ class HmpChannelBox(QtWidgets.QGroupBox):
 
 
 class BenchTab(QtCore.QObject):
-    """Provides `settings_panel` (left column) and `page` (tab content)."""
+    """Two tabs from one object: `volt_settings_panel` + `volt_page` (Voltage Control: Arduino,
+    multimeter, scan) and `hmp_settings_panel` + `hmp_page` (HMP4040). `settings_panel` / `page`
+    are aliases of the voltage ones."""
     log = QtCore.pyqtSignal(str, str)
     _detected = QtCore.pyqtSignal(object)
 
@@ -1212,8 +1214,16 @@ class BenchTab(QtCore.QObject):
         self._detected.connect(self._on_detected)
         self.scan.names = dict(self.names)
 
-        self.settings_panel = self._build_settings()
-        self.page = self._build_page()
+        self.hmp_hist = {ch: deque(maxlen=HIST_LEN) for ch in HMP_CHANNELS}   # (t, V, I)
+        self._hmp_plot_dirty = False
+        self.volt_settings_panel = self._build_settings()
+        self.volt_page = self._build_page()
+        self.hmp_settings_panel = self._build_hmp_settings()
+        self.hmp_page = self._build_hmp_page()
+        self.settings_panel, self.page = self.volt_settings_panel, self.volt_page
+        self._fill_ports()
+        self.demo_chk.toggled.connect(lambda v: self.hmp_demo_chk.setChecked(v))
+        self.hmp_demo_chk.toggled.connect(lambda v: self.demo_chk.setChecked(v))
         self._set_scan_connected(False)
         self._set_hmp_connected(False)
         self._on_log_toggled(self.log_chk.isChecked())
@@ -1322,7 +1332,7 @@ class BenchTab(QtCore.QObject):
 
         g = QtWidgets.QGroupBox("Logging")
         f = QtWidgets.QFormLayout(g)
-        self.log_chk = QtWidgets.QCheckBox("Write daily CSV log")
+        self.log_chk = QtWidgets.QCheckBox("Write daily voltage CSV log")
         self.log_chk.setToolTip("voltage_log_YYYY-MM-DD.csv, one row per reading")
         self.log_chk.setChecked(True)
         self.log_chk.toggled.connect(self._on_log_toggled)
@@ -1332,15 +1342,6 @@ class BenchTab(QtCore.QObject):
         self.folder_lbl.setWordWrap(True)
         self.folder_lbl.setStyleSheet("color:#8a96a3;font-size:11px;")
         f.addRow(self.log_chk)
-        self.hmp_log_chk = QtWidgets.QCheckBox("Write daily HMP4040 log")
-        self.hmp_log_chk.setToolTip("hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P "
-                                    "of all 4 channels, while the HMP4040 is connected")
-        self.hmp_log_chk.setChecked(True)
-        self.hmp_log_chk.toggled.connect(self._on_hmp_log_toggled)
-        self.hmp_log_int = _spin(0.5, 3600, 1, " s", 1.0)
-        self.hmp_log_int.setToolTip("Time between HMP log rows (the supply is read every 0.5 s)")
-        f.addRow(self.hmp_log_chk)
-        f.addRow("HMP log every", self.hmp_log_int)
         f.addRow(self.folder_btn, self.folder_lbl)
         load_btn = QtWidgets.QPushButton("Load CSV…")
         load_btn.setToolTip("Show an old voltage_log_*.csv in the plot")
@@ -1350,66 +1351,13 @@ class BenchTab(QtCore.QObject):
         f.addRow(load_btn, clear_btn)
         lv.addWidget(g)
 
-        g = QtWidgets.QGroupBox("HMP4040 (USB or LAN)")
-        f = QtWidgets.QFormLayout(g)
-        self.hmp_addr = QtWidgets.QComboBox()
-        self.hmp_addr.setEditable(True)
-        self.hmp_addr.setToolTip("USB (virtual COM, 9600 Bd):  COM7\n"
-                                 "LAN (raw SCPI socket):     192.168.1.20  or  192.168.1.20:5025\n"
-                                 "VISA (USB-TMC / LAN):      USB0::...::INSTR,  TCPIP0::192.168.1.20::5025::SOCKET")
-        self.hmp_addr.lineEdit().setPlaceholderText("COM7 / IP / VISA")
-        self.hmp_conn_btn = QtWidgets.QPushButton("Connect")
-        self.hmp_conn_btn.clicked.connect(self.on_hmp_connect)
-        self.hmp_status = QtWidgets.QLabel("not connected")
-        self.hmp_status.setWordWrap(True)
-        f.addRow("Address", self.hmp_addr)
-        f.addRow(self.hmp_conn_btn)
-        f.addRow(self.hmp_status)
-        lv.addWidget(g)
         lv.addStretch(1)
-        self._fill_ports()
         return page
 
     def _build_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(page)
         root.setContentsMargins(4, 4, 4, 4)
-
-        # --- HMP4040 row
-        self.g_hmp = QtWidgets.QWidget()
-        hrow = QtWidgets.QHBoxLayout(self.g_hmp)
-        hrow.setContentsMargins(0, 0, 0, 0)
-        self.hmp_boxes = {}
-        for ch in HMP_CHANNELS:
-            box = HmpChannelBox(ch)
-            box.changed.connect(self.on_hmp_channel)
-            self.hmp_boxes[ch] = box
-            hrow.addWidget(box)
-        side = QtWidgets.QVBoxLayout()
-        self.master_btn = QtWidgets.QPushButton("MASTER OUTPUT: OFF")
-        self.master_btn.setMinimumHeight(40)
-        self.master_btn.clicked.connect(self.on_master)
-        side.addWidget(self.master_btn)
-        cg = QtWidgets.QGroupBox("Power cycling")
-        cf = QtWidgets.QFormLayout(cg)
-        self.cyc_on = _spin(1, 86400, 0, " s", 10)
-        self.cyc_off = _spin(1, 86400, 0, " s", 5)
-        self.cyc_total = _spin(0.1, 100000, 1, " min", 60)
-        self.cyc_btn = QtWidgets.QPushButton("▶ Start cycling")
-        self.cyc_btn.setCheckable(True)
-        self.cyc_btn.toggled.connect(self.on_cycle)
-        self.cyc_status = QtWidgets.QLabel("Idle")
-        self.cyc_left = QtWidgets.QLabel("Time left: --:--:--")
-        self.cyc_left.setStyleSheet("color:#58a6ff;font-weight:600;")
-        cf.addRow("ON", self.cyc_on)
-        cf.addRow("OFF", self.cyc_off)
-        cf.addRow("Duration", self.cyc_total)
-        cf.addRow(self.cyc_btn)
-        cf.addRow(self.cyc_status)
-        cf.addRow(self.cyc_left)
-        side.addWidget(cg)
-        hrow.addLayout(side)
-        root.addWidget(self.g_hmp)
 
         # --- current reading
         self.cur_lbl = QtWidgets.QLabel("Channel —")
@@ -1489,6 +1437,146 @@ class BenchTab(QtCore.QObject):
         split.setSizes([760, 520])
         root.addWidget(split, 1)
         return page
+
+    # ------------------------------------------------------------- HMP4040 tab
+    def _build_hmp_settings(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(page)
+        lv.setContentsMargins(4, 4, 4, 4)
+        self.hmp_demo_chk = QtWidgets.QCheckBox("Simulated hardware (demo)")
+        self.hmp_demo_chk.setToolTip("Same setting as on the Voltage Control tab")
+        lv.addWidget(self.hmp_demo_chk)
+        g = QtWidgets.QGroupBox("HMP4040 (USB or LAN)")
+        f = QtWidgets.QFormLayout(g)
+        self.hmp_addr = QtWidgets.QComboBox()
+        self.hmp_addr.setEditable(True)
+        self.hmp_addr.setToolTip("USB (virtual COM, 9600 Bd):  COM7\n"
+                                 "LAN (raw SCPI socket):     192.168.1.20  or  192.168.1.20:5025\n"
+                                 "VISA (USB-TMC / LAN):      USB0::...::INSTR,  TCPIP0::192.168.1.20::5025::SOCKET")
+        self.hmp_addr.lineEdit().setPlaceholderText("COM7 / IP / VISA")
+        self.hmp_conn_btn = QtWidgets.QPushButton("Connect")
+        self.hmp_conn_btn.clicked.connect(self.on_hmp_connect)
+        self.hmp_status = QtWidgets.QLabel("not connected")
+        self.hmp_status.setWordWrap(True)
+        f.addRow("Address", self.hmp_addr)
+        f.addRow(self.hmp_conn_btn)
+        f.addRow(self.hmp_status)
+        lv.addWidget(g)
+        g = QtWidgets.QGroupBox("Logging")
+        f = QtWidgets.QFormLayout(g)
+        self.hmp_log_chk = QtWidgets.QCheckBox("Write daily HMP4040 log")
+        self.hmp_log_chk.setToolTip("hmp_log_YYYY-MM-DD.csv: master, on/off, set and measured V/I/P "
+                                    "of all 4 channels, while the HMP4040 is connected")
+        self.hmp_log_chk.setChecked(True)
+        self.hmp_log_chk.toggled.connect(self._on_hmp_log_toggled)
+        self.hmp_log_int = _spin(0.5, 3600, 1, " s", 1.0)
+        self.hmp_log_int.setToolTip("Time between HMP log rows (the supply is read every 0.5 s)")
+        f.addRow(self.hmp_log_chk)
+        f.addRow("HMP log every", self.hmp_log_int)
+        self.hmp_folder_btn = QtWidgets.QPushButton("Folder…")
+        self.hmp_folder_btn.clicked.connect(self.on_folder)
+        self.hmp_folder_lbl = QtWidgets.QLabel(self.log_folder)
+        self.hmp_folder_lbl.setWordWrap(True)
+        self.hmp_folder_lbl.setStyleSheet("color:#8a96a3;font-size:11px;")
+        f.addRow(self.hmp_folder_btn, self.hmp_folder_lbl)
+        lv.addWidget(g)
+        lv.addStretch(1)
+        return page
+
+    def _build_hmp_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(page)
+        root.setContentsMargins(4, 4, 4, 4)
+        # --- HMP4040 row
+        self.g_hmp = QtWidgets.QWidget()
+        hrow = QtWidgets.QHBoxLayout(self.g_hmp)
+        hrow.setContentsMargins(0, 0, 0, 0)
+        self.hmp_boxes = {}
+        for ch in HMP_CHANNELS:
+            box = HmpChannelBox(ch)
+            box.changed.connect(self.on_hmp_channel)
+            self.hmp_boxes[ch] = box
+            hrow.addWidget(box)
+        side = QtWidgets.QVBoxLayout()
+        self.master_btn = QtWidgets.QPushButton("MASTER OUTPUT: OFF")
+        self.master_btn.setMinimumHeight(40)
+        self.master_btn.clicked.connect(self.on_master)
+        side.addWidget(self.master_btn)
+        cg = QtWidgets.QGroupBox("Power cycling")
+        cf = QtWidgets.QFormLayout(cg)
+        self.cyc_on = _spin(1, 86400, 0, " s", 10)
+        self.cyc_off = _spin(1, 86400, 0, " s", 5)
+        self.cyc_total = _spin(0.1, 100000, 1, " min", 60)
+        self.cyc_btn = QtWidgets.QPushButton("▶ Start cycling")
+        self.cyc_btn.setCheckable(True)
+        self.cyc_btn.toggled.connect(self.on_cycle)
+        self.cyc_status = QtWidgets.QLabel("Idle")
+        self.cyc_left = QtWidgets.QLabel("Time left: --:--:--")
+        self.cyc_left.setStyleSheet("color:#58a6ff;font-weight:600;")
+        cf.addRow("ON", self.cyc_on)
+        cf.addRow("OFF", self.cyc_off)
+        cf.addRow("Duration", self.cyc_total)
+        cf.addRow(self.cyc_btn)
+        cf.addRow(self.cyc_status)
+        cf.addRow(self.cyc_left)
+        side.addWidget(cg)
+        hrow.addLayout(side)
+
+        self.g_hmp.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        root.addWidget(self.g_hmp)
+        bar = QtWidgets.QHBoxLayout()
+        self.hmp_plot_what = QtWidgets.QComboBox()
+        self.hmp_plot_what.addItems(["Current", "Voltage", "Power"])
+        self.hmp_plot_what.currentIndexChanged.connect(self._hmp_plot_kind)
+        self.hmp_follow = QtWidgets.QCheckBox("Follow")
+        self.hmp_follow.setChecked(True)
+        self.hmp_window = QtWidgets.QSpinBox()
+        self.hmp_window.setRange(10, 86400)
+        self.hmp_window.setValue(300)
+        self.hmp_window.setPrefix("Window ")
+        self.hmp_window.setSuffix(" s")
+        clear = QtWidgets.QPushButton("Clear plot")
+        clear.clicked.connect(self.on_hmp_clear)
+        for w in (QtWidgets.QLabel("Plot"), self.hmp_plot_what, self.hmp_follow, self.hmp_window, clear):
+            bar.addWidget(w)
+        bar.addStretch(1)
+        root.addLayout(bar)
+        self.hmp_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
+        self.hmp_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.hmp_plot.getPlotItem().setMenuEnabled(False)
+        self.hmp_plot.addLegend(offset=(10, 10))
+        self.hmp_plot.getViewBox().sigRangeChangedManually.connect(
+            lambda *_: self.hmp_follow.setChecked(False))
+        colors = ["#f0c419", "#4fd18b", "#2ec5e6", "#ff6b9a"]
+        self.hmp_curves = {ch: self.hmp_plot.plot([], [], pen=pg.mkPen(colors[k % 4], width=1.5), name=f"CH{ch}")
+                           for k, ch in enumerate(HMP_CHANNELS)}
+        self._hmp_plot_kind()
+        root.addWidget(self.hmp_plot, 1)
+        return page
+
+    def _hmp_plot_kind(self, *_):
+        k = self.hmp_plot_what.currentIndex()
+        self.hmp_plot.setLabel("left", ["Current", "Voltage", "Power"][k], units=["A", "V", "W"][k])
+        self._hmp_plot_dirty = True
+
+    def on_hmp_clear(self):
+        for d in self.hmp_hist.values():
+            d.clear()
+        self._hmp_plot_dirty = True
+
+    def _draw_hmp_plot(self):
+        self._hmp_plot_dirty = False
+        k = self.hmp_plot_what.currentIndex()
+        for ch, d in self.hmp_hist.items():
+            if not d:
+                self.hmp_curves[ch].setData([], [])
+                continue
+            a = np.array(d, dtype=float)
+            y = a[:, 2] if k == 0 else a[:, 1] if k == 1 else a[:, 1] * a[:, 2]
+            self.hmp_curves[ch].setData(a[:, 0], y)
+        if self.hmp_follow.isChecked():
+            now = time.time()
+            self.hmp_plot.setXRange(now - self.hmp_window.value(), now, padding=0)
 
     # ---------------------------------------------------------------- helpers
     def _fill_ports(self):
@@ -1687,6 +1775,7 @@ class BenchTab(QtCore.QObject):
         if d:
             self.log_folder = d
             self.folder_lbl.setText(d)
+            self.hmp_folder_lbl.setText(d)
             self._on_log_toggled(self.log_chk.isChecked())
             self._on_hmp_log_toggled(self.hmp_log_chk.isChecked())
             for fn in self.folder_listeners:
@@ -1839,6 +1928,9 @@ class BenchTab(QtCore.QObject):
                 self.hmp_log_chk.setChecked(False)
         for ch, (v, i) in meas.items():
             self.hmp_boxes[ch].set_meas(v, i)
+            if ch in self.hmp_hist:
+                self.hmp_hist[ch].append((now, v, i))
+        self._hmp_plot_dirty = True
         self._show_master(master)
 
     def _on_cycle(self, active, text, remaining, n):
@@ -1891,6 +1983,8 @@ class BenchTab(QtCore.QObject):
 
     def _refresh(self):
         """4 Hz GUI refresh: table rows and curves that got new data."""
+        if self._hmp_plot_dirty:
+            self._draw_hmp_plot()
         if self._dirty_rows:
             tbl = self.table
             tbl.blockSignals(True)
@@ -1963,14 +2057,18 @@ class BenchWindow(QtWidgets.QMainWindow):
         self.resize(1500, 900)
         pg.setConfigOptions(antialias=False, background="#0f1216", foreground="#c9d1d9")
         self.bench = BenchTab(self)
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidget(self.bench.settings_panel)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(360)
-        split.addWidget(scroll)
-        split.addWidget(self.bench.page)
-        split.setSizes([370, 1130])
+        split = QtWidgets.QTabWidget()
+        for panel, pg_, title in ((self.bench.hmp_settings_panel, self.bench.hmp_page, "HMP4040"),
+                                  (self.bench.volt_settings_panel, self.bench.volt_page, "Voltage Control")):
+            sp = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidget(panel)
+            scroll.setWidgetResizable(True)
+            scroll.setMinimumWidth(360)
+            sp.addWidget(scroll)
+            sp.addWidget(pg_)
+            sp.setSizes([370, 1130])
+            split.addTab(sp, title)
         self.logbox = QtWidgets.QPlainTextEdit()
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumHeight(130)

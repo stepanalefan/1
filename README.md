@@ -1,4 +1,4 @@
-# FSW Monitor
+# KTR RAD TEST
 
 One program to control and monitor the test bench: spectrum analyzer, signal generators,
 power supply, 176-channel voltage scanner, temperature sensors, switch, three CAN lines and
@@ -24,7 +24,8 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | **TFG6806** | Suin TFG6806, both channels, each with a **waveform display** like the generator's screen (CH1 yellow, CH2 cyan, drawn from the settings): waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
 | **N6701C** | Keysight N6701C power system (LAN / USB / GPIB): per output voltage, current limit, OVP, OCP, on/off, mode CV / CC / OFF / PROT, all outputs ON/OFF, clear protection, plot, daily `n6700_log`. |
-| **Bench: 176 ch + HMP4040** | Voltage scanner (Arduino + multiplexers + 34405A): connect Arduino and multimeter separately, scan a range or one channel, plot + table with min/max, daily log. HMP4040: 4 channels (V, I limit, on/off), master output, power cycling, daily log. *Auto-detect devices*, *Test slave link*. |
+| **HMP4040** | R&S HMP4040 (USB or LAN): 4 channels (V, I limit, on/off, measured V / I / P), master output, power cycling, plot of current / voltage / power per channel, daily `hmp_log`. |
+| **Voltage Control** | 176-channel voltage scanner (Arduino + multiplexers + 34405A): connect Arduino and multimeter separately, scan a range or one channel, plot + table with min/max, daily `voltage_log`. *Auto-detect devices*, *Test slave link*. |
 | **1-Wire Temp** | DS18B20 sensors on the slave Arduino (A3 / A4 / A5): temperature, status, bus, unique ID with CRC, scratchpad, resolution, power mode, min/max. Poll every N s or *Poll now*; double-click a name to rename; daily log. |
 | **CAN** | Three CAN lines at once (default BOS = CANable, AFAR = IXXAT CAN1, UPNG = IXXAT CAN2). **Trace** (every frame) and **Monitor** (one row per ID, changed bytes highlighted), ID filter + per-line show/hide, transmit (single / periodic), command library with hotkeys, block scripts, record / save / open candump logs. |
 | **Telemetry** | Decoded arrays of BOS, UPNG and AFAR (IOK OSN, SOST, DOP, CONFIG, FAILURE …) with meaning of every field; raw view. |
@@ -109,12 +110,12 @@ comma-separated, hex.
 |---|---|
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `dashboard.py` | Main tab, sequences |
-| `bench_monitor.py` | Bench tab, VISA loader |
+| `bench_monitor.py` | HMP4040 and Voltage Control tabs, VISA loader |
 | `onewire_temp.py`, `slave_switch.py` | 1-Wire tab, switch + watchdog |
 | `smw_generator.py`, `tfg_generator.py`, `mxg_generator.py` | Generator tabs |
 | `canable_analyzer.py`, `can_commands.py` | CAN tab |
 | `telemetry.py`, `log_viewer.py` | Telemetry and Logs tabs |
-| `build_exe.bat`, `rthook_visa.py` | Build `dist\FSW_Monitor.exe` (the hook opens VISA before Qt in the EXE) |
+| `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_RAD_TEST.exe` (the hook opens VISA before Qt in the EXE) |
 | `arduino/` | Master, slave and 1-Wire test sketches |
 | `FAQ.md` | Installation, troubleshooting, wiring |
 

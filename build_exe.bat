@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableDelayedExpansion
-REM Build FSW Monitor EXE (run on Windows from this folder)
+REM Build KTR RAD TEST EXE (run on Windows from this folder)
 REM Put app.ico (and optionally lupa.ico) next to the scripts first.
 cd /d "%~dp0"
 
@@ -27,7 +27,7 @@ if exist lupa.ico set ICONARGS=%ICONARGS% --add-data "lupa.ico;."
 for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! --add-data "%%F;."
 
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
-  --name FSW_Monitor %ICONARGS% ^
+  --name KTR_RAD_TEST %ICONARGS% ^
   --hidden-import bench_monitor --hidden-import canable_analyzer ^
   --hidden-import can_commands --hidden-import telemetry ^
   --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod ^
@@ -37,6 +37,6 @@ for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! -
   fsw_vsa_monitor.py
 
 echo.
-echo Done: dist\FSW_Monitor.exe
+echo Done: dist\KTR_RAD_TEST.exe
 echo channels.txt, can_commands.json, dashboard.json and CSV logs live next to the EXE.
 pause
