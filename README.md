@@ -1,7 +1,7 @@
 # FSW Monitor (RS-485 / FRM edition)
 
 One program to control and monitor the test bench: spectrum analyzer, signal generators,
-HMP4040 power supply, RS-485 communication with the FRM (MOXA UPort 1450I) and telemetry —
+HMP4040 and N6701C power supplies, RS-485 communication with the FRM (MOXA UPort 1450I) and telemetry —
 with test sequences and daily CSV logs.
 
 ```
@@ -23,6 +23,7 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (only if FSW-K70 is installed), **Spectrum**, and **I/Q (software demod)**: the FSW I/Q Analyzer captures raw I/Q and the program demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM): constellation, MER, EVM, power, carrier frequency error, symbol rate error, I/Q offset, trend, captured spectrum. Without K70 the I/Q tab is selected automatically. Run continuously or single captures; only changed settings are sent. Daily FSW log `fsw_log_YYYY-MM-DD.csv`. |
 | **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
+| **N6701C** | Keysight N6701C with N6775A modules: per output V, I limit, OVP, OCP, on/off; all outputs ON / OFF, clear protection; mode CV / CC / OFF / PROT; plot; daily log. LAN / USB / GPIB. |
 | **HMP4040** | 4 channels (V, I limit, on/off), master output, power cycling, plot of current / voltage / power, daily log. USB (COM / USB-TMC) or LAN. |
 | **RS-485** | MOXA UPort 1450I, up to 4 ports at once (FRM main + backup line): COM port, baud rate, data bits, parity, stop bits per port. **FRM control**: all protocol commands (mode, session parameters, read arrays, reset, DAC settings, SETTINGS / power correction, data parking) with answer check, main/backup line fallback, polling. Trace of every frame with decoded FRM header, raw transmit (+CRC), command library, record to a log file. |
 | **Telemetry** | FRM state arrays decoded field by field: 1 (state), 2 (receiver), 3 (SETTINGS), 4 (DAC), 5 (power correction); all FRM frames. |
@@ -37,6 +38,7 @@ The log window at the bottom shows every action and error of all tabs.
 | Button | Step |
 |---|---|
 | **+ HMP** | Set HMP4040 channels (V, I, on/off) and/or master output |
+| **+ N6701C** | Set N6701C outputs (V, I, on/off), all outputs ON/OFF, optionally clear protection first |
 | **+ SMW** | Set SMW200A parameters / RF on-off |
 | **+ FRM** | FRM command (mode, session parameters, read array, reset, DAC …); waits for the answer |
 | **+ RS-485** | Send a raw command from the RS-485 library (on its port), no answer check |
@@ -46,6 +48,10 @@ The log window at the bottom shows every action and error of all tabs.
 | **+ Repeat** | Repeat the following steps N times (0 = forever) up to *End repeat* |
 | **+ Log** | Write a message to the log |
 | **+ MXG** | N5183B: any ticked parameters; recall / preset first, single sweep / trigger after |
+
+**Watchdog** (Main tab): switches the power supplies off when a step fails, a supply stops
+communicating, an output stays in current limit, an N6701C protection trips … (*Conditions…*).
+See FAQ.
 
 ▲ ▼ move, *Copy*, *Edit* (or double-click), *Delete*; *Run sequence*, *Loop*. A step that fails
 stops the sequence with the reason in the log.
@@ -95,6 +101,7 @@ the HMP4040 tab: `python bench_monitor.py [--demo]`.
 | `iq_demod.py` | Software demodulator for I/Q captures (constellation without K70), signal simulator |
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA loader |
+| `n6700_supply.py` | N6701C tab (Keysight N6700 driver, demo, log) |
 | `rs485_monitor.py` | RS-485 tab (MOXA UPort 1450I), FRM control, command library |
 | `frm_protocol.py` | FRM protocol: frames, CRC, commands, decoder, simulator, command editor |
 | `smw_generator.py`, `mxg_generator.py` | Generator tabs |
@@ -104,4 +111,4 @@ the HMP4040 tab: `python bench_monitor.py [--demo]`.
 | `FAQ.md` | Installation, troubleshooting, wiring |
 
 Settings (`dashboard.json`, `rs485_ports.json`, `rs485_commands.json`) and daily logs
-(`fsw_log_YYYY-MM-DD.csv`, `hmp_log_YYYY-MM-DD.csv`, `telemetry_log_YYYY-MM-DD.csv`, `rs485_log_*.log`) are kept next to the program.
+(`fsw_log_YYYY-MM-DD.csv`, `hmp_log_YYYY-MM-DD.csv`, `n6700_log_YYYY-MM-DD.csv`, `watchdog_log_YYYY-MM-DD.csv`, `telemetry_log_YYYY-MM-DD.csv`, `rs485_log_*.log`) are kept next to the program.

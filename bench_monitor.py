@@ -644,6 +644,7 @@ class BenchTab(QtCore.QObject):
         self.skip_ports = skip_ports or (lambda: [])   # COM ports auto-detect must not touch (RS-485)
         self._hmp_ok = False
         self._hmp_master = False
+        self.hmp_comm_error_t = 0.0
         self.log_folder = script_dir()
         self.folder_listeners = []   # called after the log folder changes
 
@@ -907,9 +908,20 @@ class BenchTab(QtCore.QObject):
             self.hmp_status.setText(f"✓ {info}")
             self.log.emit(f"HMP4040 connected: {info}", "ok")
         else:
+            if info == "error":
+                self.hmp_comm_error_t = time.time()          # read by the Main-tab watchdog
             self.hmp_status.setText(info or "not connected")
             if info and info != "error":
                 self.log.emit(f"HMP4040: {info}", "err")
+
+    def hmp_cc(self, ch) -> bool:
+        """Output delivers and is in current limit (current at the limit, voltage below the set value)."""
+        st = self.hmp_last_state.get(ch)
+        if not self._hmp_ok or st is None or not self._hmp_master:
+            return False
+        vset, iset, on = st
+        v, i = self.hmp_last_meas.get(ch, (0.0, 0.0))
+        return bool(on and iset > 0 and i >= 0.98 * iset and v < 0.98 * vset)
 
     def _on_hmp_state(self, st: dict):
         self.hmp_last_state.update(st)

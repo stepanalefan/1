@@ -219,6 +219,13 @@ try:  # software demodulator for the I/Q Analyzer (constellation without FSW-K70
 except Exception:  # pragma: no cover
     iq_demod = None
 
+try:  # Keysight N6701C power system tab
+    import n6700_supply
+    _N67_ERR = None
+except Exception as _e:  # pragma: no cover
+    n6700_supply = None
+    _N67_ERR = f"{type(_e).__name__}: {_e}"
+
 try:  # SMW200A generator tab
     import smw_generator
 except Exception:  # pragma: no cover
@@ -1554,6 +1561,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.logmsg(f"HMP4040 tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
+        if self.n67:
+            self.n67.log.connect(self.logmsg)
+            if self.bench:
+                self.bench.folder_listeners.append(self.n67._reopen_log)
+        else:
+            self.logmsg(f"N6701C tab disabled - n6700_supply.py could not be loaded ({_N67_ERR})", "warn")
         if self.rs485:
             self.rs485.log.connect(self.logmsg)
         else:
@@ -1566,6 +1579,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(300, self.rs485.connect_all)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
+            if self.n67:
+                self.n67.demo_chk.setChecked(True)
             if self.smw:
                 self.smw.proto.setCurrentIndex(3)
                 QtCore.QTimer.singleShot(400, self.smw.on_connect)
@@ -1770,6 +1785,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rs485 = rs485_monitor.Rs485Tab() if rs485_monitor else None
         self.bench = bench_monitor.BenchTab(self, skip_ports=lambda: [
             p["com"] for p in (self.rs485.cfg if self.rs485 else [])]) if bench_monitor else None
+        self.n67 = n6700_supply.N6700Tab(
+            self, folder_fn=lambda: self.bench.log_folder if self.bench else bench_monitor.script_dir()) \
+            if n6700_supply else None
         pages = [left, self._build_spec_settings(), self._build_iq_settings()]
         self.telem = None
         if telemetry and self.rs485:
@@ -1947,6 +1965,17 @@ class MainWindow(QtWidgets.QMainWindow):
             bench_split.addWidget(page(self.bench.page))
             bench_split.setSizes([390, 1170])
             self.tabs.addTab(bench_split, "HMP4040")
+        if self.n67:
+            n_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            nscroll = QtWidgets.QScrollArea()
+            nscroll.setWidget(self.n67.settings_panel)
+            nscroll.setWidgetResizable(True)
+            nscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            nscroll.setMinimumWidth(330)
+            n_split.addWidget(nscroll)
+            n_split.addWidget(page(self.n67.page))
+            n_split.setSizes([340, 1220])
+            self.tabs.addTab(n_split, "N6701C")
         if self.rs485:
             self.tabs.addTab(page(self.rs485), "RS-485")
         if self.telem:
@@ -2959,6 +2988,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ev.ignore()
                 return
             self.bench.shutdown()
+        if self.n67:
+            self.n67.shutdown()
         if self.rs485:
             self.rs485.shutdown()           # stops port workers, periodic send, recording
         if self.smw:

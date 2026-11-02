@@ -13,7 +13,7 @@
 
 ## What it does
 Controls and monitors the test bench: R&S FSW spectrum analyzer (constellation without K70 via
-software demodulation), R&S SMW200A and Keysight N5183B generators, R&S HMP4040 power supply, RS-485 communication with the FRM through a
+software demodulation), R&S SMW200A and Keysight N5183B generators, R&S HMP4040 and Keysight N6701C power supplies (with watchdog), RS-485 communication with the FRM through a
 MOXA UPort 1450I with telemetry decoding, test sequences and daily CSV logs.
 
 ## Built with

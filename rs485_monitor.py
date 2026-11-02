@@ -444,6 +444,7 @@ class Rs485Tab(QtWidgets.QWidget):
         self.frm_mode = None                 # FRM mode from array 1 (0 standby, 1 session, 2 service)
         self.frm_answer_t = 0.0
         self.frm_timeouts = 0
+        self.port_error_t = 0.0
         self._poll_failing = False
         self._build()
         self.frm_timer = QtCore.QTimer(self, interval=5, timeout=self._frm_tick)
@@ -1020,6 +1021,7 @@ class Rs485Tab(QtWidgets.QWidget):
             self.status.setStyleSheet(f"color:{'#ff6b6b' if bad else '#8a96a3'};")
 
     def _on_port_error(self, name, msg):
+        self.port_error_t = time.time()                    # read by the Main-tab watchdog
         self.log.emit(f"RS-485 {name}: {msg} - port closed", "err")
         w = self.workers.pop(name, None)
         if w:

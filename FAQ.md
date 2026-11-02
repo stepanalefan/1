@@ -1,7 +1,7 @@
 # FSW Monitor — FAQ
 
 Bench program for controlling and monitoring the test setup: R&S FSW spectrum analyzer,
-R&S SMW200A and Keysight N5183B generators, R&S HMP4040 power supply,
+R&S SMW200A and Keysight N5183B generators, R&S HMP4040 and Keysight N6701C power supplies,
 RS-485 communication with the FRM through a MOXA UPort 1450I (4 ports) with telemetry
 decoding, test sequences and CSV logging.
 
@@ -18,10 +18,10 @@ Optional: `pip install pyinstaller` (to build the EXE).
 ### What else must be installed on the PC?
 | For | Install |
 |---|---|
-| Instruments over **USB** (N5183B / HMP4040 via USB-TMC) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
+| Instruments over **USB** (N5183B / HMP4040 / N6701C via USB-TMC) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
 | MOXA UPort 1450I (RS-485) | **MOXA UPort 1200/1400/1600 Windows driver** (moxa.com). Then set each port to **RS-485 2W** (see section 5). |
 
-Instruments on **LAN** (FSW, SMW200A, N5183B, HMP4040) need no driver.
+Instruments on **LAN** (FSW, SMW200A, N5183B, HMP4040, N6701C) need no driver.
 
 ### How do I start the program?
 Run **`fsw_vsa_monitor.py`** (in PyCharm: right-click → Run). All other `.py` files must be in
@@ -43,7 +43,7 @@ Demo mode never overwrites your saved RS-485 port settings.
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name FSW_Monitor --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import n6700_supply --hidden-import rs485_monitor --hidden-import frm_protocol --hidden-import iq_demod --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import mxg_generator --hidden-import help_tab --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\FSW_Monitor.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -67,6 +67,8 @@ All next to the program / EXE (HMP log: in the log folder chosen on the HMP4040 
 | `rs485_ports.json` | RS-485 port setup (name, COM port, baud rate, data bits, parity, stop bits, frame gap) and FRM settings (main / backup line, address, timeout, poll interval) |
 | `rs485_commands.json` | RS-485 command library |
 | `fsw_log_YYYY-MM-DD.csv` | FSW results: app (VSA / I/Q / Spectrum), center, modulation, symbol rate, MER, power, CFE, EVM, symbol rate error, I/Q offset, peak and channel power (Spectrum). Every *N* s while measuring (*Daily FSW log* in the FSW connection box). |
+| `n6700_log_YYYY-MM-DD.csv` | N6701C: on/off, set and measured V / A / W and mode (CV / CC / OFF / PROT) per output |
+| `watchdog_log_YYYY-MM-DD.csv` | Every watchdog trigger: time, sequence, reason, what was switched off |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
 | `rs485_log_*.log` | RS-485 recording: one line per frame (time, port, RX/TX, hex bytes) |
@@ -152,6 +154,36 @@ If the program is closed while cycling runs, it asks first and then switches the
 ### "CC" on the Main tab
 The channel is in current limit (current at the set limit and voltage below the set value).
 
+### How do I connect the N6701C?
+N6701C tab: LAN with the IP address (raw SCPI socket 5025) or a VISA string
+(`TCPIP0::<ip>::inst0::INSTR`, `…::hislip0::INSTR`); USB / GPIB with the VISA address from Keysight
+Connection Expert. After connecting, the installed modules and their ranges are shown
+(N6775A = 60 V / 5 A / 300 W).
+* Per output: voltage, current limit, **OVP**, **OCP** (output switches off instead of current
+  limiting), output on/off → *Set*. *ALL OUTPUTS ON / OFF*, *Clear protection*.
+* Mode per output: **CV**, **CC** (current limit), **OFF**, **PROT OV/OC/OT** (protection tripped —
+  press *Clear protection*).
+* Sequence step **+ N6701C**: outputs (V, I, on/off), then all outputs ON/OFF, optionally
+  *clear protection* first.
+* The Main-tab plot shows either supply: selector *Plot HMP4040 / N6701C*.
+
+### Watchdog: what does it do?
+Main tab → **Watchdog**: tick *Switch power off on error*; *Conditions…* selects what triggers it:
+* a sequence step fails (device not connected, SCPI error, timeout, FRM no answer);
+* a power supply stops communicating (COM port unplugged, LAN lost);
+* an RS-485 port fails (MOXA unplugged);
+* an output is in current limit (CC) for longer than *N* s (short inrush is ignored);
+* an N6701C protection trips (OV / OC / OT …);
+* an output current exceeds *N* A.
+
+It monitors **only while a sequence runs** (default) or **always**. When it triggers: the sequence
+stops, the HMP4040 master output and/or all N6701C outputs are switched off (selectable), the
+reason is shown in red on the Main tab, written to the log and to `watchdog_log_YYYY-MM-DD.csv`.
+It stays triggered until *Reset* or the next *Run sequence*. An N6701C output that is already in
+protection when the watchdog arms is ignored until it clears (so a sequence can start with
+*clear protection*). A supply that has lost communication cannot be switched off by the program —
+the log says so.
+
 ## 6. RS-485 (MOXA UPort 1450I) and telemetry
 
 ### How do I set up the MOXA UPort 1450I?
@@ -212,7 +244,7 @@ Temperature, voltage and PLL values are shown as raw codes — the protocol give
 ## 7. Main tab and test sequences
 
 ### Which steps can a sequence contain?
-HMP outputs, SMW, **FRM** command (any command of the FRM control page; waits for the answer,
+HMP outputs, **N6701C** outputs, SMW, **FRM** command (any command of the FRM control page; waits for the answer,
 an error code or no answer stops the sequence), raw RS-485 command (from the library), Pause, FSW (run / stop / single /
 auto level), FSW settings, Repeat … End, Log message,
 **MXG** (any parameters, single sweep /

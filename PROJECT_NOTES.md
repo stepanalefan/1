@@ -40,6 +40,8 @@ fsw_vsa_monitor.py   start file: main window (QTabWidget), FSW driver/worker + V
                      early VISA opening (see 6), creates all other tabs, closeEvent shuts them down
 dashboard.py         Main tab: device status, HMP panel, test sequences, constellation,
                      HMP output plot, telemetry watch (stored in dashboard.json)
+n6700_supply.py      N6701C tab: N6700 driver (SCPI channel lists), DemoN6700 (CV/CC/OCP/OVP),
+                     N67Worker, ChannelBox, plot, n6700_log
 bench_monitor.py     HMP4040 tab: HmpWorker (HMP4040, power cycling), output plot, daily CSV,
                      auto-detect; visa_manager() (shared VISA ResourceManager)
 rs485_monitor.py     RS-485 tab: up to 4 MOXA ports, one PortWorker thread per port (FRM frames by
@@ -82,6 +84,7 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 | R&S FSW-50 | LAN, HiSLIP/VXI-11/socket. **This bench's FSW has no K70**: constellation via the I/Q Analyzer (`INST:CRE IQ`, `TRAC:IQ:SRAT/RLEN`, `TRAC:IQ:DATA:FORM IQP`, `INIT:IMM;*OPC`, `TRAC:IQ:DATA:MEM?`, FORM REAL,32) + `iq_demod.py`. K70 detected from `*OPT?` (or by trying `INST:CRE DDEM`). SCPI verified against R&S's RsFsw driver (6.31). |
 | R&S SMW200A | LAN. SCPI verified against RsSmw. |
 | Keysight N5183B | LAN or USB (VISA). X-Series SCPI; *OPT? gates AM/FM/ΦM (UNT) and pulse (UNU/UNW). Full SCPI PDF could not be downloaded — commands validated through SYSTem:ERRor? on the device. |
+| Keysight N6701C | 2 × N6775A (60 V / 5 A / 300 W). LAN socket 5025 / VISA. Core SCPI (SOUR:VOLT/CURR/VOLT:PROT, MEAS:VOLT?/CURR?, OUTP:STAT with `(@ch)`) checked against QCoDeS' N6705B driver; status/protection commands (STAT:OPER/QUES:COND?, SOUR:CURR:PROT:STAT, OUTP:PROT:CLE, SYST:CHAN:COUN?/MOD?) from the N6700 programming reference — **verify on the unit** (errors appear in the log). |
 | R&S HMP4040 | USB virtual COM 9600 Bd, or LAN socket 5025. pymeasure-style SCPI. |
 | MOXA UPort 1450I | USB → 4 × RS-232/422/485, each port its own COM port. RS-485 2W/4W is selected in the MOXA driver per port; the program opens the COM port with pyserial (baud, data bits, parity, stop bits per port, stored in rs485_ports.json). |
 | FRM | RS-485, 115200 8N1, address 0x79 (answers 0xF9). Main + backup line (two MOXA ports). Protocol: "information-logical conjugation, RS485 interface", edition 3.0 (27.11.2025) — implemented in `frm_protocol.py`. Mode change ≤ 2 s; Session ↔ Service not allowed. |
@@ -101,6 +104,11 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * **FRM master**: one request at a time, response matched by port + function code + address;
   timeout default 100 ms (protocol 1.75 ms + USB latency); ≥ 4 ms between commands (protocol:
   2.75 ms silence). No answer → main → backup → main → backup (protocol 4.4).
+* **Watchdog** (dashboard.py): checked every 200 ms while armed (during sequences, or always). Armed
+  at sequence start before the first step; comm loss detected from `*_comm_error_t` timestamps set by
+  the HMP / N6701C / RS-485 tabs; CC debounced (default 1 s); N6701C outputs already tripped at arm
+  time are ignored until they clear. Trigger = latch: stop sequence, HMP master OFF (stops power
+  cycling), N6701C all OFF, red status, watchdog_log CSV. Reset or a new run re-arms.
 * **No K70 → software demodulation**: I/Q captured as back-to-back single captures (also in
   "Continuous"), demodulated in the worker thread; results use the K70 result keys, so the Main
   tab, CSV log and sequence steps work unchanged. Sample rate is an integer multiple of the symbol
@@ -113,6 +121,9 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 ---
 
 ## 5. Open points / to do
+
+* N6701C on the real unit: confirm the status bits (CV/CC/OFF, OV/OC/OT) and SOUR:CURR:PROT:STAT /
+  OUTP:PROT:CLE; check the measurement time of MEAS:VOLT?/CURR? on two channels.
 
 * I/Q software demod on the real FSW: check the absolute power scaling (I/Q volts into 50 Ω
   assumed) against the Spectrum channel power, and the maximum record length / transfer time.

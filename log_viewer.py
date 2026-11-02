@@ -3,6 +3,7 @@ Logs tab: load any of the program's CSV logs and overlay them on one time plot.
 
 Understood formats (detected from the header, any number of files and days):
 * fsw_log_YYYY-MM-DD.csv        Time, App, Center_Hz, ..., MER_dB, Power_dBm, CFE_Hz, ... (FSW results)
+* n6700_log_YYYY-MM-DD.csv      Time, CHn_On, CHn_Vset_V, ..., CHn_Mode (N6701C)
 * hmp_log_YYYY-MM-DD.csv        Time, Master, CHn_On, CHn_Vset_V, ... per channel
 * telemetry_log_YYYY-MM-DD.csv  Time, Unit, Array, Designation, Byte, Value, Meaning, Warning
 * any other CSV whose first column is a time: every numeric column becomes a series
@@ -24,7 +25,7 @@ import pyqtgraph as pg
 
 PALETTE = ["#58a6ff", "#f0b03e", "#4fd18b", "#ff6b6b", "#d2a8ff", "#79c0ff", "#ffa657",
            "#7ee787", "#f778ba", "#a5d6ff", "#e3b341", "#56d4dd", "#bc8cff", "#ff7b72"]
-GROUPS = ("FSW", "HMP4040", "Telemetry", "Other")
+GROUPS = ("FSW", "HMP4040", "N6701C", "Telemetry", "Other")
 
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -105,6 +106,21 @@ def parse_log(path: str) -> dict[tuple[str, str], tuple[list, list]]:
                         continue
                     add("FSW", f"FSW {row[1]} {h[k].replace('_', ' (', 1) + ')' if '_' in h[k] else h[k]}", t,
                         float(row[k]))
+        elif len(h) > 2 and h[0] == "Time" and h[1] == "CH1_On":         # n6700_log (N6701C)
+            for row in rows:
+                t = tp(row[0]) if row else None
+                if t is None:
+                    continue
+                for k in range(1, min(len(row), len(h))):
+                    if h[k].endswith("_Mode"):
+                        continue
+                    try:
+                        y = float(row[k])
+                    except ValueError:
+                        continue
+                    label = h[k].replace("_V_V", " V").replace("_I_A", " I (A)").replace("_P_W", " P (W)") \
+                                .replace("_Vset_V", " Vset").replace("_Iset_A", " Iset").replace("_On", " On")
+                    add("N6701C", label, t, y)
         elif h[:2] == ["Time", "Master"]:
             cols = [(k, c) for k, c in enumerate(h) if k > 0]
             for row in rows:
@@ -167,7 +183,7 @@ class LogsTab(QtWidgets.QWidget):
         add_b = QtWidgets.QPushButton("Add CSV files…")
         add_b.clicked.connect(self.on_add)
         today_b = QtWidgets.QPushButton("Today's logs")
-        today_b.setToolTip("Load FSW, HMP4040 and telemetry logs of today from the log folders")
+        today_b.setToolTip("Load FSW, HMP4040, N6701C and telemetry logs of today from the log folders")
         today_b.clicked.connect(self.on_today)
         clr_b = QtWidgets.QPushButton("Clear")
         clr_b.clicked.connect(self.on_clear)
@@ -250,7 +266,7 @@ class LogsTab(QtWidgets.QWidget):
         for d in self._folders():
             try:
                 for n in sorted(os.listdir(d)):
-                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("fsw", "hmp", "telemetry"):
+                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("fsw", "hmp", "n6700", "telemetry"):
                         paths.append(os.path.join(d, n))
             except OSError:
                 pass
