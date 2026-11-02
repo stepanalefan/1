@@ -19,7 +19,7 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | Tab | What it does |
 |---|---|
 | **Main** | Overview: device status (green = connected), HMP4040 outputs, switch + BOS watchdog, 1-Wire temperatures, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, voltage plot, telemetry watch list. |
-| **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (demodulation: modulation, symbol rate, filters, constellation, results, trend) and **Spectrum**. Run continuously or single sweeps; only changed settings are sent. |
+| **Spectrum Analyzer** | R&S FSW. Sub-tabs **I/Q (software demod)** (for an FSW **without K70**: raw I/Q from the I/Q Analyzer, demodulated by the program — BPSK, QPSK, OQPSK, 8PSK, 16QAM; constellation, spectrum, MER / EVM / power / frequency error / symbol-rate error / I/Q offset, trend), **VSA (K70)** (demodulation: modulation, symbol rate, filters, constellation, results, trend) and **Spectrum**. Run continuously or single sweeps; only changed settings are sent. |
 | **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
 | **TFG6806** | Suin TFG6806, both channels, each with a **waveform display** like the generator's screen (CH1 yellow, CH2 cyan, drawn from the settings): waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
@@ -65,9 +65,9 @@ Only during sequences or always; latched until *Reset* or the next run; logged t
 ## Command line
 
 ```
-python fsw_vsa_monitor.py [--ip ADDR] [--protocol hislip|vxi11|socket] [--connect] [--demo]
+python fsw_vsa_monitor.py [--ip ADDR] [--protocol hislip|vxi11|socket] [--connect] [--demo] [--demo-no-k70]
 ```
-`--ip` FSW IP / hostname or full VISA string · `--connect` connect at start · `--demo` simulate everything.
+`--ip` FSW IP / hostname or full VISA string · `--connect` connect at start · `--demo` simulate everything · `--demo-no-k70` simulate an FSW without K70 (I/Q tab).
 
 The CAN sniffer can also run alone: `python canable_analyzer.py [--demo] [--interface slcan|gs_usb|ixxat|socketcan|demo] [--port COM7] [--bitrate 500000] [--connect] [--log file.log]`.
 

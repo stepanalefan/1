@@ -99,6 +99,15 @@ If the error still appears, check the K70 settings on the FSW itself.
 
 ---
 
+### The FSW has no K70 option — can I still see the constellation?
+Yes. On connect the program checks the options (`*OPT?`). Without K70 the **VSA (K70)** tab is disabled and
+**I/Q (software demod)** is selected: the FSW's standard I/Q Analyzer records raw I/Q, and the program
+demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM; RRC filter, frequency / phase / timing recovery). Set center,
+level, modulation, symbol rate, filter / roll-off, samples per symbol and capture length on the left.
+Results (MER, EVM, power, carrier frequency error, symbol-rate error, I/Q offset) feed the Main tab, the BOS
+watchdog, the log and *FSW single* / *FSW set* steps. MER / EVM are not calibrated like K70's, and the signal
+should be continuous (no burst search). Try it without hardware: `python fsw_vsa_monitor.py --demo-no-k70`.
+
 ## 4. Generators (SMW200A, N5183B, TFG6806)
 
 ### General behaviour
