@@ -21,8 +21,9 @@ Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 | **Main** | Overview: device status (green = connected), HMP4040 outputs, switch + BOS watchdog, 1-Wire temperatures, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, voltage plot, telemetry watch list. |
 | **Spectrum Analyzer** | R&S FSW. Sub-tabs **VSA (K70)** (demodulation: modulation, symbol rate, filters, constellation, results, trend) and **Spectrum**. Run continuously or single sweeps; only changed settings are sent. |
 | **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
-| **TFG6806** | Suin TFG6806, both channels: waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
+| **TFG6806** | Suin TFG6806, both channels, each with a **waveform display** like the generator's screen (CH1 yellow, CH2 cyan, drawn from the settings): waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
 | **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
+| **N6701C** | Keysight N6701C power system (LAN / USB / GPIB): per output voltage, current limit, OVP, OCP, on/off, mode CV / CC / OFF / PROT, all outputs ON/OFF, clear protection, plot, daily `n6700_log`. |
 | **Bench: 176 ch + HMP4040** | Voltage scanner (Arduino + multiplexers + 34405A): connect Arduino and multimeter separately, scan a range or one channel, plot + table with min/max, daily log. HMP4040: 4 channels (V, I limit, on/off), master output, power cycling, daily log. *Auto-detect devices*, *Test slave link*. |
 | **1-Wire Temp** | DS18B20 sensors on the slave Arduino (A3 / A4 / A5): temperature, status, bus, unique ID with CRC, scratchpad, resolution, power mode, min/max. Poll every N s or *Poll now*; double-click a name to rename; daily log. |
 | **CAN** | Three CAN lines at once (default BOS = CANable, AFAR = IXXAT CAN1, UPNG = IXXAT CAN2). **Trace** (every frame) and **Monitor** (one row per ID, changed bytes highlighted), ID filter + per-line show/hide, transmit (single / periodic), command library with hotkeys, block scripts, record / save / open candump logs. |
@@ -38,6 +39,7 @@ The log window at the bottom shows every action and error of all tabs.
 | Button | Step |
 |---|---|
 | **+ HMP** | Set HMP4040 channels (V, I, on/off) and/or master output |
+| **+ N6701C** | Set N6701C outputs (V, I, on/off), all outputs on/off, clear protection; waits until accepted |
 | **+ SMW** | Set SMW200A parameters / RF on-off |
 | **+ CAN** | Send a command from the CAN library (on its line) |
 | **+ Pause** | Wait N ms |
@@ -52,6 +54,11 @@ The log window at the bottom shows every action and error of all tabs.
 
 ▲ ▼ move, *Copy*, *Edit* (or double-click), *Delete*; *Run sequence*, *Loop*. A step that fails
 stops the sequence with the reason in the log.
+
+**Power watchdog** (Main tab): when enabled, it switches the HMP4040 master output and/or all N6701C
+outputs OFF and stops the sequence if a step fails, a supply stops communicating, an output stays in
+current limit longer than N s, an N6701C protection trips or a current exceeds N A (*Conditions…*).
+Only during sequences or always; latched until *Reset* or the next run; logged to `watchdog_log_*.csv`.
 
 ---
 

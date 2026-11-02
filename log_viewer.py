@@ -26,7 +26,7 @@ import pyqtgraph as pg
 
 PALETTE = ["#58a6ff", "#f0b03e", "#4fd18b", "#ff6b6b", "#d2a8ff", "#79c0ff", "#ffa657",
            "#7ee787", "#f778ba", "#a5d6ff", "#e3b341", "#56d4dd", "#bc8cff", "#ff7b72"]
-GROUPS = ("Voltage", "HMP4040", "Temperature", "Switch", "Telemetry", "Other")
+GROUPS = ("Voltage", "HMP4040", "N6701C", "Temperature", "Switch", "Telemetry", "Other")
 
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -125,6 +125,21 @@ def parse_log(path: str) -> dict[tuple[str, str], tuple[list, list]]:
                     add("Voltage", f"Ch {ch:3d}  {names.get(ch, '')}".rstrip(), t, float(row[-1]))
                 except ValueError:
                     pass
+        elif len(h) > 2 and h[0] == "Time" and h[1] == "CH1_On":         # n6700_log (N6701C)
+            for row in rows:
+                t = tp(row[0]) if row else None
+                if t is None:
+                    continue
+                for k in range(1, min(len(row), len(h))):
+                    if h[k].endswith("_Mode"):
+                        continue
+                    try:
+                        y = float(row[k])
+                    except ValueError:
+                        continue
+                    label = h[k].replace("_V_V", " V").replace("_I_A", " I (A)").replace("_P_W", " P (W)") \
+                                .replace("_Vset_V", " Vset").replace("_Iset_A", " Iset").replace("_On", " On")
+                    add("N6701C", label, t, y)
         elif h[:2] == ["Time", "Master"]:
             cols = [(k, c) for k, c in enumerate(h) if k > 0]
             for row in rows:
@@ -304,7 +319,8 @@ class LogsTab(QtWidgets.QWidget):
         for d in self._folders():
             try:
                 for n in sorted(os.listdir(d)):
-                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("voltage", "hmp", "telemetry", "temperature", "switch"):
+                    if n.endswith(".csv") and day in n and n.split("_log")[0] in ("voltage", "hmp", "n6700", "telemetry", "temperature", "switch",
+                                                                   "watchdog"):
                         paths.append(os.path.join(d, n))
             except OSError:
                 pass

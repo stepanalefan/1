@@ -192,6 +192,21 @@ must stay within 0…5 V at the multiplexer pin; all grounds should meet at one 
 
 ---
 
+### N6701C: how do I connect?
+N6701C tab: IP address (raw socket 5025) or a VISA string (`TCPIP0::…::inst0::INSTR`, USB via Keysight IO
+Libraries). The module models and ranges are read from the unit. *Clear protection* resets OV / OC / OT.
+
+### What does the power watchdog do?
+Main tab → *Power watchdog* → *Conditions…*: switch the HMP4040 master and/or all N6701C outputs OFF and stop
+the sequence when a step fails, a supply stops communicating, an output stays in current limit (CC) longer
+than N s (short inrush is ignored), an N6701C protection trips, or a current exceeds N A. Monitor only during
+sequences or always. A trigger stays latched (red) until *Reset* or the next run and is written to
+`watchdog_log_YYYY-MM-DD.csv`. It is separate from the BOS watchdog of the switch panel.
+
+### The TFG6806 waveform display
+Drawn from the channel's settings (the generator has no command to read its screen), like the generator's own
+display: very fast carriers in modulation / sweep / burst are drawn with fewer cycles ("not to scale").
+
 ## 6. Arduinos, 1-Wire sensors and switch
 
 ### How are the two Arduinos wired?

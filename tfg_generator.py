@@ -40,7 +40,9 @@ import re
 import socket
 import time
 
+import numpy as np
 from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
 
 try:
     import pyvisa
@@ -449,9 +451,16 @@ class DemoTfg:
         self.s = {ch: dict(base) for ch in CHANNELS}
         self.log = []
 
+    _DEMO_DEFAULT = {"hz": 100.0, "deg": 90.0, "pct": 50.0, "s": 1e-3, "vpp": 0.5, "v": 0.0, "ohm": 50.0}
+
     def get(self, ch, key):
         time.sleep(0.002)
-        return self.s[ch].get(key, 0.0 if PARAMS[key][2] not in ("enum", "bool") else None)
+        kind = PARAMS[key][2]
+        if key in self.s[ch]:
+            return self.s[ch][key]
+        if kind == "enum":
+            return PARAMS[key][6][0][1]
+        return None if kind == "bool" else self._DEMO_DEFAULT.get(kind, 0.0)
 
     def set(self, ch, key, v):
         self.s[ch][key] = v
@@ -677,6 +686,182 @@ class Field:
 
 
 # --------------------------------------------------------------------------- #
+#  Waveform preview (like the generator's own screen)                          #
+# --------------------------------------------------------------------------- #
+PREVIEW_POINTS = 2000
+MAX_SHOWN_CYCLES = 30          # more carrier cycles than this in the window are drawn schematically
+
+
+def _shape(wave: str, x, p) -> np.ndarray:
+    """One waveform, x in cycles (any real), result -1 … +1."""
+    ph = x % 1.0
+    if wave == "SQUare":
+        d = min(max(p.get("duty", 50.0), 0.0001), 99.9999) / 100
+        return np.where(ph < d, 1.0, -1.0)
+    if wave == "RAMP":
+        s = min(max(p.get("symm", 50.0), 0.0), 100.0) / 100
+        up = ph / max(s, 1e-9) if s > 0 else np.zeros_like(ph)
+        down = (1 - ph) / max(1 - s, 1e-9) if s < 1 else np.zeros_like(ph)
+        return np.where(ph < s, up, down) * 2 - 1
+    if wave == "PULSe":
+        per = 1.0 / max(p.get("freq", 1e3), 1e-12)
+        w = min(max(p.get("pwidth", per / 2) / per, 0.0), 1.0)
+        tr = min(max(p.get("prise", 0.0) / per, 0.0), w / 2 + 1e-12)
+        tf = min(max(p.get("pfall", 0.0) / per, 0.0), (1 - w) / 2 + 1e-12)
+        y = np.full_like(ph, -1.0)
+        y = np.where(ph < tr, -1 + 2 * ph / max(tr, 1e-12), y)
+        y = np.where((ph >= tr) & (ph < w), 1.0, y)
+        y = np.where((ph >= w) & (ph < w + tf), 1 - 2 * (ph - w) / max(tf, 1e-12), y)
+        return y
+    if wave == "NOISe":
+        return np.clip(np.random.default_rng(1).normal(0, 0.33, len(x)), -1, 1)
+    return np.sin(2 * np.pi * x)                     # sine, and built-in / arb shown as sine
+
+
+def preview(p: dict):
+    """(t [s], y [V], note) of what the channel outputs, from the panel settings."""
+    f = max(float(p.get("freq") or 1e3), 1e-6)
+    A = float(p.get("ampl") or 0.0) / 2
+    off = float(p.get("offs") or 0.0)
+    ph0 = float(p.get("phase") or 0.0) / 360
+    wave, mode = p.get("wave", "SINusoid"), p.get("mode", "CONTinuous")
+    note = ""
+
+    def scaled(span, *freqs):
+        """Carrier frequencies to draw: real ones, or proportionally reduced when too dense."""
+        k = min(1.0, MAX_SHOWN_CYCLES / max(f * span, 1e-12))
+        return k, [q * k for q in freqs]
+
+    if mode == "MODulate":
+        mt = p.get("modtype", "AM")
+        rate = float(p.get({"AM": "am_f", "FM": "fm_f", "PM": "pm_f", "PWM": "pwm_f", "SUM": "sum_f",
+                            "FSK": "fsk_r", "NFSK": "nfsk_r", "4FSK": "fsk4_r", "PSK": "psk_r",
+                            "NPSK": "npsk_r", "4PSK": "psk4_r", "ASK": "ask_r", "OSK": "osk_r"}.get(mt, "am_f"))
+                     or 100.0)
+        rate = rate if rate > 0 else 100.0
+        span = 2 / rate
+        t = np.linspace(0, span, PREVIEW_POINTS)
+        k, (fd,) = scaled(span, f)
+        m = _shape(p.get("modwave", "SINusoid"), rate * t, p)        # modulating signal -1 … +1
+        sym = np.floor(rate * t).astype(int)                        # keying symbol index
+        if mt == "AM":
+            y = A * (1 + p.get("am_d", 100.0) / 100 * m) / (1 + p.get("am_d", 100.0) / 100) * _shape(wave, fd * t + ph0, p)
+        elif mt == "FM":
+            dev = float(p.get("fm_dev", 0.0)) * k
+            y = A * _shape(wave, fd * t + ph0 + dev * np.cumsum(m) * (t[1] - t[0]), p)
+        elif mt == "PM":
+            y = A * _shape(wave, fd * t + ph0 + p.get("pm_dev", 0.0) / 360 * m, p)
+        elif mt == "PWM":
+            q = dict(p, duty=np.clip(50 + p.get("pwm_dev", 0.0) / 2 * m, 0.0001, 99.9999))
+            y = A * np.where(((fd * t + ph0) % 1.0) < q["duty"] / 100, 1.0, -1.0)
+        elif mt == "SUM":
+            a = p.get("sum_a", 0.0) / 100
+            y = A * ((1 - a) * _shape(wave, fd * t + ph0, p) + a * m)
+        elif mt in ("FSK", "NFSK", "4FSK"):
+            hops = [f] + ([p.get("fsk_f", f)] if mt == "FSK" else
+                          [p.get(f"{'nfsk' if mt == 'NFSK' else 'fsk4'}_f{i}", f) for i in (1, 2, 3)])
+            fi = np.array([float(h) * k for h in hops])[sym % len(hops)]
+            y = A * _shape(wave, np.cumsum(fi) * (t[1] - t[0]) + ph0, p)
+        elif mt in ("PSK", "NPSK", "4PSK"):
+            hops = [0.0] + ([p.get("psk_p", 180.0)] if mt == "PSK" else
+                            [p.get(f"{'npsk' if mt == 'NPSK' else 'psk4'}_p{i}", 0.0) for i in (1, 2, 3)])
+            pi = np.array([float(h) / 360 for h in hops])[sym % len(hops)]
+            y = A * _shape(wave, fd * t + ph0 + pi, p)
+        elif mt == "ASK":
+            low = float(p.get("ask_a", 0.0)) / 2
+            y = np.where(sym % 2 == 0, A, low) * _shape(wave, fd * t + ph0, p)
+        elif mt == "OSK":
+            y = np.where(sym % 2 == 0, A, 0.0) * _shape(wave, fd * t + ph0, p)
+        else:                                                        # QAM: carrier only
+            y = A * _shape(wave, fd * t + ph0, p)
+        note = f"{mt}" + ("  (carrier not to scale)" if k < 1 else "")
+    elif mode == "SWEep":
+        f1, f2 = float(p.get("sw_start", f)), float(p.get("sw_stop", 2 * f))
+        span = max(float(p.get("sw_time", 1.0)), 1e-9)
+        t = np.linspace(0, span, PREVIEW_POINTS)
+        k = min(1.0, MAX_SHOWN_CYCLES / max((f1 + f2) / 2 * span, 1e-12))
+        if p.get("sw_type") == "LOGarithmic" and f1 > 0 and f2 > 0:
+            fi = f1 * (f2 / f1) ** (t / span)
+        else:
+            fi = f1 + (f2 - f1) * t / span
+        y = A * _shape(wave, np.cumsum(fi * k) * (t[1] - t[0]) + ph0, p)
+        note = f"sweep {fmt_si(f1, 'Hz')} → {fmt_si(f2, 'Hz')}" + ("  (not to scale)" if k < 1 else "")
+    elif mode == "BURSt":
+        per = max(float(p.get("b_per", 10 / f)), 1e-9)
+        n = max(int(p.get("b_n", 1) or 1), 1)
+        span = 2 * per
+        t = np.linspace(0, span, PREVIEW_POINTS)
+        burst = n / f
+        k = 1.0
+        if burst > per or f * span > 4 * MAX_SHOWN_CYCLES:        # dense: draw the burst schematically
+            burst, k = min(per * 0.5, burst), 1.0
+            n_shown = min(n, MAX_SHOWN_CYCLES)
+            fd = n_shown / burst
+            note = f"burst of {n} cycles" + ("  (not to scale)" if n_shown != n or fd != f else "")
+        else:
+            fd, note = f, f"burst of {n} cycles"
+        tb = t % per
+        y = np.where(tb < burst, A * _shape(wave, fd * tb + p.get("b_phase", 0.0) / 360, p), 0.0)
+    elif mode == "DOUBle":
+        w1, w2, gap = (max(float(p.get(k, 1e-6)), 1e-12) for k in ("d_w1", "d_w2", "d_gap"))
+        span = 2 * (w1 + gap + w2) * 1.5
+        t = np.linspace(0, span, PREVIEW_POINTS)
+        tc = t % (span / 2)
+        high = (tc < w1) | ((tc >= w1 + gap) & (tc < w1 + gap + w2))
+        pol = p.get("d_pol", "POSitive")
+        y = np.where(high, A, -A if pol == "BOTH" else 0.0)
+        if pol == "NEGative":
+            y = -y
+        note = "double pulse"
+    else:                                                            # continuous
+        span = 2 / f
+        t = np.linspace(0, span, PREVIEW_POINTS)
+        y = A * _shape(wave, f * t + ph0, p)
+    if p.get("pol") == "INVerted":
+        y = -y
+    return t, y + off, note
+
+
+class WavePreview(pg.PlotWidget):
+    """Small oscilloscope-like view of one channel (yellow CH1, cyan CH2, as on the generator)."""
+    COLORS = {1: "#f0c419", 2: "#2ec5e6"}
+
+    def __init__(self, ch):
+        super().__init__()
+        self.ch = ch
+        self.setBackground("#05070a")
+        self.setMinimumHeight(170)
+        self.setMaximumHeight(210)
+        self.showGrid(x=True, y=True, alpha=0.25)
+        self.setMouseEnabled(x=False, y=False)
+        self.hideButtons()
+        self.getPlotItem().setMenuEnabled(False)
+        self.setLabel("bottom", units="s")
+        self.setLabel("left", units="V")
+        self.curve = self.plot([], [], pen=pg.mkPen(self.COLORS.get(ch, "#f0c419"), width=2))
+
+    def show_wave(self, p: dict, on: bool):
+        try:
+            t, y, note = preview(p)
+        except Exception as e:                       # unfinished input: keep the last picture
+            self.setTitle(f"preview: {e}", color="#ff6b6b", size="9pt")
+            return
+        color = self.COLORS.get(self.ch, "#f0c419")
+        self.curve.setData(t, y)
+        self.curve.setPen(pg.mkPen(color, width=2))
+        lo, hi = float(np.min(y)), float(np.max(y))
+        pad = max((hi - lo) * 0.15, 0.05)
+        self.setYRange(lo - pad, hi + pad, padding=0)
+        self.setXRange(float(t[0]), float(t[-1]), padding=0)
+        wave = next((lbl for lbl, v in WAVES if v == p.get("wave")), "")
+        self.setTitle(f"<span style='color:{color};font-weight:700;'>CH{self.ch}</span>&nbsp;&nbsp;{wave} "
+                      f"{fmt_si(p.get('freq'), 'Hz')} &nbsp;{(p.get('ampl') or 0):g} Vpp &nbsp;offset "
+                      f"{(p.get('offs') or 0):g} V" + (f" &nbsp;&nbsp;{note}" if note else "")
+                      + ("" if on else " &nbsp;&nbsp;<span style='color:#8b949e;'>(output OFF)</span>"),
+                      color="#c9d1d9", size="9pt")
+
+
+# --------------------------------------------------------------------------- #
 #  Tab                                                                         #
 # --------------------------------------------------------------------------- #
 class ChannelPanel(QtWidgets.QWidget):
@@ -700,6 +885,9 @@ class ChannelPanel(QtWidgets.QWidget):
         self.out_btn.clicked.connect(lambda on: self.out_req.emit(self.ch, on))
         self._show_out(False)
         v.addWidget(self.out_btn)
+        self.wave = WavePreview(ch)
+        v.addWidget(self.wave)
+        self._pv_timer = QtCore.QTimer(self, singleShot=True, interval=120, timeout=self.update_preview)
         self.groups = {}
         for gname in GROUPS:
             g = QtWidgets.QGroupBox(f"CH{ch} · {gname}")
@@ -718,6 +906,7 @@ class ChannelPanel(QtWidgets.QWidget):
                 sig = {"enum": "currentIndexChanged", "bool": "toggled"}.get(
                     f.kind, "valueChanged" if f.kind in ("int", "deg", "pct") else "textEdited")
                 getattr(f.w, sig).connect(lambda *_, k=key: self.dirty.add(k))
+                getattr(f.w, sig).connect(lambda *_: self._pv_timer.start())
                 r += 1
             grid.setColumnStretch(1, 1)
             self.groups[gname] = g
@@ -774,6 +963,19 @@ class ChannelPanel(QtWidgets.QWidget):
         if "out" in st:
             self._show_out(bool(st["out"]))
         self._visibility()
+        self.update_preview()
+
+    def update_preview(self):
+        """Draw what the channel puts out with the values in the fields (edited or read back)."""
+        p = dict(self.state)
+        for key, f in self.fields.items():
+            try:
+                v = f.get()
+            except ValueError:
+                continue
+            if v is not None:
+                p[key] = v
+        self.wave.show_wave(p, bool(self.state.get("out")) or self.out_btn.isChecked())
 
     def collect(self) -> dict:
         """Values of the visible fields (hidden ones belong to other waveforms / modes)."""

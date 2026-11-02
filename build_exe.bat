@@ -30,7 +30,7 @@ for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! -
   --name FSW_Monitor %ICONARGS% ^
   --hidden-import bench_monitor --hidden-import canable_analyzer ^
   --hidden-import can_commands --hidden-import telemetry ^
-  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab ^
+  --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import help_tab --hidden-import n6700_supply ^
   --hidden-import pyvisa_py --hidden-import serial.tools.list_ports ^
   --collect-submodules pyvisa --collect-submodules pyvisa_py --hidden-import pyvisa.ctwrapper --collect-submodules can ^
   --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib ^

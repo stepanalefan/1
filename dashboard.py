@@ -78,7 +78,13 @@ class TelemetryCsv:
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
 STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "smw": "#d2a8ff", "can": "#79c0ff", "wait": "#8a96a3",
                "fsw": "#58a6ff", "scan": "#4fd18b", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
-               "sw": "#ffa657", "tfg": "#56d4dd", "mxg": "#f778ba"}
+               "sw": "#ffa657", "tfg": "#56d4dd", "mxg": "#f778ba", "n67": "#e3b341"}
+WD_DEFAULTS = {  # power watchdog configuration (dashboard.json "watchdog")
+    "on": False, "always": False,
+    "seq_error": True, "comm": True, "cc": True, "cc_s": 1.0, "prot": True,
+    "imax_on": False, "imax": 5.0,
+    "off_hmp": True, "off_n67": True,
+}
 SMW_KEYS = [  # key, label
     ("freq", "Frequency, Hz"), ("level", "Level, dBm"), ("format", "Modulation"), ("srate", "Symbol rate, Hz"),
     ("filter", "Filter"), ("fparam", "Filter alpha / BT"), ("dm", "Baseband DM on"),
@@ -214,7 +220,8 @@ class StepDialog(QtWidgets.QDialog):
         self.setWindowTitle({"hmp": "HMP4040 outputs", "smw": "SMW200A signal", "can": "CAN command",
                              "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "scan": "Voltage scan", "repeat": "Repeat",
                              "log": "Log message", "sw": "Switch (slave Arduino)",
-                             "tfg": "TFG6806 generator", "mxg": "N5183B signal generator"}.get(op, op))
+                             "tfg": "TFG6806 generator", "mxg": "N5183B signal generator",
+                             "n67": "N6701C outputs"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
         if op == "hmp":
@@ -303,6 +310,42 @@ class StepDialog(QtWidgets.QDialog):
             arow.addWidget(QtWidgets.QLabel("slot"))
             arow.addWidget(self.tfg_slot)
             f.addRow("Then", arow)
+        elif op == "n67":
+            grid = QtWidgets.QGridLayout()
+            for c, h in enumerate(("Channel", "Set", "Voltage, V", "Current, A", "Output")):
+                grid.addWidget(QtWidgets.QLabel(f"<b>{h}</b>"), 0, c)
+            chs = step.get("ch", {})
+            n67 = getattr(host, "n67", None)
+            nch = len(n67.channels) if n67 and n67.channels else 2
+            for ch in range(1, max(nch, 2) + 1):
+                p = chs.get(str(ch))
+                use = QtWidgets.QCheckBox()
+                use.setChecked(p is not None)
+                use.setToolTip("Unchecked = leave this channel as it is")
+                v = QtWidgets.QDoubleSpinBox()
+                v.setRange(0, 100)
+                v.setDecimals(3)
+                v.setValue((p or {}).get("v", 12.0))
+                i = QtWidgets.QDoubleSpinBox()
+                i.setRange(0, 20)
+                i.setDecimals(3)
+                i.setValue((p or {}).get("i", 1.0))
+                on = QtWidgets.QCheckBox("on")
+                on.setChecked((p or {}).get("on", True))
+                for c, wdg in enumerate((QtWidgets.QLabel(f"OUT {ch}"), use, v, i, on)):
+                    grid.addWidget(wdg, ch, c)
+                self.w[ch] = (use, v, i, on)
+            f.addRow(grid)
+            self.n67_all = QtWidgets.QComboBox()
+            self.n67_all.addItems(["leave as is", "ALL ON", "ALL OFF"])
+            a = step.get("all")
+            self.n67_all.setCurrentIndex(0 if a is None else (1 if a else 2))
+            f.addRow("Then all outputs", self.n67_all)
+            self.n67_clear = QtWidgets.QCheckBox("Clear protection (OV / OC / OT) first")
+            self.n67_clear.setChecked(bool(step.get("clear")))
+            f.addRow(self.n67_clear)
+            f.addRow(QtWidgets.QLabel("The step waits until the N6701C has accepted the settings; "
+                                      "an SCPI error stops the sequence."))
         elif op == "mxg":
             mg = _mxg()
             if mg is None:
@@ -500,6 +543,14 @@ class StepDialog(QtWidgets.QDialog):
                     s["slot"] = self.tfg_slot.value()
                 if not s["p"] and not s["action"]:
                     raise ValueError("select at least one parameter or an action")
+            elif op == "n67":
+                s["ch"] = {str(ch): {"v": v.value(), "i": i.value(), "on": on.isChecked()}
+                           for ch, (use, v, i, on) in self.w.items() if use.isChecked()}
+                a = self.n67_all.currentIndex()
+                s["all"] = None if a == 0 else (a == 1)
+                s["clear"] = self.n67_clear.isChecked()
+                if not s["ch"] and s["all"] is None and not s["clear"]:
+                    raise ValueError("nothing to do: select a channel or 'all outputs'")
             elif op == "mxg":
                 s["p"] = {k: fld.get() for k, (use, fld) in getattr(self, "mxg_w", {}).items() if use.isChecked()}
                 s["action"] = self.mxg_act.currentData()
@@ -570,6 +621,80 @@ def _tfg():
         return None
 
 
+def n6700_mode(n, ch, on) -> str:
+    mod = sys.modules.get(type(n).__module__)
+    op, q = n.last_status.get(ch, (0, 0))
+    return mod.mode_text(on, op, q) if mod else ("ON" if on else "OFF")
+
+
+class WatchdogDialog(QtWidgets.QDialog):
+    """Power watchdog conditions (separate from the BOS watchdog of the switch panel)."""
+
+    def __init__(self, parent, cfg: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Power watchdog - conditions")
+        c = dict(WD_DEFAULTS, **cfg)
+        v = QtWidgets.QVBoxLayout(self)
+        g = QtWidgets.QGroupBox("Switch the power off when …")
+        f = QtWidgets.QGridLayout(g)
+        self.cb = {}
+        rows = [
+            ("seq_error", "a sequence step fails (device error, SCPI error, timeout)"),
+            ("comm", "a power supply stops communicating (COM port unplugged, LAN lost)"),
+            ("cc", "an output reaches its current limit (CC) for longer than"),
+            ("prot", "an N6701C protection trips (over-voltage, over-current, over-temperature)"),
+            ("imax_on", "an output current exceeds"),
+        ]
+        for r, (k, text) in enumerate(rows):
+            cb = QtWidgets.QCheckBox(text)
+            cb.setChecked(bool(c[k]))
+            self.cb[k] = cb
+            f.addWidget(cb, r, 0)
+        self.cc_s = QtWidgets.QDoubleSpinBox()
+        self.cc_s.setRange(0.0, 600.0)
+        self.cc_s.setDecimals(1)
+        self.cc_s.setSuffix(" s")
+        self.cc_s.setValue(float(c["cc_s"]))
+        self.cc_s.setToolTip("Short current-limit phases (inrush when switching on) are ignored")
+        f.addWidget(self.cc_s, 2, 1)
+        self.imax = QtWidgets.QDoubleSpinBox()
+        self.imax.setRange(0.001, 50.0)
+        self.imax.setDecimals(3)
+        self.imax.setSuffix(" A")
+        self.imax.setValue(float(c["imax"]))
+        f.addWidget(self.imax, 4, 1)
+        v.addWidget(g)
+        g = QtWidgets.QGroupBox("Monitoring")
+        gv = QtWidgets.QVBoxLayout(g)
+        self.only_seq = QtWidgets.QRadioButton("only while a test sequence is running")
+        self.always = QtWidgets.QRadioButton("always (also without a sequence)")
+        (self.always if c["always"] else self.only_seq).setChecked(True)
+        gv.addWidget(self.only_seq)
+        gv.addWidget(self.always)
+        v.addWidget(g)
+        g = QtWidgets.QGroupBox("Action")
+        gv = QtWidgets.QVBoxLayout(g)
+        self.off_hmp = QtWidgets.QCheckBox("HMP4040: master output OFF (stops power cycling)")
+        self.off_n67 = QtWidgets.QCheckBox("N6701C: all outputs OFF")
+        self.off_hmp.setChecked(bool(c["off_hmp"]))
+        self.off_n67.setChecked(bool(c["off_n67"]))
+        gv.addWidget(self.off_hmp)
+        gv.addWidget(self.off_n67)
+        gv.addWidget(QtWidgets.QLabel("A running sequence is always stopped. The event is written to the log "
+                                      "and to watchdog_log_YYYY-MM-DD.csv."))
+        v.addWidget(g)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def values(self, on: bool) -> dict:
+        c = {k: cb.isChecked() for k, cb in self.cb.items()}
+        c.update(on=on, always=self.always.isChecked(), cc_s=self.cc_s.value(), imax=self.imax.value(),
+                 off_hmp=self.off_hmp.isChecked(), off_n67=self.off_n67.isChecked())
+        return c
+
+
 def _mxg():
     try:
         import mxg_generator
@@ -606,7 +731,7 @@ def sw_pins(sw):
 
 
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "SMW200A", "N5183B", "TFG6806", "34405A", "Arduino", "Slave", "CAN"]
+    DEVICES = ["FSW", "HMP4040", "N6701C", "SMW200A", "N5183B", "TFG6806", "34405A", "Arduino", "Slave", "CAN"]
 
     def __init__(self, host):
         super().__init__()
@@ -630,10 +755,18 @@ class Dashboard(QtWidgets.QWidget):
         self._tlog_last: dict = {}             # (unit, type, Field) -> last logged value
         self.volt_curves = {}
         self._range = None
+        self.wd = dict(WD_DEFAULTS, **self.data.get("watchdog", {}))
+        self.wd_latched = ""                    # reason of the last trigger (until reset / new run)
+        self.wd_since = None                    # armed since (time.time())
+        self.wd_cc: dict = {}                   # (supply, ch) -> CC since
+        self.wd_pre_trip: set = set()           # N6701C outputs already tripped when the watchdog armed
 
         self._build()
         self.timer = QtCore.QTimer(self, interval=500, timeout=self._tick)
         self.timer.start()
+        self.wd_timer = QtCore.QTimer(self, interval=200, timeout=self._wd_check)
+        self.wd_timer.start()
+        self._wd_show()
         self.runner = QtCore.QTimer(self, singleShot=True, timeout=self._step)
         if self.load_error:
             QtCore.QTimer.singleShot(0, lambda: self.log(self.load_error, "err"))
@@ -675,12 +808,15 @@ class Dashboard(QtWidgets.QWidget):
         grid.setColumnMinimumWidth(4, 10)
         lv.addWidget(g)
 
-        pair = QtWidgets.QHBoxLayout()               # HMP4040 outputs | Switch, side by side
-        g = QtWidgets.QGroupBox("HMP4040 outputs")
+        outs = QtWidgets.QGroupBox("Power supply outputs")      # HMP4040 | N6701C
+        orow = QtWidgets.QHBoxLayout(outs)
+        orow.setContentsMargins(6, 2, 6, 2)
+        g = QtWidgets.QWidget()
         hg = QtWidgets.QGridLayout(g)
+        hg.setContentsMargins(0, 0, 0, 0)
         hg.setVerticalSpacing(2)
         hg.setHorizontalSpacing(6)
-        for col, text in enumerate(("", "Ch", "V", "A", "W", "")):
+        for col, text in enumerate(("", "HMP", "V", "A", "W", "")):
             lb = QtWidgets.QLabel(text)
             lb.setStyleSheet(f"color:{C_DIM};")
             hg.addWidget(lb, 0, col)
@@ -704,7 +840,68 @@ class Dashboard(QtWidgets.QWidget):
             hg.addWidget(mode, r, 5)
             self.hmp_rows[ch] = (led, *cells, mode)
         hg.setColumnStretch(3, 1)
-        pair.addWidget(g, 1)
+        orow.addWidget(g, 1)
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.VLine)
+        sep.setStyleSheet("color:#2a3038;")
+        orow.addWidget(sep)
+        g = QtWidgets.QWidget()
+        ng = QtWidgets.QGridLayout(g)
+        ng.setContentsMargins(0, 0, 0, 0)
+        ng.setVerticalSpacing(2)
+        ng.setHorizontalSpacing(6)
+        for col, text in enumerate(("", "N6701C", "V", "A", "W", "")):
+            lb = QtWidgets.QLabel(text)
+            lb.setStyleSheet(f"color:{C_DIM};")
+            ng.addWidget(lb, 0, col)
+        self.n67_rows = {}
+        for r, ch in enumerate((1, 2, 3, 4), start=1):
+            led = QtWidgets.QLabel("●")
+            led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
+            cells = [QtWidgets.QLabel("—") for _ in range(3)]
+            for c in cells:
+                c.setFont(mono)
+                c.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            mode = QtWidgets.QLabel("")
+            mode.setStyleSheet("font-weight:700;")
+            row_w = (led, QtWidgets.QLabel(f"<b>CH{ch}</b>"), *cells, mode)
+            for k, wdg in enumerate(row_w):
+                ng.addWidget(wdg, r, k)
+                wdg.setVisible(ch <= 2)
+            self.n67_rows[ch] = row_w
+        ng.setColumnStretch(3, 1)
+        ng.setRowStretch(5, 1)                       # rows stay at the top, aligned with the HMP rows
+        orow.addWidget(g, 1)
+        lv.addWidget(outs)
+
+        pair = QtWidgets.QHBoxLayout()               # Switch | Power watchdog, side by side
+        wg = QtWidgets.QGroupBox("Power watchdog")
+        wv = QtWidgets.QVBoxLayout(wg)
+        wv.setContentsMargins(6, 2, 6, 4)
+        wv.setSpacing(3)
+        self.wd_chk = QtWidgets.QCheckBox("Switch power off on error")
+        self.wd_chk.setChecked(bool(self.wd["on"]))
+        self.wd_chk.setToolTip("On a selected error condition the power supplies are switched off and a\n"
+                               "running sequence is stopped. 'Conditions…' selects what triggers it.\n"
+                               "(The BOS watchdog in the switch panel is a separate function.)")
+        self.wd_chk.toggled.connect(self._on_wd_toggled)
+        wb = QtWidgets.QHBoxLayout()
+        cond = QtWidgets.QPushButton("Conditions…")
+        cond.setStyleSheet("padding:2px 6px;")
+        cond.clicked.connect(self.edit_watchdog)
+        self.wd_reset_btn = QtWidgets.QPushButton("Reset")
+        self.wd_reset_btn.setStyleSheet("padding:2px 6px;")
+        self.wd_reset_btn.setToolTip("Acknowledge the last trigger and re-arm the watchdog")
+        self.wd_reset_btn.clicked.connect(self.reset_watchdog)
+        wb.addWidget(cond)
+        wb.addWidget(self.wd_reset_btn)
+        wb.addStretch(1)
+        self.wd_status = QtWidgets.QLabel("")
+        self.wd_status.setWordWrap(True)
+        self.wd_status.setMinimumHeight(3 * self.wd_status.fontMetrics().lineSpacing())
+        wv.addWidget(self.wd_chk)
+        wv.addLayout(wb)
+        wv.addWidget(self.wd_status, 1)
 
         self.temp_box = QtWidgets.QGroupBox("Temperatures (1-Wire)")
         self.temp_grid = QtWidgets.QGridLayout(self.temp_box)
@@ -714,9 +911,8 @@ class Dashboard(QtWidgets.QWidget):
         lv.addWidget(self.temp_box)
         sw = getattr(self.host, "switch", None)
         if sw:
-            pair.addWidget(sw.panel, 1)
-        pair.setStretch(0, 6)
-        pair.setStretch(1, 5)
+            pair.addWidget(sw.panel, 6)
+        pair.addWidget(wg, 5)
         lv.insertLayout(lv.indexOf(self.temp_box), pair)
 
         g = QtWidgets.QGroupBox("Test sequence")
@@ -738,13 +934,14 @@ class Dashboard(QtWidgets.QWidget):
         self.list.setToolTip("Double-click to edit a step")
         sv.addWidget(self.list, 1)
         add = QtWidgets.QGridLayout()
-        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ SMW", "smw"), ("+ CAN", "can"),
+        for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ N6701C", "n67"), ("+ SMW", "smw"), ("+ CAN", "can"),
                                         ("+ Pause", "wait"), ("+ FSW", "fsw"), ("+ FSW set", "fsw_set"),
                                         ("+ Scan", "scan"), ("+ Repeat", "repeat"), ("+ Log", "log"),
                                         ("+ Switch", "sw"), ("+ TFG", "tfg"), ("+ MXG", "mxg"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
-            b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)"}.get(op, ""))
+            b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)",
+                          "n67": "N6701C outputs (voltage, current, on/off), waits until accepted"}.get(op, ""))
             b.clicked.connect(lambda _, op=op: self.add_step(op))
             add.addWidget(b, k // 5, k % 5)
         add.setSpacing(3)
@@ -896,6 +1093,7 @@ class Dashboard(QtWidgets.QWidget):
     def save(self):
         self.data["watch"] = [[u, t, f.byte, f.name] for u, t, f in self.watch_rows]
         self.data["volt_channels"] = self.volt_ch.text()
+        self.data["watchdog"] = self.wd
         self.data["tlog"] = self.tlog_chk.isChecked()
         self.data["tlog_changes"] = self.tlog_chg.isChecked()
         try:
@@ -944,6 +1142,12 @@ class Dashboard(QtWidgets.QWidget):
             rf = smw.is_connected and smw.rf_btn.isChecked()
             self._set_status("SMW200A", "ok" if smw.is_connected else "off",
                              smw.idn or "not connected", "RF ON" if rf else "")
+        n = getattr(h, "n67", None)
+        if n:
+            on = [f"CH{ch}" for ch in n.channels if n.last_state.get(ch, (0, 0, False))[2]] if n.ok else []
+            self._set_status("N6701C", "ok" if n.ok else "off", n.status_lbl.text().lstrip("✓ "),
+                             (" ".join(on) + " ON") if on else "")
+            self._refresh_n67(n)
         mxg = getattr(h, "mxg", None)
         if mxg:
             self._set_status("N5183B", "ok" if mxg.is_connected else "off", mxg.idn or "not connected",
@@ -960,6 +1164,182 @@ class Dashboard(QtWidgets.QWidget):
             self._set_status("CAN", "ok" if ok else "off", c.status.text().lstrip("● "),
                              f"{c.n_rx:,} frames" if ok else "")
         self._refresh_volt()
+        self._wd_show()
+
+    def _refresh_n67(self, n):
+        for ch, (led, name, v_l, i_l, p_l, mode_l) in self.n67_rows.items():
+            present = ch in n.channels if n.channels else ch <= 2
+            for w in (led, name, v_l, i_l, p_l, mode_l):
+                w.setVisible(present)
+            st = n.last_state.get(ch) if n.ok else None
+            if st is None:
+                led.setStyleSheet(f"color:{C_OFF};font-size:16px;")
+                for lb in (v_l, i_l, p_l):
+                    lb.setText("—")
+                mode_l.setText("")
+                continue
+            vset, iset, on = st[:3]
+            v, i = n.last_meas.get(ch, (0.0, 0.0))
+            mode = n6700_mode(n, ch, on)
+            live = mode in ("CV", "CC", "ON")
+            led.setStyleSheet(f"color:{C_ERR if mode.startswith('PROT') else (C_OK if live else C_OFF)};font-size:16px;")
+            texts = (f"{v:.3f}", f"{i:.3f}", f"{v * i:.2f}") if live else (f"{vset:.3f}", f"{iset:.3f}", "—")
+            for lb, t in zip((v_l, i_l, p_l), texts):
+                lb.setText(t)
+                lb.setStyleSheet("" if live else f"color:{C_DIM};")
+                lb.setToolTip(f"set {vset:.3f} V / {iset:.3f} A")
+            mode_l.setText(mode)
+            mode_l.setStyleSheet("font-weight:700;color:" + (C_ERR if mode == "CC" or mode.startswith("PROT")
+                                                              else C_OK if live else C_DIM) + ";")
+
+    # ------------------------------------------------------- power watchdog
+    def _wd_armed(self) -> bool:
+        return bool(self.wd_chk.isChecked() and not self.wd_latched and (self.running or self.wd["always"]))
+
+    def _on_wd_toggled(self, on):
+        self.wd["on"] = on
+        self.save()
+        self.log(f"Power watchdog {'ON' if on else 'OFF'}", "ok" if on else "info")
+        self._wd_show()
+
+    def edit_watchdog(self):
+        dlg = WatchdogDialog(self, self.wd)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.wd = dlg.values(self.wd_chk.isChecked())
+            self.save()
+            self.log("Power watchdog conditions: " + self._wd_conditions_text())
+            self._wd_show()
+
+    def _wd_conditions_text(self) -> str:
+        c = self.wd
+        parts = [t for k, t in (("seq_error", "step error"), ("comm", "supply communication lost"),
+                                ("prot", "N6701C protection")) if c.get(k)]
+        if c.get("cc"):
+            parts.append(f"CC > {c['cc_s']:g} s")
+        if c.get("imax_on"):
+            parts.append(f"I > {c['imax']:g} A")
+        acts = [n for k, n in (("off_hmp", "HMP4040"), ("off_n67", "N6701C")) if c.get(k)]
+        return (", ".join(parts) or "no condition") + "  →  off: " + (", ".join(acts) or "nothing") + \
+            ("  (always)" if c.get("always") else "  (during sequences)")
+
+    def reset_watchdog(self):
+        if self.wd_latched:
+            self.log("Power watchdog reset", "info")
+        self.wd_latched = ""
+        self.wd_since = None
+        self.wd_cc.clear()
+        self._wd_show()
+
+    def _wd_show(self):
+        if self.wd_latched:
+            self.wd_status.setText(f"TRIGGERED: {self.wd_latched}")
+            self.wd_status.setStyleSheet(f"color:{C_ERR};font-weight:700;")
+        elif not self.wd_chk.isChecked():
+            self.wd_status.setText("off")
+            self.wd_status.setStyleSheet(f"color:{C_DIM};")
+        else:
+            armed = self._wd_armed()
+            self.wd_status.setText(("ARMED  " if armed else "ready  ") + self._wd_conditions_text())
+            self.wd_status.setStyleSheet(f"color:{C_OK if armed else C_DIM};")
+        self.wd_status.setToolTip(self.wd_status.text())
+        self.wd_reset_btn.setEnabled(bool(self.wd_latched))
+
+    def _wd_check(self):
+        """Every 200 ms: evaluate the conditions while armed."""
+        if not self._wd_armed():
+            self.wd_since = None
+            self.wd_cc.clear()
+            return
+        now = time.time()
+        c, h = self.wd, self.host
+        b, n = getattr(h, "bench", None), getattr(h, "n67", None)
+        if self.wd_since is None:
+            self._wd_arm()
+        if c["comm"]:
+            if b and getattr(b, "hmp_comm_error_t", 0) > self.wd_since:
+                return self.wd_trigger("HMP4040 communication lost")
+            if n and n.comm_error_t > self.wd_since:
+                return self.wd_trigger("N6701C communication lost")
+        if c["prot"] and n and n.ok:
+            for ch in n.channels:
+                if not n.tripped(ch):
+                    self.wd_pre_trip.discard(ch)
+                elif ch not in self.wd_pre_trip:
+                    return self.wd_trigger(f"N6701C OUT{ch} protection tripped ({n6700_mode(n, ch, True)})")
+        if c["imax_on"]:
+            for name, meas in (("HMP4040", b.hmp_last_meas if b and b._hmp_ok else {}),
+                               ("N6701C", n.last_meas if n and n.ok else {})):
+                for ch, (_, i) in meas.items():
+                    if abs(i) > c["imax"]:
+                        return self.wd_trigger(f"{name} OUT{ch} current {i:.3f} A > {c['imax']:g} A")
+        if c["cc"]:
+            cc_now = set()
+            if b and b._hmp_ok:
+                cc_now |= {("HMP4040", ch) for ch in (1, 2, 3, 4) if b.hmp_cc(ch)}
+            if n and n.ok:
+                cc_now |= {("N6701C", ch) for ch in n.channels if n.is_cc(ch)}
+            for key in list(self.wd_cc):
+                if key not in cc_now:
+                    del self.wd_cc[key]
+            for key in cc_now:
+                t0 = self.wd_cc.setdefault(key, now)
+                if now - t0 >= c["cc_s"]:
+                    return self.wd_trigger(f"{key[0]} OUT{key[1]} in current limit (CC) for {now - t0:.1f} s")
+
+    def _wd_arm(self):
+        """Start monitoring now. An output already in protection at this moment (e.g. the sequence starts
+        with "clear protection") is ignored until it clears - only new trips trigger."""
+        n = getattr(self.host, "n67", None)
+        self.wd_since = time.time()
+        self.wd_cc.clear()
+        self.wd_pre_trip = {ch for ch in (n.channels if n and n.ok else []) if n.tripped(ch)}
+
+    def wd_trigger(self, reason: str):
+        if self.wd_latched:
+            return
+        self.wd_latched = reason
+        stamp = time.strftime("%H:%M:%S")
+        self.log(f"POWER WATCHDOG TRIGGERED: {reason}", "err")
+        if self.running:
+            self.stop(f"stopped by the power watchdog: {reason}", "err")
+        h, acts = self.host, []
+        b, n = getattr(h, "bench", None), getattr(h, "n67", None)
+        if self.wd["off_hmp"]:
+            if b and b._hmp_ok and b.hmp.dev is not None:
+                w = b.hmp
+
+                def hmp_off():
+                    if w._cyc:
+                        w.stop_cycle("stopped by the watchdog", power_off=True)
+                    else:
+                        w.set_master(False)
+                w.submit(hmp_off)
+                acts.append("HMP4040 master output OFF")
+            else:
+                acts.append("HMP4040 not connected - could NOT switch it off")
+        if self.wd["off_n67"]:
+            if n and n.ok and n.worker.dev is not None:
+                n.worker.submit(lambda: n.worker.set_all(False, "watchdog"))
+                acts.append("N6701C all outputs OFF")
+            else:
+                acts.append("N6701C not connected - could NOT switch it off")
+        self.log("Power watchdog action: " + "; ".join(acts), "err")
+        self._wd_write(stamp, reason, acts)
+        self._wd_show()
+
+    def _wd_write(self, stamp, reason, acts):
+        b = getattr(self.host, "bench", None)
+        folder = b.log_folder if b else _app_dir()
+        path = os.path.join(folder, f"watchdog_log_{time.strftime('%Y-%m-%d')}.csv")
+        try:
+            new = not os.path.isfile(path)
+            with open(path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["Time", "Sequence", "Reason", "Action"])
+                w.writerow([stamp, self.seq_cb.currentText(), reason, "; ".join(acts)])
+        except OSError as e:
+            self.log(f"cannot write {path}: {e}", "err")
 
     def _refresh_temps(self, tt):
         """Name + temperature of every 1-Wire sensor; red = error, grey = not found in the last poll."""
@@ -1219,6 +1599,14 @@ class Dashboard(QtWidgets.QWidget):
             return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
         if op == "wait":
             return f"⏱ Pause {s['ms']} ms"
+        if op == "n67":
+            parts = [f"OUT{ch} {p['v']:g} V / {p['i']:g} A {'on' if p['on'] else 'off'}"
+                     for ch, p in sorted(s.get("ch", {}).items())]
+            if s.get("clear"):
+                parts.insert(0, "clear protection")
+            if s.get("all") is not None:
+                parts.append(f"ALL {'ON' if s['all'] else 'OFF'}")
+            return "⚡ N6701C   " + ", ".join(parts)
         if op == "mxg":
             mg = _mxg()
             parts = [f"{mg.PARAMS[k][1]} {mg.describe(k, v)}" if mg and k in mg.PARAMS else k
@@ -1316,7 +1704,8 @@ class Dashboard(QtWidgets.QWidget):
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
                     "log": {"text": ""}, "can": {}, "sw": {"out": 0, "action": "pulse", "ms": 1000},
                     "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}},
-                    "mxg": {"p": {"freq": 1e9, "power": -20.0, "rf": True}}}
+                    "mxg": {"p": {"freq": 1e9, "power": -20.0, "rf": True}},
+                    "n67": {"ch": {"1": {"v": 12.0, "i": 1.0, "on": True}}, "all": None, "clear": False}}
         dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1415,6 +1804,10 @@ class Dashboard(QtWidgets.QWidget):
             self.run_btn.setChecked(False)
             return
         self.running = True
+        if self.wd_latched:
+            self.reset_watchdog()                     # a new run re-arms a triggered watchdog
+        if self.wd_chk.isChecked():
+            self._wd_arm()                            # armed before the first step runs
         self.run_steps = json.loads(json.dumps(self.steps))
         self.pc, self.stack, self.pending, self.wait_until = 0, [], None, 0.0
         self.run_btn.setText("■ Stop")
@@ -1442,7 +1835,11 @@ class Dashboard(QtWidgets.QWidget):
             self.list.scrollToItem(self.list.item(pc))
 
     def _fail(self, msg):
-        self.stop(f"ABORTED at step {self.pc + 1}: {msg}", "err")
+        armed = self._wd_armed()
+        step = self.pc + 1
+        self.stop(f"ABORTED at step {step}: {msg}", "err")
+        if armed and self.wd["seq_error"]:
+            self.wd_trigger(f"sequence step {step} failed: {msg}")
 
     def _step(self):
         if not self.running:
@@ -1532,6 +1929,23 @@ class Dashboard(QtWidgets.QWidget):
             params = {k: s[k] for k, _ in SMW_KEYS if k in s}
             return run_in(smw.worker.submit, lambda: smw.worker.apply(params, prev={}, label="sequence"),
                           "SMW200A")
+        elif op == "n67":
+            n = getattr(h, "n67", None)
+            if not n or not n.ok:
+                raise RuntimeError("N6701C not connected")
+            w = n.worker
+            chans = [c for c in s.get("ch", {}) if int(c) not in n.channels]
+            if chans:
+                raise RuntimeError(f"N6701C has no output {', '.join(chans)}")
+
+            def job():
+                if s.get("clear"):
+                    w.clear_protection()
+                for ch, p in sorted(s.get("ch", {}).items()):
+                    w.set_channel(int(ch), p["v"], p["i"], p["on"])
+                if s.get("all") is not None:
+                    w.set_all(s["all"], "sequence")
+            return run_in(w.submit, job, "N6701C")
         elif op == "mxg":
             mxg = getattr(h, "mxg", None)
             if not mxg or not mxg.is_connected:

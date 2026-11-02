@@ -14,3 +14,5 @@ temperature_log_*.csv
 switch_log_*.csv
 switch.json
 can_lines.json
+n6700_log_*.csv
+watchdog_log_*.csv

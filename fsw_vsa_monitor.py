@@ -229,6 +229,13 @@ try:  # Keysight N5183B MXG signal generator tab
 except Exception:  # pragma: no cover
     mxg_generator = None
 
+try:  # Keysight N6701C power system tab
+    import n6700_supply
+    _N67_ERR = None
+except Exception as _e:  # pragma: no cover
+    n6700_supply = None
+    _N67_ERR = f"{type(_e).__name__}: {_e}"
+
 try:  # Help tab (FAQ / Readme / About)
     import help_tab
 except Exception:  # pragma: no cover
@@ -1339,6 +1346,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ip_edit.setText(args.ip)
         if args.protocol:
             self.proto.setCurrentIndex({"hislip": 0, "vxi11": 1, "socket": 2}[args.protocol])
+        if self.n67:
+            self.n67.log.connect(self.logmsg)
+            if self.bench:
+                self.bench.folder_listeners.append(self.n67._reopen_log)
+        elif n6700_supply is None:
+            self.logmsg(f"N6701C tab disabled - n6700_supply.py could not be loaded ({_N67_ERR})", "warn")
         if self.bench:
             self.bench.log.connect(self.logmsg)
         else:
@@ -1354,6 +1367,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(300, self.can_win.toggle_connect)
             if self.bench:
                 self.bench.demo_chk.setChecked(True)
+            if self.n67:
+                self.n67.demo_chk.setChecked(True)
             if self.smw:
                 self.smw.proto.setCurrentIndex(3)
                 QtCore.QTimer.singleShot(400, self.smw.on_connect)
@@ -1544,6 +1559,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # left column: connection (shared) + settings of the active tab
         self.settings_stack = QtWidgets.QStackedWidget()
         self.bench = bench_monitor.BenchTab(self) if bench_monitor else None
+        self.n67 = n6700_supply.N6700Tab(
+            self, folder_fn=lambda: self.bench.log_folder if self.bench else bench_monitor.script_dir()) \
+            if n6700_supply else None
         pages = [left, self._build_spec_settings()]
         self.can_win = None
         if canable_analyzer:
@@ -1735,6 +1753,17 @@ class MainWindow(QtWidgets.QMainWindow):
             bench_split.addWidget(page(self.bench.page))
             bench_split.setSizes([390, 1170])
             self.tabs.addTab(bench_split, "Bench: 176 ch + HMP4040")
+        if self.n67:
+            n_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            nscroll = QtWidgets.QScrollArea()
+            nscroll.setWidget(self.n67.settings_panel)
+            nscroll.setWidgetResizable(True)
+            nscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            nscroll.setMinimumWidth(330)
+            n_split.addWidget(nscroll)
+            n_split.addWidget(page(self.n67.page))
+            n_split.setSizes([340, 1220])
+            self.tabs.addTab(n_split, "N6701C")
         self.temps = None
         if onewire_temp and self.bench:
             self.temps = onewire_temp.TempTab(self.bench)
@@ -2399,6 +2428,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ev.ignore()
                 return
             self.bench.shutdown()
+        if self.n67:
+            self.n67.shutdown()
         if self.can_win:
             self.can_win.close()            # stops worker, script, recording
         if self.smw:
