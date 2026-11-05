@@ -40,7 +40,7 @@ def parse_hp(s, default_port):
 
 
 class MainWindow(QtWidgets.QWidget):
-    event = QtCore.pyqtSignal(str, object)
+    host_sig = QtCore.pyqtSignal(str, object)
 
     def __init__(self, args):
         super().__init__()
@@ -110,7 +110,7 @@ class MainWindow(QtWidgets.QWidget):
         lay.addWidget(left, 1)
         lay.addWidget(right, 1)
 
-        self.event.connect(self._on_event)
+        self.host_sig.connect(self._on_event)
         self.host = Host(self.pw.text(), self._host_event, direct_port=args.port,
                          relay=self.relay, host_id=self.cfg.get("id"),
                          unattended=self.unattended.isChecked(),
@@ -124,10 +124,10 @@ class MainWindow(QtWidgets.QWidget):
     def _host_event(self, name, arg):
         if name == "accept":
             self._accept_done.clear()
-            self.event.emit(name, arg)
+            self.host_sig.emit(name, arg)
             self._accept_done.wait(60)
             return bool(self._accept_result)
-        self.event.emit(name, arg)
+        self.host_sig.emit(name, arg)
 
     def _on_event(self, name, arg):
         if name == "id":
