@@ -51,7 +51,7 @@ jobs:
           cp RemoteDesk/android/RemoteDesk-android.apk RemoteDesk/dist/RemoteDesk-android.apk
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RemoteDesk/dist/RemoteDesk-android.apk
+          git add -f RemoteDesk/dist/RemoteDesk-android.apk   # dist/ is gitignored for .exe builds
           git diff --cached --quiet && exit 0
           git commit -m "Android APK build from ${GITHUB_SHA::7}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
