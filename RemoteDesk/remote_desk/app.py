@@ -8,6 +8,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import theme
 from .host import Host
+from .netutil import format_hostport, local_addresses, parse_hostport
 from .viewer import ViewerWindow, open_channel
 
 CONFIG = os.path.join(os.path.expanduser("~"), ".remotedesk.json")
@@ -36,9 +37,10 @@ def gen_password():
 
 
 def parse_hp(s, default_port):
-    s = (s or "").strip()
-    h, _, p = s.rpartition(":") if ":" in s else (s, "", "")
-    return (h, int(p or default_port)) if h else None
+    try:
+        return parse_hostport(s, default_port)
+    except ValueError:
+        return None
 
 
 def fmt_id(i):
@@ -55,7 +57,7 @@ class SettingsDialog(QtWidgets.QDialog):
         f = QtWidgets.QFormLayout(self)
         f.setSpacing(10)
         self.server = QtWidgets.QLineEdit(cfg.get("relay", ""))
-        self.server.setPlaceholderText("e.g. 203.0.113.10:7070 or rd.example.com")
+        self.server.setPlaceholderText("e.g. 203.0.113.10:7070, [2001:db8::10]:7070 or rd.example.com")
         f.addRow("Server:", self.server)
         hint = theme.label("Address of the computer running RemoteDesk Server. "
                            "Leave empty to use direct (LAN/VPN) connections only.", "Muted")
@@ -317,11 +319,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_lan()
 
     def _show_lan(self):
-        from .server_gui import local_addresses
         ips = local_addresses()
         if ips and self.cfg.get("port"):
             self.lan_lbl.setText("On the local network you can also connect to: "
-                                 + ", ".join(f"{i}:{self.cfg['port']}" for i in ips))
+                                 + ", ".join(format_hostport(i, self.cfg["port"]) for i in ips))
         else:
             self.lan_lbl.setText("")
 
@@ -389,7 +390,7 @@ class MainWindow(QtWidgets.QMainWindow):
                          view_only=self.cfg.get("view_only", False))
         if relay:
             self.id_lbl.setText(fmt_id(self.cfg["id"]) if self.cfg.get("id") else "…")
-            self._set_online(False, f"Connecting to server {relay[0]}:{relay[1]}…")
+            self._set_online(False, f"Connecting to server {format_hostport(*relay)}…")
         else:
             self.id_lbl.setText("No server set")
             self._set_online(False, "No server configured — open Settings to add one. "
@@ -491,7 +492,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.relay = relay
             self.host.set_relay(relay)
             if relay:
-                self._set_online(False, f"Connecting to server {relay[0]}:{relay[1]}…")
+                self._set_online(False, f"Connecting to server {format_hostport(*relay)}…")
                 self.id_lbl.setText(fmt_id(self.cfg["id"]) if self.cfg.get("id") else "…")
             else:
                 self.id_lbl.setText("No server set")

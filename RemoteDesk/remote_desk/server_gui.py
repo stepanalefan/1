@@ -5,6 +5,7 @@ import json, os, socket, sys, time
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import theme
+from .netutil import format_hostport, local_addresses
 from .relay import Relay
 
 CONFIG = os.path.join(os.path.expanduser("~"), ".remotedesk_server.json")
@@ -16,23 +17,6 @@ def load_cfg():
             return json.load(f)
     except Exception:
         return {}
-
-
-def local_addresses():
-    ips = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
-    except OSError:
-        pass
-    try:  # the address of the default route
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ips.add(s.getsockname()[0])
-        s.close()
-    except OSError:
-        pass
-    return sorted(i for i in ips if not i.startswith("127."))
 
 
 def fmt_age(t):
@@ -118,7 +102,8 @@ class ServerWindow(QtWidgets.QMainWindow):
         l.addLayout(self.addr_box)
         hint = theme.label("Enter one of these in the client under Settings → Server. "
                            "Over the internet use this computer's public IP or domain, "
-                           "and open the port in the firewall / router.", "Muted")
+                           "and open the port in the firewall / router. IPv6 addresses "
+                           "are written in brackets, e.g. [2001:db8::10]:7070.", "Muted")
         hint.setWordWrap(True)
         l.addWidget(hint)
         l.addStretch()
@@ -170,7 +155,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             row = QtWidgets.QWidget()
             hl = QtWidgets.QHBoxLayout(row)
             hl.setContentsMargins(0, 0, 0, 0)
-            text = f"{ip}:{self.port.value()}"
+            text = format_hostport(ip, self.port.value())
             lab = theme.label(text)
             lab.setStyleSheet("font-size: 13pt; font-weight: 600;")
             lab.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -196,7 +181,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.stop_server() if self.relay else self.start_server()
 
     def start_server(self):
-        relay = Relay("0.0.0.0", self.port.value(), on_log=self.log_sig.emit)
+        relay = Relay("", self.port.value(), on_log=self.log_sig.emit)
         try:
             relay.start()
         except OSError as e:

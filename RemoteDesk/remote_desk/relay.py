@@ -10,13 +10,14 @@ Traffic is end-to-end encrypted; the relay never sees the password or keys.
 """
 import argparse, logging, os, secrets, socket, threading, time
 
+from .netutil import clean_ip, format_hostport, listen
 from .protocol import recv_line, send_line
 
 log = logging.getLogger("relay")
 
 
 class Relay:
-    def __init__(self, host="0.0.0.0", port=7070, on_log=None):
+    def __init__(self, host="", port=7070, on_log=None):
         self.addr = (host, port)
         self.hosts = {}     # id -> {"sock", "ip", "since"}
         self.pending = {}   # token -> (viewer sock, time, host_id, viewer ip)
@@ -30,11 +31,13 @@ class Relay:
     # ----------------------------------------------------------- lifecycle
     def start(self):
         """Bind and serve in a background thread (raises if the port is busy)."""
-        self._srv = socket.create_server(self.addr)
+        self._srv = listen(self.addr[1], self.addr[0])
         self.running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._reaper, daemon=True).start()
-        self.on_log(f"Server started on {self.addr[0]}:{self.addr[1]}")
+        fam = "IPv4 + IPv6" if self._srv.family == socket.AF_INET6 and not self.addr[0] else \
+            ("IPv6" if self._srv.family == socket.AF_INET6 else "IPv4")
+        self.on_log(f"Server started on port {self.addr[1]} ({fam})")
 
     def serve_forever(self):
         self.start()
@@ -78,7 +81,7 @@ class Relay:
             except OSError:
                 break
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            threading.Thread(target=self._handle, args=(conn, peer[0]), daemon=True).start()
+            threading.Thread(target=self._handle, args=(conn, clean_ip(peer[0])), daemon=True).start()
 
     def _reaper(self):
         while self.running:
@@ -208,7 +211,7 @@ def _pipe(a, b, sess):
 
 def main():
     ap = argparse.ArgumentParser(description="RemoteDesk relay server (headless)")
-    ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--bind", default="", help="address to listen on (default: all IPv4 and IPv6)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("RD_RELAY_PORT", 7070)))
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()

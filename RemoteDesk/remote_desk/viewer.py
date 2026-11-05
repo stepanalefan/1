@@ -4,6 +4,7 @@ import json, os, socket, struct, threading
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import protocol as P
+from .netutil import connect, parse_hostport
 
 QT_KEYS = {
     QtCore.Qt.Key_Return: "enter", QtCore.Qt.Key_Enter: "enter", QtCore.Qt.Key_Tab: "tab",
@@ -26,14 +27,14 @@ def open_channel(target, password, relay):
     if t.isdigit() and len(t) == 9:
         if not relay:
             raise ConnectionError("no relay server configured")
-        s = socket.create_connection(relay, timeout=15)
+        s = connect(relay[0], relay[1], timeout=15)
         P.send_line(s, {"role": "viewer", "id": t})
         r = P.recv_line(s)
         if not r.get("ok"):
             raise ConnectionError(r.get("error", "relay refused"))
     else:
-        host, _, port = t.partition(":")
-        s = socket.create_connection((host, int(port or 7071)), timeout=15)
+        host, port = parse_hostport(target.strip(), 7071)
+        s = connect(host, port, timeout=15)
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     s.settimeout(120)  # host user may need time to accept
     chan = P.viewer_handshake(s, password)

@@ -7,6 +7,7 @@ visible banner and the local user can end it at any time.
 import hashlib, io, json, logging, os, socket, struct, sys, threading, time
 
 from . import protocol as P
+from .netutil import clean_ip, connect, format_hostport, listen
 
 log = logging.getLogger("host")
 TILE = 64
@@ -244,20 +245,20 @@ class Host:
 
     def _listen(self):
         try:
-            srv = socket.create_server(("0.0.0.0", self.direct_port))
+            srv = listen(self.direct_port)
         except OSError as e:
             self.ev("status", f"Direct port {self.direct_port} unavailable: {e}")
             return
         self.ev("status", f"Direct connections: port {self.direct_port}")
         while True:
             conn, peer = srv.accept()
-            threading.Thread(target=self._incoming, args=(conn, peer[0]), daemon=True).start()
+            threading.Thread(target=self._incoming, args=(conn, clean_ip(peer[0])), daemon=True).start()
 
     def _relay_loop(self, gen):
         host, port = self.relay
         while gen == self._gen:
             try:
-                ctrl = socket.create_connection((host, port), timeout=10)
+                ctrl = connect(host, port, timeout=10)
                 self._ctrl = ctrl
                 P.send_line(ctrl, {"role": "host", "id": self.host_id})
                 r = P.recv_line(ctrl)
@@ -272,7 +273,7 @@ class Host:
                 while True:
                     msg = P.recv_line(ctrl)
                     if "connect" in msg:
-                        d = socket.create_connection((host, port), timeout=10)
+                        d = connect(host, port, timeout=10)
                         P.send_line(d, {"role": "host-data", "token": msg["connect"]})
                         who = f'{msg.get("from", "unknown")} (via server)'
                         threading.Thread(target=self._incoming, args=(d, who),
@@ -281,7 +282,7 @@ class Host:
                 if gen != self._gen:
                     return
                 self.ev("online", False)
-                self.ev("status", f"Server {host}:{port} unreachable ({e}); retrying...")
+                self.ev("status", f"Server {format_hostport(host, port)} unreachable ({e}); retrying...")
                 time.sleep(5)
 
     @staticmethod
