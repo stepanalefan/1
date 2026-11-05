@@ -4,7 +4,7 @@ Every session must pass the password check and (unless unattended mode is
 on) be accepted by the local user. While a session is active the GUI shows a
 visible banner and the local user can end it at any time.
 """
-import hashlib, io, json, logging, os, socket, struct, threading, time
+import hashlib, io, json, logging, os, socket, struct, sys, threading, time
 
 from . import protocol as P
 
@@ -55,6 +55,7 @@ class InputInjector:
         from pynput import mouse, keyboard
         self._m, self._k = mouse.Controller(), keyboard.Controller()
         self._Button, self._Key, self._KeyCode = mouse.Button, keyboard.Key, keyboard.KeyCode
+        self._mods = set()
 
     def mouse(self, ev, geo):
         x = geo["left"] + int(ev["x"] * geo["width"])
@@ -72,17 +73,26 @@ class InputInjector:
 
     def key(self, ev):
         name = (ev.get("key") or "").lower()
+        down = bool(ev.get("down"))
+        if name in ("control", "alt", "meta"):
+            (self._mods.add if down else self._mods.discard)(name)
+        text = ev.get("text") or ""
         if name in SPECIAL:
             k = getattr(self._Key, SPECIAL[name], None)
-        elif ev.get("text") and len(ev["text"]) == 1:
-            k = self._KeyCode.from_char(ev["text"])
+        elif len(text) == 1 and self._mods and text.isascii() and text.isalnum() \
+                and sys.platform == "win32":
+            # Ctrl/Alt/Win + letter: use the virtual-key code so shortcuts work
+            # (a Unicode-injected character is not seen as Ctrl+C etc.)
+            k = self._KeyCode.from_vk(ord(text.upper()))
+        elif len(text) == 1:
+            k = self._KeyCode.from_char(text)
         elif len(name) == 1:
             k = self._KeyCode.from_char(name)
         else:
             return
         if k is None:
             return
-        (self._k.press if ev.get("down") else self._k.release)(k)
+        (self._k.press if down else self._k.release)(k)
 
 
 # ---------------------------------------------------------------- session

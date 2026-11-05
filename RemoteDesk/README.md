@@ -32,6 +32,36 @@ Run `build_windows.bat` → `dist\RemoteDesk.exe` and `dist\RemoteDeskServer.exe
 contain 16–256 px sizes. They are used for the .exe files, windows, taskbar and tray.
 To change them, edit and run `python make_icons.py`, or replace the .ico files with your own.
 
+## Android app (viewer)
+Control your computers from an Android phone or tablet (Android 7+).
+
+**Get the APK:** every push that changes `RemoteDesk/android/` builds it on GitHub:
+repository → **Actions** → *Android APK* → latest run → **Artifacts** → `RemoteDesk-android`
+(a .zip containing `RemoteDesk-android.apk`). Copy it to the phone and open it; allow
+"Install unknown apps" for your browser / file manager when asked.
+
+Or build it yourself: open `RemoteDesk/android` in Android Studio → Run, or
+`cd android && ./gradlew assembleDebug` (needs the Android SDK).
+
+**Use:** Settings → Server = the same address as on the PCs, then enter a desk ID → Connect →
+password. Direct addresses (`192.168.1.20`) work on the same Wi-Fi without a server.
+
+| Gesture | Touchpad mode (default) | Direct touch mode |
+|---|---|---|
+| One-finger drag | move the pointer | drag / select |
+| Tap | left click at the pointer | click at that spot |
+| Double tap + drag | drag / select | — |
+| Long press / two-finger tap | right click | right click (long press) |
+| Two-finger drag | scroll | scroll |
+| Pinch | zoom (move to pan) | zoom (move to pan) |
+
+Toolbar: **Keyboard**, **Keys** (Ctrl/Alt/Shift/Win stay pressed until the next key, Esc, Tab,
+arrows, Home/End, PgUp/PgDn, F1–F12, Ctrl+Alt+Del), mouse mode, **More** (fit to screen,
+monitor, quality, send clipboard, message, fullscreen, disconnect). ▲ hides the toolbar.
+
+Note: the APK is signed with a debug key that changes between CI runs, so to install a newer
+build you may need to uninstall the old one first.
+
 ## Client features
 - Desk ID + random password (show / copy / regenerate), recent sessions as tiles
   (click to connect, right-click to rename / remove)
