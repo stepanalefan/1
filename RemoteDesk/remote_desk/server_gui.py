@@ -57,7 +57,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.relay = None
         self.quitting = False
         self.setWindowTitle("RemoteDesk Server")
-        self.setWindowIcon(theme.make_icon(theme.SERVER_ACCENT, "S"))
+        self.setWindowIcon(theme.app_icon("RemoteDeskServer"))
         self.resize(900, 640)
         self.log_sig.connect(self._append_log)
         self._build()
@@ -283,8 +283,10 @@ class ServerWindow(QtWidgets.QMainWindow):
 
 
 def main():
+    theme.set_windows_app_id("RemoteDesk.Server")
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("RemoteDesk Server")
+    app.setWindowIcon(theme.app_icon("RemoteDeskServer"))
     app.setQuitOnLastWindowClosed(False)
     theme.apply(app, theme.SERVER_ACCENT, "#2459B5")
     w = ServerWindow()

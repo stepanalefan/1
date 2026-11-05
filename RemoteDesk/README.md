@@ -27,6 +27,11 @@ Self-hosted remote desktop with two applications:
 Run `build_windows.bat` → `dist\RemoteDesk.exe` and `dist\RemoteDeskServer.exe`
 (single files, no Python needed on target machines).
 
+### Icons
+`assets/RemoteDesk.ico` (client, red) and `assets/RemoteDeskServer.ico` (server, blue)
+contain 16–256 px sizes. They are used for the .exe files, windows, taskbar and tray.
+To change them, edit and run `python make_icons.py`, or replace the .ico files with your own.
+
 ## Client features
 - Desk ID + random password (show / copy / regenerate), recent sessions as tiles
   (click to connect, right-click to rename / remove)

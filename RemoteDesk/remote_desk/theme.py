@@ -1,4 +1,6 @@
 """Shared look & feel for the RemoteDesk client and server apps."""
+import os, sys
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 ACCENT = "#E5483E"
@@ -46,6 +48,39 @@ QStatusBar { background: white; border-top: 1px solid #E3E5E8; }
 def apply(app, accent=ACCENT, dark=ACCENT_DARK):
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE % {"accent": accent, "dark": dark})
+
+
+def asset_path(name):
+    """assets/<name> next to the sources, or inside a PyInstaller bundle."""
+    roots = [getattr(sys, "_MEIPASS", ""),
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)]
+    for root in roots:
+        p = os.path.join(root, "assets", name)
+        if root and os.path.exists(p):
+            return p
+    return None
+
+
+def app_icon(name="RemoteDesk"):
+    """Icon from assets/<name>.ico (all sizes); falls back to a drawn one."""
+    path = asset_path(name + ".ico") or asset_path(name + ".png")
+    if path:
+        icon = QtGui.QIcon(path)
+        if not icon.isNull():
+            return icon
+    if name == "RemoteDeskServer":
+        return make_icon(SERVER_ACCENT, "S")
+    return make_icon()
+
+
+def set_windows_app_id(app_id):
+    """Lets the Windows taskbar show our icon instead of python.exe's."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
 
 
 def make_icon(color=ACCENT, letter="R"):
