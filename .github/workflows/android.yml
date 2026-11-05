@@ -10,6 +10,9 @@ on:
       - "RemoteDesk/android/**"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -39,3 +42,16 @@ jobs:
           name: RemoteDesk-android
           path: RemoteDesk/android/RemoteDesk-android.apk
           if-no-files-found: error
+
+      - name: Commit APK to the branch
+        if: github.event_name != 'pull_request'
+        working-directory: .
+        run: |
+          mkdir -p RemoteDesk/dist
+          cp RemoteDesk/android/RemoteDesk-android.apk RemoteDesk/dist/RemoteDesk-android.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RemoteDesk/dist/RemoteDesk-android.apk
+          git diff --cached --quiet && exit 0
+          git commit -m "Android APK build from ${GITHUB_SHA::7}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

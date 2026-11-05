@@ -35,7 +35,9 @@ To change them, edit and run `python make_icons.py`, or replace the .ico files w
 ## Android app (viewer)
 Control your computers from an Android phone or tablet (Android 7+).
 
-**Get the APK:** every push that changes `RemoteDesk/android/` builds it on GitHub:
+**Get the APK:** the latest build is committed to the branch as
+`RemoteDesk/dist/RemoteDesk-android.apk` (open it on GitHub → *Download raw file*).
+It is also attached to every build run on GitHub:
 repository → **Actions** → *Android APK* → latest run → **Artifacts** → `RemoteDesk-android`
 (a .zip containing `RemoteDesk-android.apk`). Copy it to the phone and open it; allow
 "Install unknown apps" for your browser / file manager when asked.
