@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var tsStatus: TextView
     private lateinit var tsBox: LinearLayout
     @Volatile private var tsLoading = false
+    private lateinit var shareStatus: TextView
     private val main = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,6 +49,13 @@ class MainActivity : Activity() {
         super.onResume()
         refresh()
         refreshTailscale()
+        val svc = com.remotedesk.android.host.HostService.instance
+        shareStatus.text = when {
+            svc?.sessionPeer != null -> "● Remote session active"
+            svc?.isSharing == true -> "● Sharing is on" + (svc.deskId?.let { " — ID ${formatId(it)}" } ?: "")
+            else -> "Let a computer see and control this phone"
+        }
+        shareStatus.setTextColor(if (svc?.isSharing == true) 0xFF2EA44F.toInt() else MUTED)
     }
 
     // ------------------------------------------------------------------ UI
@@ -111,6 +119,22 @@ class MainActivity : Activity() {
         serverLine = text("", 13f, MUTED)
         c.addView(serverLine, lp(MATCH, WRAP).apply { topMargin = dp(10) })
         body.addView(c, lp(MATCH, WRAP))
+
+        // share this device
+        val share = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Color.WHITE, dp(12).toFloat(), dp(1))
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setOnClickListener { startActivity(Intent(this@MainActivity, com.remotedesk.android.host.ShareActivity::class.java)) }
+        }
+        val st = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        st.addView(text("Share this phone", 17f, bold = true))
+        shareStatus = text("Let a computer see and control this phone", 13f, MUTED)
+        st.addView(shareStatus)
+        share.addView(st, lp(0, WRAP, 1f))
+        share.addView(text("›", 26f, MUTED))
+        body.addView(share, lp(MATCH, WRAP).apply { topMargin = dp(16) })
 
         // tailscale
         val t = card()

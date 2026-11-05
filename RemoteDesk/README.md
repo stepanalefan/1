@@ -81,6 +81,30 @@ Toolbar: **Keyboard**, **Keys** (Ctrl/Alt/Shift/Win stay pressed until the next 
 arrows, Home/End, PgUp/PgDn, F1–F12, Ctrl+Alt+Del), mouse mode, **More** (fit to screen,
 monitor, quality, send clipboard, message, fullscreen, disconnect). ▲ hides the toolbar.
 
+### Share the phone (control Android from a PC)
+Main screen → **Share this phone**:
+1. **Setup** (once): enable *Remote control* (Settings → Accessibility → Installed apps →
+   RemoteDesk), allow notifications, and allow running in the background.
+2. **Start sharing**. The phone shows its address: the desk ID (with a server), its Tailscale
+   address, or its Wi-Fi address — and a password.
+3. On the PC, connect to that ID / address with the password. The phone asks **Allow?**, then
+   Android asks to start recording — choose **Entire screen**.
+
+| On the PC | On the phone |
+|---|---|
+| click / drag | tap / swipe (hold > 0.5 s = long press) |
+| right click | Back |
+| middle click | Home |
+| mouse wheel | scroll |
+| typing, Backspace, Enter, arrows | edits the focused text field |
+| Ctrl+C / V / X / A | copy / paste / cut / select all |
+| Esc / Win / F1 / F2 | Back / Home / recent apps / notifications |
+
+A red banner and a notification show while a session runs; tap either to end it. The screen
+stays on during a session. Limits: Android needs the "start recording" confirmation for every
+session (so nobody can connect unnoticed), a locked phone shows only the lock screen, and some
+apps (banking, DRM video) appear black.
+
 Note: the APK is signed with a debug key that changes between CI runs, so to install a newer
 build you may need to uninstall the old one first.
 

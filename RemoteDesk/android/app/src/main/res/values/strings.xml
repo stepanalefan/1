@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">RemoteDesk</string>
+    <string name="a11y_description">Lets a remote user you accepted in RemoteDesk tap, swipe and type on this device during a session. Nothing is done when no session is active.</string>
 </resources>

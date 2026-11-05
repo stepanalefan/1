@@ -170,6 +170,40 @@ object Handshake {
     private val MAGIC = "RDSK1\u0000".toByteArray(Charsets.US_ASCII)
     private const val PBKDF2_ITERATIONS = 200_000
 
+    /** Desk side (the device being controlled). Throws [AuthException] on a wrong password. */
+    fun host(socket: Socket, password: String): SecureChannel {
+        val inp = DataInputStream(socket.getInputStream())
+        val out = socket.getOutputStream()
+        val rnd = SecureRandom()
+        val priv = ByteArray(X25519.SCALAR_SIZE).also { X25519.generatePrivateKey(rnd, it) }
+        val pub = ByteArray(X25519.POINT_SIZE).also { X25519.generatePublicKey(priv, 0, it, 0) }
+        val nonce = ByteArray(16).also { rnd.nextBytes(it) }
+        val salt = ByteArray(16).also { rnd.nextBytes(it) }
+        val head = MAGIC + pub + nonce + salt
+        out.write(head)
+        out.flush()
+        val data = ByteArray(32 + 16 + 32)
+        inp.readFully(data)
+        val vpub = data.copyOfRange(0, 32)
+        val vnonce = data.copyOfRange(32, 48)
+        val vproof = data.copyOfRange(48, 80)
+        val shared = ByteArray(X25519.POINT_SIZE)
+        if (!X25519.calculateAgreement(priv, 0, vpub, 0, shared, 0))
+            throw IOException("Invalid key from viewer")
+        val transcript = head + vpub + vnonce
+        val pwKey = Crypto.pbkdf2(password.toByteArray(Charsets.UTF_8), salt, PBKDF2_ITERATIONS)
+        val okm = Crypto.hkdf(shared, Crypto.sha256(transcript),
+            "remotedesk keys".toByteArray(Charsets.US_ASCII), 64)
+        if (!MessageDigest.isEqual(vproof, Crypto.proof(pwKey, "viewer", transcript, shared))) {
+            out.write(ByteArray(32))
+            out.flush()
+            throw AuthException("Wrong password")
+        }
+        out.write(Crypto.proof(pwKey, "host", transcript, shared))
+        out.flush()
+        return SecureChannel(socket, okm.copyOfRange(0, 32), okm.copyOfRange(32, 64))
+    }
+
     fun viewer(socket: Socket, password: String): SecureChannel {
         val inp = DataInputStream(socket.getInputStream())
         val out = socket.getOutputStream()
@@ -261,7 +295,11 @@ object Connector {
         return ch
     }
 
-    private fun readLine(inp: InputStream): String {
+    fun sendLine(socket: Socket, json: String) {
+        socket.getOutputStream().apply { write((json + "\n").toByteArray(Charsets.UTF_8)); flush() }
+    }
+
+    fun readLine(inp: InputStream): String {
         val buf = java.io.ByteArrayOutputStream()
         while (true) {
             val c = inp.read()

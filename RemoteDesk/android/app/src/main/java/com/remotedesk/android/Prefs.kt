@@ -32,6 +32,19 @@ class Prefs(context: Context) {
         get() = sp.getString("ts_key", "") ?: ""
         set(v) = sp.edit().putString("ts_key", v.trim()).apply()
 
+    /** Sharing this device: password, desk ID from the server, remote control allowed. */
+    var hostPassword: String
+        get() = sp.getString("host_pw", null) ?: randomPassword().also { hostPassword = it }
+        set(v) = sp.edit().putString("host_pw", v).apply()
+
+    var deskId: String
+        get() = sp.getString("desk_id", "") ?: ""
+        set(v) = sp.edit().putString("desk_id", v).apply()
+
+    var allowControl: Boolean
+        get() = sp.getBoolean("allow_control", true)
+        set(v) = sp.edit().putBoolean("allow_control", v).apply()
+
     var showHelp: Boolean
         get() = sp.getBoolean("show_help", true)
         set(v) = sp.edit().putBoolean("show_help", v).apply()
@@ -69,6 +82,12 @@ class Prefs(context: Context) {
         val QUALITY = listOf(85 to 20, 60 to 15, 35 to 12)   // (jpeg quality, fps)
         val QUALITY_NAMES = arrayOf("Best quality", "Balanced", "Fast (slow networks)")
     }
+}
+
+fun randomPassword(): String {
+    val chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    val rnd = java.security.SecureRandom()
+    return (1..10).map { chars[rnd.nextInt(chars.length)] }.joinToString("")
 }
 
 fun formatId(target: String): String {
