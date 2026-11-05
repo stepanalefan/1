@@ -32,6 +32,26 @@ Run `build_windows.bat` → `dist\RemoteDesk.exe` and `dist\RemoteDeskServer.exe
 contain 16–256 px sizes. They are used for the .exe files, windows, taskbar and tray.
 To change them, edit and run `python make_icons.py`, or replace the .ico files with your own.
 
+## Without a server: Tailscale
+[Tailscale](https://tailscale.com/download) (free for personal use) connects your devices
+through NAT and firewalls with an encrypted tunnel, so no RemoteDesk Server is needed.
+
+1. Install Tailscale on every computer and on the phone, log in with the **same account**.
+2. Start RemoteDesk on the computers (direct port 7071 must be on — the default).
+   On Windows, allow RemoteDesk / Python when the firewall asks.
+3. Desktop: the **Tailscale devices** tab lists your devices; "RemoteDesk ready" ones can be
+   clicked to connect. "This Desk" shows your Tailscale address.
+4. Android: type the computer's Tailscale name (e.g. `office-pc`) or 100.x address. To see a
+   device list in the app, add a read-only key in Settings → *Tailscale API key*
+   (admin console → Settings → Keys; an OAuth client with scope `devices:core:read` never expires,
+   an API access token expires after at most 90 days).
+
+The RemoteDesk password and accept prompt still apply; Tailscale only provides the network.
+
+## IPv6
+Server and desks listen on IPv4 and IPv6. Write IPv6 addresses in brackets with a port:
+`[2001:db8::10]:7070`. Most routers block incoming IPv6 by default — allow the port there.
+
 ## Android app (viewer)
 Control your computers from an Android phone or tablet (Android 7+).
 

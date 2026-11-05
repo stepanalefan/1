@@ -33,6 +33,9 @@ class MainActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var serverLine: TextView
     private lateinit var recentBox: LinearLayout
+    private lateinit var tsStatus: TextView
+    private lateinit var tsBox: LinearLayout
+    @Volatile private var tsLoading = false
     private val main = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +47,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        refreshTailscale()
     }
 
     // ------------------------------------------------------------------ UI
@@ -78,10 +82,10 @@ class MainActivity : Activity() {
         // connect card
         val c = card()
         c.addView(text("Remote Desk", 17f, bold = true))
-        c.addView(text("Enter the ID shown in the RemoteDesk app on the other computer, " +
-                "or its address on your network.", 13f, MUTED), lp(MATCH, WRAP).apply { topMargin = dp(4) })
+        c.addView(text("Enter the ID shown in the RemoteDesk app on the other computer, its " +
+                "Tailscale name (e.g. office-pc) or its address on your network.", 13f, MUTED), lp(MATCH, WRAP).apply { topMargin = dp(4) })
         address = EditText(this).apply {
-            hint = "Desk ID, e.g. 123 456 789"
+            hint = "Desk ID, Tailscale name or address"
             textSize = 20f
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
@@ -102,6 +106,21 @@ class MainActivity : Activity() {
         serverLine = text("", 13f, MUTED)
         c.addView(serverLine, lp(MATCH, WRAP).apply { topMargin = dp(10) })
         body.addView(c, lp(MATCH, WRAP))
+
+        // tailscale
+        val t = card()
+        val th = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        th.addView(text("Tailscale devices", 17f, bold = true), lp(0, WRAP, 1f))
+        th.addView(text("Refresh", 14f, ACCENT).apply {
+            setPadding(dp(10), dp(6), 0, dp(6))
+            setOnClickListener { refreshTailscale() }
+        })
+        t.addView(th)
+        tsStatus = text("", 13f, MUTED)
+        t.addView(tsStatus, lp(MATCH, WRAP).apply { topMargin = dp(4) })
+        tsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        t.addView(tsBox, lp(MATCH, WRAP).apply { topMargin = dp(6) })
+        body.addView(t, lp(MATCH, WRAP).apply { topMargin = dp(16) })
 
         // recent sessions
         body.addView(text("Recent sessions", 17f, bold = true),
@@ -153,6 +172,73 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun refreshTailscale() {
+        if (tsLoading) return
+        val ip = Tailscale.localAddress()
+        val key = prefs.tailscaleKey
+        tsBox.removeAllViews()
+        if (ip == null) {
+            tsStatus.text = "● Tailscale is not active on this phone. Install the Tailscale app, log in " +
+                    "with the same account as your computers and turn it on — then connect without a server."
+            tsStatus.setTextColor(MUTED)
+            return
+        }
+        tsStatus.setTextColor(0xFF2EA44F.toInt())
+        if (key.isEmpty()) {
+            tsStatus.text = "● Tailscale is on ($ip). Type a computer's Tailscale name (e.g. office-pc) " +
+                    "or 100.x address above — or add a Tailscale API key in Settings to list your devices here."
+            return
+        }
+        tsStatus.text = "● Tailscale is on ($ip). Loading devices…"
+        tsLoading = true
+        Thread {
+            val result = try { Result.success(Tailscale.devices(key).also { Tailscale.probe(it) }) }
+            catch (e: Exception) { Result.failure(e) }
+            main.post {
+                tsLoading = false
+                if (isFinishing) return@post
+                result.onFailure {
+                    tsStatus.setTextColor(0xFFC0392B.toInt())
+                    tsStatus.text = "Could not load devices: ${it.message ?: it.javaClass.simpleName}"
+                }
+                result.onSuccess { list -> showTailscale(ip, list) }
+            }
+        }.start()
+    }
+
+    private fun showTailscale(ip: String, list: List<TsDevice>) {
+        val sorted = list.sortedWith(compareBy<TsDevice>({ !it.remoteDesk }, { !it.online }, { it.name.lowercase() }))
+        val ready = list.count { it.remoteDesk }
+        tsStatus.text = "● Tailscale is on ($ip). ${list.size} devices, ${list.count { it.online }} online, " +
+                "$ready running RemoteDesk."
+        tsBox.removeAllViews()
+        for (d in sorted) {
+            val tile = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = rounded(Color.WHITE, dp(10).toFloat(), dp(1))
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                alpha = if (d.online) 1f else 0.5f
+                if (d.online) setOnClickListener { askPasswordAndConnect(d.ip, d.name) }
+            }
+            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(text("${d.name}  ", 16f, bold = true).apply { append(d.os) })
+            val (label, color) = when {
+                d.remoteDesk -> "● RemoteDesk ready" to 0xFF2EA44F.toInt()
+                d.online -> "● online" to 0xFFE0A100.toInt()
+                else -> "● offline" to MUTED
+            }
+            texts.addView(text("${d.ip}   ", 13f, MUTED).apply {
+                append(android.text.SpannableString(label).apply {
+                    setSpan(android.text.style.ForegroundColorSpan(color), 0, label.length, 0)
+                })
+            })
+            tile.addView(texts, lp(0, WRAP, 1f))
+            if (d.online) tile.addView(text("›", 26f, MUTED))
+            tsBox.addView(tile, lp(MATCH, WRAP).apply { topMargin = dp(8) })
+        }
+    }
+
     private fun tileMenu(r: Recent) {
         AlertDialog.Builder(this)
             .setTitle(r.name.ifEmpty { formatId(r.target) })
@@ -192,6 +278,27 @@ class MainActivity : Activity() {
         box.addView(text("Address of the computer running RemoteDesk Server (port 7070 if omitted).",
             12f, MUTED))
 
+        box.addView(text("Tailscale API key (optional)", 14f, bold = true),
+            lp(MATCH, WRAP).apply { topMargin = dp(16) })
+        val tsKey = EditText(this).apply {
+            setText(prefs.tailscaleKey)
+            hint = "tskey-api-… or tskey-client-…"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        box.addView(tsKey)
+        box.addView(text("Only needed to list your Tailscale devices on the main screen. Create it at " +
+                "Tailscale admin console → Settings → Keys (an OAuth client with the read-only " +
+                "\"devices:core:read\" scope never expires). Without it, type device names instead.",
+            12f, MUTED))
+        box.addView(text("Open Tailscale keys page", 13f, ACCENT).apply {
+            setPadding(0, dp(6), 0, dp(6))
+            setOnClickListener {
+                try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Tailscale.ADMIN_KEYS_URL))) }
+                catch (_: Exception) {}
+            }
+        })
+
         box.addView(text("Mouse mode", 14f, bold = true), lp(MATCH, WRAP).apply { topMargin = dp(16) })
         val group = RadioGroup(this)
         val tp = RadioButton(this).apply { text = "Touchpad — move a pointer like on a laptop"; id = View.generateViewId() }
@@ -219,7 +326,9 @@ class MainActivity : Activity() {
                 prefs.touchpad = group.checkedRadioButtonId == tp.id
                 prefs.quality = qButtons.indexOfFirst { it.id == qGroup.checkedRadioButtonId }.coerceAtLeast(0)
                 prefs.showHelp = help.isChecked
+                prefs.tailscaleKey = tsKey.text.toString()
                 refresh()
+                refreshTailscale()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -233,7 +342,7 @@ class MainActivity : Activity() {
         askPasswordAndConnect(t)
     }
 
-    private fun askPasswordAndConnect(target: String) {
+    private fun askPasswordAndConnect(target: String, name: String? = null) {
         if (Connector.isDeskId(target) && prefs.serverAddress == null) {
             AlertDialog.Builder(this)
                 .setTitle("No server configured")
@@ -291,7 +400,7 @@ class MainActivity : Activity() {
                             if (!dlg.isShowing) { Thread { ch.close() }.start(); return@post }
                             socket = null           // keep it open
                             dlg.dismiss()
-                            startSession(target, ch)
+                            startSession(target, ch, name)
                         }
                     } catch (e: Exception) {
                         try { s.close() } catch (_: Exception) {}
@@ -323,8 +432,8 @@ class MainActivity : Activity() {
         dlg.show()
     }
 
-    private fun startSession(target: String, ch: com.remotedesk.android.protocol.SecureChannel) {
-        prefs.touchRecent(target)
+    private fun startSession(target: String, ch: com.remotedesk.android.protocol.SecureChannel, name: String?) {
+        prefs.touchRecent(target, name)
         address.setText("")
         Session.channel = ch
         Session.title = prefs.recent().firstOrNull { it.target == target }?.name?.ifEmpty { null } ?: formatId(target)

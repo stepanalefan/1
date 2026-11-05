@@ -6,7 +6,7 @@ import argparse, json, os, secrets, string, sys, threading, time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from . import theme
+from . import tailscale, theme
 from .host import Host
 from .netutil import format_hostport, local_addresses, parse_hostport
 from .viewer import ViewerWindow, open_channel
@@ -207,6 +207,7 @@ class ConnectDialog(QtWidgets.QDialog):
 # ------------------------------------------------------------- main window
 class MainWindow(QtWidgets.QMainWindow):
     host_sig = QtCore.pyqtSignal(str, object)
+    ts_sig = QtCore.pyqtSignal(object)
 
     def __init__(self, args):
         super().__init__()
@@ -225,10 +226,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowIcon(theme.app_icon("RemoteDesk"))
         self.resize(860, 540)
         self.host_sig.connect(self._on_event)
+        self.ts_sig.connect(self._on_tailscale)
+        self._ts = None
+        self._ts_wake = threading.Event()
         self._build()
         self._tray()
         self._start_host()
         save_cfg(self.cfg)
+        threading.Thread(target=self._ts_loop, daemon=True).start()
 
     # ---------------------------------------------------------------- UI
     def _build(self):
@@ -276,7 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.id_lbl)
         row.addStretch()
         cp = QtWidgets.QPushButton("Copy", objectName="Icon")
-        cp.clicked.connect(lambda: self._copy(self.cfg.get("id") or self.id_lbl.text()))
+        cp.clicked.connect(lambda: self._copy(self.id_lbl.text()))
         row.addWidget(cp)
         l.addLayout(row)
         l.addSpacing(6)
@@ -297,18 +302,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lan_lbl = theme.label("", "Muted")
         self.lan_lbl.setWordWrap(True)
         l.addWidget(self.lan_lbl)
+        l.addSpacing(6)
+        l.addWidget(theme.label("Tailscale", "Muted"))
+        row = QtWidgets.QHBoxLayout()
+        self.ts_lbl = theme.label("Checking…")
+        self.ts_lbl.setWordWrap(True)
+        self.ts_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse | QtCore.Qt.LinksAccessibleByMouse)
+        self.ts_lbl.setOpenExternalLinks(True)
+        row.addWidget(self.ts_lbl, 1)
+        self.ts_copy = QtWidgets.QPushButton("Copy", objectName="Icon")
+        self.ts_copy.clicked.connect(lambda: self._copy(self._ts.ip if self._ts else ""))
+        self.ts_copy.hide()
+        row.addWidget(self.ts_copy)
+        l.addLayout(row)
         l.addStretch()
         body.addWidget(c, 2)
 
-        # right: recent sessions
-        c, l = theme.card("Recent sessions")
+        # right: recent sessions / tailscale devices
+        self.tabs = QtWidgets.QTabWidget()
+        page = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(page)
+        l.setContentsMargins(14, 14, 14, 14)
         self.recent_box = QtWidgets.QGridLayout()
         self.recent_box.setSpacing(10)
         l.addLayout(self.recent_box)
         self.recent_empty = theme.label("Desks you connect to will appear here.", "Muted")
         l.addWidget(self.recent_empty)
         l.addStretch()
-        body.addWidget(c, 3)
+        self.tabs.addTab(page, "Recent sessions")
+
+        page = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(page)
+        l.setContentsMargins(14, 14, 14, 14)
+        top = QtWidgets.QHBoxLayout()
+        self.ts_info = theme.label("", "Muted")
+        self.ts_info.setWordWrap(True)
+        self.ts_info.setOpenExternalLinks(True)
+        top.addWidget(self.ts_info, 1)
+        refresh = QtWidgets.QPushButton("Refresh", objectName="Icon")
+        refresh.clicked.connect(self._ts_wake.set)
+        top.addWidget(refresh)
+        l.addLayout(top)
+        scroll = QtWidgets.QScrollArea(widgetResizable=True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        holder = QtWidgets.QWidget()
+        holder.setStyleSheet("background: white;")
+        self.ts_box = QtWidgets.QGridLayout(holder)
+        self.ts_box.setSpacing(10)
+        self.ts_box.setAlignment(QtCore.Qt.AlignTop)
+        scroll.setWidget(holder)
+        l.addWidget(scroll, 1)
+        self.tabs.addTab(page, "Tailscale devices")
+        body.addWidget(self.tabs, 3)
 
         self.setCentralWidget(root)
         self.status_dot = theme.label("")
@@ -347,6 +393,78 @@ class MainWindow(QtWidgets.QMainWindow):
             b.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
             b.customContextMenuRequested.connect(lambda _, t=r["target"]: self._tile_menu(t))
             self.recent_box.addWidget(b, n // 2, n % 2)
+
+    # ------------------------------------------------------------ tailscale
+    def _ts_loop(self):
+        while True:
+            st = tailscale.status()
+            if st.running:
+                tailscale.probe_peers(st.peers, tailscale.REMOTE_PORT)
+                st.peers.sort(key=lambda p: (not p.remotedesk, not p.online, p.name.lower()))
+            self.ts_sig.emit(st)
+            self._ts_wake.wait(20)
+            self._ts_wake.clear()
+
+    def _on_tailscale(self, st):
+        self._ts = st
+        port = self.cfg.get("port") or 0
+        if not self.relay and not st.running:
+            self.id_lbl.setText("No server set")
+        self.ts_copy.setVisible(st.running)
+        if not st.installed:
+            self.ts_lbl.setText(f'{theme.dot(theme.BAD)} Not installed — '
+                                f'<a href="{tailscale.DOWNLOAD_URL}">get Tailscale</a> to connect '
+                                f'over the internet without a server')
+            self.ts_info.setText(f'Install <a href="{tailscale.DOWNLOAD_URL}">Tailscale</a> on this '
+                                 'computer and on the devices you want to reach, and log in with the '
+                                 'same account. They will appear here.')
+        elif not st.running:
+            what = {"NeedsLogin": "installed but not logged in", "Stopped": "turned off",
+                    "NeedsMachineAuth": "waiting for approval in the admin console",
+                    "Starting": "starting…"}.get(st.state, st.error or "not connected")
+            self.ts_lbl.setText(f"{theme.dot(theme.BAD)} Tailscale is {what}. Open the Tailscale app.")
+            self.ts_info.setText(f"Tailscale is {what}.")
+        else:
+            name = st.dns or st.name
+            if not self.relay:          # no server: the Tailscale address is the desk's address
+                self.id_lbl.setText(format_hostport(st.ip, port) if port and port != 7071 else st.ip)
+            self.ts_lbl.setText(f"{theme.dot(theme.OK)} <b>{format_hostport(st.ip, port) if port else st.ip}</b>"
+                                + (f"<br><span style='color:#6b7178'>{name}</span>" if name else ""))
+            if not port:
+                self.ts_lbl.setText(self.ts_lbl.text() + "<br><span style='color:#C0392B'>Direct port is "
+                                    "off — others cannot connect. Turn it on in Settings.</span>")
+            online = sum(p.online for p in st.peers)
+            ready = sum(p.remotedesk for p in st.peers)
+            self.ts_info.setText(st.error or (f"{len(st.peers)} devices in {st.tailnet or 'your tailnet'}, "
+                                 f"{online} online, {ready} running RemoteDesk. Click one to connect — "
+                                 "no server needed."))
+        self._fill_ts_devices(st)
+
+    def _fill_ts_devices(self, st):
+        while self.ts_box.count():
+            self.ts_box.takeAt(0).widget().deleteLater()
+        if not st.running:
+            return
+        port = tailscale.REMOTE_PORT
+        for n, p in enumerate(st.peers):
+            if p.remotedesk:
+                state = f"{theme.dot(theme.OK)} RemoteDesk ready"
+            elif p.online:
+                state = f"{theme.dot('#E0A100')} online"
+            else:
+                state = f"{theme.dot(theme.BAD)} offline"
+            b = QtWidgets.QPushButton(objectName="Tile")
+            lab = QtWidgets.QLabel(f"<b>{p.name}</b> <span style='color:#6b7178'>{p.os}</span><br>"
+                                   f"<span style='color:#6b7178'>{p.ip}</span> &nbsp; {state}")
+            lab.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            bl = QtWidgets.QVBoxLayout(b)
+            bl.setContentsMargins(12, 8, 12, 8)
+            bl.addWidget(lab)
+            b.setMinimumHeight(64)
+            b.setEnabled(p.online)
+            b.setToolTip(p.dns)
+            b.clicked.connect(lambda _, p=p: self.connect_to(format_hostport(p.ip, port), name=p.name))
+            self.ts_box.addWidget(b, n // 2, n % 2)
 
     def _tile_menu(self, target):
         m = QtWidgets.QMenu(self)
@@ -393,8 +511,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_online(False, f"Connecting to server {format_hostport(*relay)}…")
         else:
             self.id_lbl.setText("No server set")
-            self._set_online(False, "No server configured — open Settings to add one. "
-                                    "Direct LAN connections still work.")
+            self._set_online(False, "No server configured — connect via Tailscale or on the local "
+                                    "network, or add a server in Settings.")
         self.host.start()
 
     def _set_online(self, on, text):
@@ -449,7 +567,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if t:
             self.connect_to(t.replace(" ", "") if t.replace(" ", "").isdigit() else t)
 
-    def connect_to(self, target):
+    def connect_to(self, target, name=None):
         is_id = target.isdigit() and len(target) == 9
         if is_id and not self.relay:
             QtWidgets.QMessageBox.information(
@@ -464,13 +582,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         recent = self.cfg.get("recent", [])
         old = next((r for r in recent if r["target"] == target), {})
-        recent = [{"target": target, "time": time.time(), "name": old.get("name", "")}] + \
+        recent = [{"target": target, "time": time.time(), "name": old.get("name") or name or ""}] + \
                  [r for r in recent if r["target"] != target]
         self.cfg["recent"] = recent[:20]
         save_cfg(self.cfg)
         self._refresh_recent()
         self.addr.setCurrentText("")
-        name = old.get("name") or fmt_id(target)
+        name = old.get("name") or name or fmt_id(target)
         w = ViewerWindow(d.chan, name)
         w.setWindowIcon(self.windowIcon())
         self.viewers = [x for x in self.viewers if x.isVisible()] + [w]
@@ -485,6 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
         save_cfg(self.cfg)
         self.host.unattended = new["unattended"]
         self.host.view_only = new["view_only"]
+        self._ts_wake.set()
         if new["port"] != self.host.direct_port:
             self.status_msg.setText("The direct port change takes effect after a restart.")
         relay = parse_hp(new["relay"], 7070)
@@ -496,7 +615,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.id_lbl.setText(fmt_id(self.cfg["id"]) if self.cfg.get("id") else "…")
             else:
                 self.id_lbl.setText("No server set")
-                self._set_online(False, "No server configured — direct LAN connections only.")
+                self._set_online(False, "No server configured — Tailscale and local network only.")
         self._show_lan()
 
     def _toggle_pw(self):

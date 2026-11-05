@@ -27,6 +27,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("quality", 1)
         set(v) = sp.edit().putInt("quality", v).apply()
 
+    /** Tailscale API access token or OAuth client (read-only), optional. */
+    var tailscaleKey: String
+        get() = sp.getString("ts_key", "") ?: ""
+        set(v) = sp.edit().putString("ts_key", v.trim()).apply()
+
     var showHelp: Boolean
         get() = sp.getBoolean("show_help", true)
         set(v) = sp.edit().putBoolean("show_help", v).apply()
@@ -47,10 +52,11 @@ class Prefs(context: Context) {
         sp.edit().putString("recent", arr.toString()).apply()
     }
 
-    fun touchRecent(target: String) {
+    fun touchRecent(target: String, name: String? = null) {
         val list = recent()
         val old = list.firstOrNull { it.target == target }
-        saveRecent(listOf(Recent(target, old?.name ?: "", System.currentTimeMillis())) +
+        val keep = old?.name?.ifEmpty { null } ?: name ?: ""
+        saveRecent(listOf(Recent(target, keep, System.currentTimeMillis())) +
                 list.filter { it.target != target })
     }
 
