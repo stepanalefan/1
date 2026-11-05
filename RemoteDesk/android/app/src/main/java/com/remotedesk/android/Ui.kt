@@ -65,3 +65,21 @@ fun lp(w: Int, h: Int, weight: Float = 0f, gravity: Int = Gravity.NO_GRAVITY) =
 
 const val MATCH = LinearLayout.LayoutParams.MATCH_PARENT
 const val WRAP = LinearLayout.LayoutParams.WRAP_CONTENT
+
+/**
+ * Android 15+ draws apps edge-to-edge (behind the status / navigation bars and the
+ * keyboard). Calls [apply] with the space taken by system bars, display cutout and
+ * keyboard so the layout can pad itself. Earlier versions already lay out below
+ * the bars, so nothing is done there.
+ */
+fun View.onSystemInsets(apply: (left: Int, top: Int, right: Int, bottom: Int) -> Unit) {
+    if (android.os.Build.VERSION.SDK_INT < 35) return
+    setOnApplyWindowInsetsListener { _, insets ->
+        val t = android.view.WindowInsets.Type.systemBars() or
+                android.view.WindowInsets.Type.displayCutout() or android.view.WindowInsets.Type.ime()
+        val i = insets.getInsets(t)
+        apply(i.left, i.top, i.right, i.bottom)
+        insets
+    }
+    requestApplyInsets()
+}

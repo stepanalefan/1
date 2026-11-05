@@ -117,6 +117,8 @@ class SessionActivity : Activity(), RemoteView.Input {
         keys.addView(keyButton("Ctrl+Alt+Del") { ctrlAltDel() })
         keyBar.addView(keys)
         root.addView(keyBar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        // stay clear of the status / nav bars, notch and keyboard (zero while fullscreen)
+        root.onSystemInsets { l, t, r, b -> root.setPadding(l, t, r, b) }
         return root
     }
 

@@ -70,6 +70,11 @@ class MainActivity : Activity() {
             setOnClickListener { showSettings() }
         })
         root.addView(header, lp(MATCH, WRAP))
+        // keep the header text below the status bar and the content above the nav bar / keyboard
+        root.onSystemInsets { l, t, r, b ->
+            header.setPadding(dp(18) + l, dp(14) + t, dp(8) + r, dp(14))
+            root.setPadding(0, 0, 0, b)
+        }
 
         val scroll = ScrollView(this)
         val body = LinearLayout(this).apply {
