@@ -210,30 +210,53 @@ class Host:
         self.unattended, self.view_only = unattended, view_only
         self.session = None
         self._fails = {}
+        self._gen = 0
+        self._ctrl = None
 
     def start(self):
         if self.direct_port:
             threading.Thread(target=self._listen, daemon=True).start()
         if self.relay:
-            threading.Thread(target=self._relay_loop, daemon=True).start()
+            threading.Thread(target=self._relay_loop, args=(self._gen,), daemon=True).start()
+
+    def set_relay(self, relay):
+        """Switch to another relay server (None = direct connections only)."""
+        self._gen += 1
+        if self._ctrl:
+            try:
+                self._ctrl.shutdown(socket.SHUT_RDWR)
+                self._ctrl.close()
+            except OSError:
+                pass
+        self.relay = relay
+        if relay:
+            threading.Thread(target=self._relay_loop, args=(self._gen,), daemon=True).start()
 
     def _listen(self):
-        srv = socket.create_server(("0.0.0.0", self.direct_port))
-        self.ev("status", f"direct: listening on port {self.direct_port}")
+        try:
+            srv = socket.create_server(("0.0.0.0", self.direct_port))
+        except OSError as e:
+            self.ev("status", f"Direct port {self.direct_port} unavailable: {e}")
+            return
+        self.ev("status", f"Direct connections: port {self.direct_port}")
         while True:
             conn, peer = srv.accept()
             threading.Thread(target=self._incoming, args=(conn, peer[0]), daemon=True).start()
 
-    def _relay_loop(self):
+    def _relay_loop(self, gen):
         host, port = self.relay
-        while True:
+        while gen == self._gen:
             try:
                 ctrl = socket.create_connection((host, port), timeout=10)
+                self._ctrl = ctrl
                 P.send_line(ctrl, {"role": "host", "id": self.host_id})
                 r = P.recv_line(ctrl)
+                if gen != self._gen:
+                    ctrl.close()
+                    return
                 self.host_id = r["id"]
                 self.ev("id", self.host_id)
-                self.ev("status", f"online via relay {host}:{port}")
+                self.ev("online", True)
                 ctrl.settimeout(None)
                 threading.Thread(target=self._ping, args=(ctrl,), daemon=True).start()
                 while True:
@@ -241,10 +264,14 @@ class Host:
                     if "connect" in msg:
                         d = socket.create_connection((host, port), timeout=10)
                         P.send_line(d, {"role": "host-data", "token": msg["connect"]})
-                        threading.Thread(target=self._incoming, args=(d, "relay"),
+                        who = f'{msg.get("from", "unknown")} (via server)'
+                        threading.Thread(target=self._incoming, args=(d, who),
                                          daemon=True).start()
             except Exception as e:
-                self.ev("status", f"relay offline ({e}); retrying...")
+                if gen != self._gen:
+                    return
+                self.ev("online", False)
+                self.ev("status", f"Server {host}:{port} unreachable ({e}); retrying...")
                 time.sleep(5)
 
     @staticmethod
@@ -279,10 +306,15 @@ class Host:
         if self.session and self.session.running:
             chan.close()
             return
-        if not self.unattended and not self.ev("accept", peer):
-            chan.close()
-            return
-        self.session = HostSession(chan, {"view_only": self.view_only}, self.ev)
+        view_only = self.view_only
+        if not self.unattended:
+            res = self.ev("accept", peer)   # False / True / {"control": bool}
+            if not res:
+                chan.close()
+                return
+            if isinstance(res, dict) and not res.get("control", True):
+                view_only = True
+        self.session = HostSession(chan, {"view_only": view_only}, self.ev)
         self.ev("session_start", peer)
         self.session.run()
 

@@ -128,6 +128,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         tb = self.addToolBar("Session")
         tb.setMovable(False)
         self.mon = QtWidgets.QComboBox()
+        self.mon.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.mon.currentIndexChanged.connect(
             lambda i: i >= 0 and self.send(P.SET_MONITOR, {"index": i}))
         tb.addWidget(QtWidgets.QLabel(" Monitor: "))
