@@ -31,11 +31,13 @@ KEY = 11         # json {key, text, down}
 SET_MONITOR = 12 # json {index}
 SET_QUALITY = 13 # json {quality, fps}
 CLIPBOARD = 20   # utf-8 text
-CHAT = 21        # utf-8 text
+CHAT = 21        # json {from, text, ts}  (older clients: plain utf-8 text)
 FILE_BEGIN = 30  # json {name,size}
 FILE_DATA = 31
 FILE_END = 32
 CURSOR = 40      # json {x,y}
+ROLE = 41        # host -> viewer: json {control, controller, viewers: [{name, control}]}
+HELLO = 42       # viewer -> host: json {name}
 BYE = 99
 
 

@@ -49,7 +49,7 @@ class Canvas(QtWidgets.QWidget):
         self.img = QtGui.QImage()
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.setCursor(QtCore.Qt.CrossCursor)
+        self.setCursor(QtCore.Qt.ArrowCursor)    # normal pointer (the remote cursor is not captured)
 
     def target_rect(self):
         if self.img.isNull():
@@ -128,12 +128,19 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def _build_toolbar(self):
         tb = self.addToolBar("Session")
         tb.setMovable(False)
-        self.mon = QtWidgets.QComboBox()
-        self.mon.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        self.mon.currentIndexChanged.connect(
-            lambda i: i >= 0 and self.send(P.SET_MONITOR, {"index": i}))
-        tb.addWidget(QtWidgets.QLabel(" Monitor: "))
-        tb.addWidget(self.mon)
+        # monitor buttons: one numbered button per remote monitor
+        self.mon_box = QtWidgets.QWidget()
+        mb = QtWidgets.QHBoxLayout(self.mon_box)
+        mb.setContentsMargins(4, 0, 8, 0)
+        mb.setSpacing(3)
+        mb.addWidget(QtWidgets.QLabel("Monitor:"))
+        self.mon_btns = QtWidgets.QButtonGroup(self)
+        self.mon_btns.setExclusive(True)
+        self.mon_btns.idClicked.connect(lambda i: self.send(P.SET_MONITOR, {"index": i}))
+        self.mon_layout = mb
+        self.mon_action = tb.addWidget(self.mon_box)
+        self.mon_action.setVisible(False)
+        self._monitors = None
         self.qual = QtWidgets.QComboBox()
         self.qual.addItems(["Best quality", "Balanced", "Fast"])
         self.qual.setCurrentIndex(1)
@@ -145,14 +152,85 @@ class ViewerWindow(QtWidgets.QMainWindow):
         tb.addAction("Send clipboard", lambda: self.send(
             P.CLIPBOARD, QtWidgets.QApplication.clipboard().text()))
         tb.addAction("Send file...", self._pick_file)
-        tb.addAction("Chat...", self._chat)
+        self.chat_action = tb.addAction("Chat", self._toggle_chat)
         tb.addAction("Fullscreen", lambda: self.showNormal() if self.isFullScreen()
                      else self.showFullScreen())
         tb.addSeparator()
         tb.addAction("Disconnect", self.close)
         self.status = self.statusBar()
+        self.role_lbl = QtWidgets.QLabel()
+        self.role_lbl.setContentsMargins(8, 0, 8, 0)
+        self.status.addPermanentWidget(self.role_lbl)
+
+        # chat dock
+        from .chat import ChatPanel
+        self.chat = ChatPanel()
+        self.chat.send_text.connect(self._send_chat)
+        self.chat_dock = QtWidgets.QDockWidget("Chat", self)
+        self.chat_dock.setWidget(self.chat)
+        self.chat_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetClosable |
+                                   QtWidgets.QDockWidget.DockWidgetMovable)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.chat_dock)
+        self.chat_dock.hide()
+        self.chat_dock.visibilityChanged.connect(
+            lambda vis: vis and (setattr(self, "_unread", 0), self.chat_action.setText("Chat")))
+        self._unread = 0
+        self.control = True             # until the host says otherwise (older hosts never do)
+        self.my_name = socket.gethostname()
+        self.send(P.HELLO, {"name": self.my_name})
+
+    def _set_monitors(self, monitors, current):
+        key = (tuple((m["w"], m["h"]) for m in monitors))
+        if key != self._monitors:
+            self._monitors = key
+            for b in self.mon_btns.buttons():
+                self.mon_btns.removeButton(b)
+                b.deleteLater()
+            for i, m in enumerate(monitors):
+                b = QtWidgets.QToolButton()
+                b.setText(str(i + 1))
+                b.setCheckable(True)
+                b.setToolTip(f"Monitor {i + 1}: {m['w']}×{m['h']}")
+                b.setMinimumWidth(30)
+                b.setStyleSheet("QToolButton { border: 1px solid #C8CCD1; border-radius: 4px; padding: 3px 8px;"
+                                " background: white; font-weight: 600; }"
+                                "QToolButton:checked { background: #E5483E; color: white; border-color: #E5483E; }")
+                self.mon_btns.addButton(b, i)
+                self.mon_layout.addWidget(b)
+            self.mon_action.setVisible(len(monitors) > 1)
+        b = self.mon_btns.button(current)
+        if b:
+            b.setChecked(True)
+
+    def _toggle_chat(self):
+        self.chat_dock.setVisible(not self.chat_dock.isVisible())
+        if self.chat_dock.isVisible():
+            self.chat.input.setFocus()
+
+    def _send_chat(self, text):
+        import time as _t
+        msg = {"from": self.my_name, "text": text, "ts": _t.time()}
+        self.send(P.CHAT, msg)
+        self.chat.add(None, text, msg["ts"], mine=True)
+
+    def _set_role(self, role):
+        self.control = bool(role.get("control"))
+        others = [v["name"] for v in role.get("viewers", []) if v.get("name") != self.my_name]
+        watchers = f" · {len(role.get('viewers', []))} connected" if len(role.get("viewers", [])) > 1 else ""
+        if self.control:
+            self.role_lbl.setText(f"<span style='color:#2EA44F'>●</span> You have control{watchers}")
+        else:
+            who = role.get("controller")
+            self.role_lbl.setText(f"<span style='color:#E0A100'>●</span> View only"
+                                  f"{f' — {who} has control' if who else ''}{watchers}")
+        self.canvas.setToolTip("" if self.control else "View only: another user controls this computer")
 
     def send(self, t, payload=b""):
+        if not getattr(self, "control", True) and t in (P.MOUSE, P.KEY, P.CLIPBOARD, P.FILE_BEGIN,
+                                                         P.FILE_DATA, P.FILE_END):
+            if t != P.MOUSE:
+                self.status.showMessage("View only — another user has control", 3000)
+            return
         try:
             self.chan.send(t, payload)
         except Exception:
@@ -167,11 +245,6 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.send(P.KEY, {"key": k, "down": True})
         for k in ("delete", "alt", "control"):
             self.send(P.KEY, {"key": k, "down": False})
-
-    def _chat(self):
-        text, ok = QtWidgets.QInputDialog.getText(self, "Chat", "Message to remote user:")
-        if ok and text:
-            self.send(P.CHAT, text)
 
     def _pick_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Send file")
@@ -213,12 +286,22 @@ class ViewerWindow(QtWidgets.QMainWindow):
             info = json.loads(data)
             self._pending = QtGui.QImage(info["w"], info["h"], QtGui.QImage.Format_RGB32)
             self._pending.fill(QtGui.QColor(0, 0, 0))
-            self.mon.blockSignals(True)
-            self.mon.clear()
-            self.mon.addItems([f"{i + 1}: {m['w']}x{m['h']}" for i, m in enumerate(info["monitors"])])
-            self.mon.setCurrentIndex(info["monitor"])
-            self.mon.blockSignals(False)
+            self._set_monitors(info.get("monitors") or [{"w": info["w"], "h": info["h"]}],
+                               info.get("monitor", 0))
             self.status.showMessage(f"Remote screen {info['w']}x{info['h']}")
+        elif t == P.ROLE:
+            self._set_role(json.loads(data))
+        elif t == P.CHAT:
+            s = data.decode("utf-8", "replace")
+            try:
+                m = json.loads(s) if s.startswith("{") else {"text": s}
+            except ValueError:
+                m = {"text": s}
+            self.chat.add(m.get("from"), m.get("text", ""), m.get("ts"))
+            if not self.chat_dock.isVisible():
+                self._unread += 1
+                self.chat_action.setText(f"Chat ({self._unread})")
+                self.chat_dock.show()
         elif t == P.TILE:
             x, y = struct.unpack(">HH", data[:4])
             tile = QtGui.QImage.fromData(data[4:], "JPEG")

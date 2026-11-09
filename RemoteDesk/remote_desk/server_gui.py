@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import theme
 from .netutil import format_hostport, local_addresses
-from .relay import Relay
+from .relay import Registry, Relay
 
 CONFIG = os.path.join(os.path.expanduser("~"), ".remotedesk_server.json")
 
@@ -39,6 +39,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.cfg = load_cfg()
         self.relay = None
+        self.registry = Registry(match_by_name=self.cfg.get("match_by_name", True))
         self.quitting = False
         self.setWindowTitle("RemoteDesk Server")
         self.setWindowIcon(theme.app_icon("RemoteDeskServer"))
@@ -91,8 +92,13 @@ class ServerWindow(QtWidgets.QMainWindow):
         for w in (self.autostart, self.tray_close):
             w.toggled.connect(self._save)
         self.port.valueChanged.connect(self._save)
+        self.name_match = QtWidgets.QCheckBox("Recognise desks by computer name (keeps the ID "
+                                              "after a reinstall)")
+        self.name_match.setChecked(self.cfg.get("match_by_name", True))
+        self.name_match.toggled.connect(self._save)
         form.addRow(self.autostart)
         form.addRow(self.tray_close)
+        form.addRow(self.name_match)
         l.addLayout(form)
         l.addStretch()
         top.addWidget(c, 1)
@@ -125,11 +131,28 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         # tables / log
         self.tabs = QtWidgets.QTabWidget()
-        self.desks = self._table(["Desk ID", "IP address", "Online for"])
-        self.sess = self._table(["Viewer IP", "Desk ID", "Duration", "Transferred", ""])
+        desk_page = QtWidgets.QWidget()
+        dl = QtWidgets.QVBoxLayout(desk_page)
+        dl.setContentsMargins(8, 8, 8, 8)
+        bar = QtWidgets.QHBoxLayout()
+        self.desk_filter = QtWidgets.QLineEdit(placeholderText="Search ID or computer name")
+        self.desk_filter.textChanged.connect(lambda _: self._refresh())
+        bar.addWidget(self.desk_filter, 1)
+        edit = QtWidgets.QPushButton("Edit ID…")
+        edit.clicked.connect(self._edit_id)
+        bar.addWidget(edit)
+        delete = QtWidgets.QPushButton("Delete")
+        delete.clicked.connect(self._delete_desk)
+        bar.addWidget(delete)
+        dl.addLayout(bar)
+        self.desks = self._table(["Desk ID", "Computer name", "Status", "IP address", "Last seen"])
+        self.desks.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.desks.doubleClicked.connect(self._edit_id)
+        dl.addWidget(self.desks)
+        self.sess = self._table(["Viewer IP", "Desk", "Duration", "Transferred", ""])
         self.log = QtWidgets.QPlainTextEdit(readOnly=True)
         self.log.setMaximumBlockCount(5000)
-        self.tabs.addTab(self.desks, "Online desks")
+        self.tabs.addTab(desk_page, "Desks")
         self.tabs.addTab(self.sess, "Active sessions")
         self.tabs.addTab(self.log, "Log")
         body.addWidget(self.tabs, 1)
@@ -181,7 +204,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.stop_server() if self.relay else self.start_server()
 
     def start_server(self):
-        relay = Relay("", self.port.value(), on_log=self.log_sig.emit)
+        relay = Relay("", self.port.value(), on_log=self.log_sig.emit, registry=self.registry)
         try:
             relay.start()
         except OSError as e:
@@ -218,17 +241,37 @@ class ServerWindow(QtWidgets.QMainWindow):
         rate = max(0, now_bytes - getattr(self, "_last_bytes", 0))
         self._last_bytes = now_bytes
         self.stat["traffic"].setText(fmt_bytes(rate) + "/s")
-        self.tabs.setTabText(0, f"Online desks ({len(hosts)})")
+        self.tabs.setTabText(0, f"Desks ({len(hosts)} online / {len(self.registry.desks)})")
         self.tabs.setTabText(1, f"Active sessions ({len(sess)})")
 
-        self.desks.setRowCount(len(hosts))
-        for r, (i, ip, since) in enumerate(sorted(hosts)):
-            for c, val in enumerate((f"{i[:3]} {i[3:6]} {i[6:]}", ip, fmt_age(since))):
-                self.desks.setItem(r, c, QtWidgets.QTableWidgetItem(val))
+        online = {i: (ip, since) for i, ip, since in hosts}
+        q = self.desk_filter.text().strip().lower().replace(" ", "")
+        rows = [d for d in self.registry.list()
+                if not q or q in d["id"] or q in (d.get("name") or "").lower().replace(" ", "")]
+        rows.sort(key=lambda d: (d["id"] not in online, (d.get("name") or "~").lower(), d["id"]))
+        selected = self._selected_id()
+        self.desks.setRowCount(len(rows))
+        for r, d in enumerate(rows):
+            i = d["id"]
+            on = online.get(i)
+            last = "now" if on else (time.strftime("%Y-%m-%d %H:%M", time.localtime(d["last_seen"]))
+                                     if d.get("last_seen") else "—")
+            vals = (f"{i[:3]} {i[3:6]} {i[6:]}", d.get("name") or "(unnamed)",
+                    f"● Online {fmt_age(on[1])}" if on else "Offline",
+                    on[0] if on else d.get("ip", ""), last)
+            for c, val in enumerate(vals):
+                item = QtWidgets.QTableWidgetItem(val)
+                item.setData(QtCore.Qt.UserRole, i)
+                if c == 2:
+                    item.setForeground(QtGui.QColor(theme.OK if on else "#9AA0A6"))
+                self.desks.setItem(r, c, item)
+            if i == selected:
+                self.desks.selectRow(r)
 
         self.sess.setRowCount(len(sess))
         for r, (sid, hid, vip, since, nbytes) in enumerate(sess):
-            for c, val in enumerate((vip, f"{hid[:3]} {hid[3:6]} {hid[6:]}",
+            dname = self.registry.desks.get(hid, {}).get("name") or ""
+            for c, val in enumerate((vip, f"{hid[:3]} {hid[3:6]} {hid[6:]}" + (f" — {dname}" if dname else ""),
                                      fmt_age(since), fmt_bytes(nbytes))):
                 self.sess.setItem(r, c, QtWidgets.QTableWidgetItem(val))
             old = self.sess.cellWidget(r, 4)
@@ -239,9 +282,54 @@ class ServerWindow(QtWidgets.QMainWindow):
                 self.sess.setCellWidget(r, 4, b)
         self.tray.setToolTip(f"RemoteDesk Server - {len(hosts)} desks, {len(sess)} sessions")
 
+    def _selected_id(self):
+        rows = self.desks.selectionModel().selectedRows() if self.desks.selectionModel() else []
+        if not rows:
+            return None
+        item = self.desks.item(rows[0].row(), 0)
+        return item.data(QtCore.Qt.UserRole) if item else None
+
+    def _edit_id(self):
+        old = self._selected_id()
+        if not old:
+            QtWidgets.QMessageBox.information(self, "Edit ID", "Select a desk first.")
+            return
+        name = self.registry.desks.get(old, {}).get("name") or "this desk"
+        new, ok = QtWidgets.QInputDialog.getText(
+            self, "Edit ID", f"New 9-digit ID for {name}:", text=old)
+        if not ok:
+            return
+        new = new.replace(" ", "")
+        try:
+            if self.relay:
+                self.relay.change_id(old, new)
+            else:
+                self.registry.change_id(old, new)
+                self._append_log(f"Desk ID {old} changed to {new}")
+        except (ValueError, KeyError) as e:
+            QtWidgets.QMessageBox.warning(self, "Edit ID", str(e))
+        self._refresh()
+
+    def _delete_desk(self):
+        i = self._selected_id()
+        if not i:
+            return
+        name = self.registry.desks.get(i, {}).get("name") or "(unnamed)"
+        if QtWidgets.QMessageBox.question(
+                self, "Delete desk", f"Remove {i} ({name}) from the list?\n\nIf that computer "
+                "connects again it gets a new ID (or the same one, if it is recognised by name).") \
+                != QtWidgets.QMessageBox.Yes:
+            return
+        if self.relay:
+            self.relay.delete_desk(i)
+        else:
+            self.registry.delete(i)
+        self._refresh()
+
     def _save(self):
+        self.registry.match_by_name = self.name_match.isChecked()
         self.cfg.update(port=self.port.value(), autostart=self.autostart.isChecked(),
-                        tray=self.tray_close.isChecked())
+                        tray=self.tray_close.isChecked(), match_by_name=self.name_match.isChecked())
         with open(CONFIG, "w") as f:
             json.dump(self.cfg, f, indent=2)
 

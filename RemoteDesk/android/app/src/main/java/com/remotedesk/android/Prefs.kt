@@ -37,6 +37,11 @@ class Prefs(context: Context) {
         get() = sp.getString("host_pw", null) ?: randomPassword().also { hostPassword = it }
         set(v) = sp.edit().putString("host_pw", v).apply()
 
+    /** Random key that identifies this phone to the server (so it keeps its desk ID). */
+    val machineKey: String
+        get() = sp.getString("machine_key", null) ?: java.util.UUID.randomUUID().toString().replace("-", "")
+            .also { sp.edit().putString("machine_key", it).apply() }
+
     var deskId: String
         get() = sp.getString("desk_id", "") ?: ""
         set(v) = sp.edit().putString("desk_id", v).apply()

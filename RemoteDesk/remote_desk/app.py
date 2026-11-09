@@ -99,18 +99,26 @@ class SettingsDialog(QtWidgets.QDialog):
 class AcceptDialog(QtWidgets.QDialog):
     """Shown on the shared desk when someone wants to connect."""
 
-    def __init__(self, parent, peer):
+    def __init__(self, parent, info):
         super().__init__(parent, QtCore.Qt.WindowStaysOnTopHint)
+        if not isinstance(info, dict):
+            info = {"peer": info}
+        controller = info.get("controller")
         self.setWindowTitle("Incoming connection")
         self.setMinimumWidth(380)
         v = QtWidgets.QVBoxLayout(self)
         v.setSpacing(12)
         v.addWidget(theme.label("<b style='font-size:13pt'>Someone wants to connect</b>"))
-        v.addWidget(theme.label(f"From: {peer}", "Muted"))
+        v.addWidget(theme.label(f"From: {info.get('peer')}", "Muted"))
         v.addWidget(theme.label("They entered the correct password. Allow them to:"))
         self.control = QtWidgets.QCheckBox("Control mouse and keyboard")
         self.control.setChecked(True)
         v.addWidget(self.control)
+        if controller:
+            note = theme.label(f"{controller} already has control, so this person can only watch "
+                               f"until {controller} disconnects.", "Muted")
+            note.setWordWrap(True)
+            v.addWidget(note)
         self.count = theme.label("", "Muted")
         v.addWidget(self.count)
         h = QtWidgets.QHBoxLayout()
@@ -218,6 +226,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg["port"] = args.port
         self.cfg.setdefault("port", 7071)
         self.cfg.setdefault("password", gen_password())
+        self.cfg.setdefault("machine_key", secrets.token_hex(16))   # identifies this PC to the server
         self.quitting = False
         self.viewers = []
         self._accept_result = None
@@ -262,10 +271,27 @@ class MainWindow(QtWidgets.QMainWindow):
         h.addWidget(gear)
         v.addWidget(header)
 
-        self.banner = QtWidgets.QPushButton(objectName="Danger")
+        self.banner = QtWidgets.QFrame()
+        self.banner.setStyleSheet("QFrame { background: #C0392B; } QLabel { color: white; font-weight: 600; }"
+                                  "QPushButton { background: rgba(255,255,255,0.2); color: white; border: none;"
+                                  " padding: 6px 14px; font-weight: 600; }"
+                                  "QPushButton:hover { background: rgba(255,255,255,0.32); }")
+        bl = QtWidgets.QHBoxLayout(self.banner)
+        bl.setContentsMargins(18, 6, 12, 6)
+        self.banner_lbl = QtWidgets.QLabel()
+        self.banner_lbl.setWordWrap(True)
+        bl.addWidget(self.banner_lbl, 1)
+        self.chat_btn = QtWidgets.QPushButton("Chat")
+        self.chat_btn.clicked.connect(self._open_chat)
+        bl.addWidget(self.chat_btn)
+        end = QtWidgets.QPushButton("End session")
+        end.clicked.connect(lambda: self.host.end_session())
+        bl.addWidget(end)
         self.banner.hide()
-        self.banner.clicked.connect(lambda: self.host.end_session())
         v.addWidget(self.banner)
+        self.chat_win = None
+        self._unread = 0
+        self._accept_lock = threading.Lock()
 
         body = QtWidgets.QHBoxLayout()
         body.setContentsMargins(18, 18, 18, 18)
@@ -504,6 +530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.relay = relay
         self.host = Host(self.pw.text(), self._host_event, direct_port=self.cfg["port"],
                          relay=relay, host_id=self.cfg.get("id"),
+                         machine_key=self.cfg["machine_key"],
                          unattended=self.cfg.get("unattended", False),
                          view_only=self.cfg.get("view_only", False))
         if relay:
@@ -520,10 +547,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _host_event(self, name, arg):           # called on worker threads
         if name == "accept":
-            self._accept_done.clear()
-            self.host_sig.emit(name, arg)
-            self._accept_done.wait(60)
-            return self._accept_result
+            with self._accept_lock:            # one prompt at a time
+                self._accept_done.clear()
+                self._accept_result = False
+                self.host_sig.emit(name, arg)
+                self._accept_done.wait(60)
+                return self._accept_result
         self.host_sig.emit(name, arg)
 
     def _on_event(self, name, arg):
@@ -546,20 +575,62 @@ class MainWindow(QtWidgets.QMainWindow):
             self._accept_result = {"control": d.control.isChecked()} if ok else False
             self._accept_done.set()
         elif name == "session_start":
-            self.banner.setText(f"⚠  {arg} is connected to this computer — click here to end the session")
-            self.banner.show()
-            self.tray.showMessage("RemoteDesk", f"Remote session started ({arg})",
+            self.tray.showMessage("RemoteDesk", f"{arg} connected to this computer",
                                   QtWidgets.QSystemTrayIcon.Warning, 4000)
+            if self.chat_win:
+                self.chat_win.panel.info(f"{arg} connected")
+        elif name == "viewers":
+            self._show_viewers(arg)
         elif name == "session_end":
             self.banner.hide()
+            if self.chat_win:
+                self.chat_win.panel.info("Everyone has disconnected")
         elif name == "clipboard":
             QtWidgets.QApplication.clipboard().setText(arg)
             self.tray.showMessage("RemoteDesk", "Clipboard received from remote user")
         elif name == "chat":
-            QtWidgets.QMessageBox.information(self, "Message from remote user", arg)
+            msg = arg if isinstance(arg, dict) else {"from": None, "text": str(arg)}
+            self._chat_window().panel.add(msg.get("from"), msg.get("text", ""), msg.get("ts"))
+            if not self.chat_win.isVisible():
+                self._unread += 1
+                self.chat_btn.setText(f"Chat ({self._unread})")
+                self._open_chat()               # a new message opens the chat
+                self.tray.showMessage("RemoteDesk", f"{msg.get('from') or 'Remote user'}: {msg.get('text', '')}")
         elif name == "file":
             self.tray.showMessage("RemoteDesk", f"File received:\n{arg}")
             self.status_msg.setText(f"File received: {arg}")
+
+    def _show_viewers(self, viewers):
+        if not viewers:
+            self.banner.hide()
+            return
+        parts = [f"{v['name']}{' (control)' if v['control'] else ' (view only)'}" for v in viewers]
+        who = parts[0] if len(parts) == 1 else f"{len(parts)} people: " + ", ".join(parts)
+        self.banner_lbl.setText(f"⚠  Connected to this computer: {who}")
+        self.banner.show()
+
+    def _chat_window(self):
+        if self.chat_win is None:
+            from .chat import ChatWindow
+            self.chat_win = ChatWindow(self, "RemoteDesk chat")
+            self.chat_win.setWindowIcon(self.windowIcon())
+
+            def send(text):
+                if not self.host.session:
+                    self.chat_win.panel.info("Nobody is connected")
+                    return
+                msg = self.host.send_chat(text)
+                self.chat_win.panel.add(None, text, msg["ts"], mine=True)
+            self.chat_win.panel.send_text.connect(send)
+        return self.chat_win
+
+    def _open_chat(self):
+        w = self._chat_window()
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        self._unread = 0
+        self.chat_btn.setText("Chat")
 
     # ---------------------------------------------------------- actions
     def _connect_clicked(self):

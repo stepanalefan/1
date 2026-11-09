@@ -101,7 +101,7 @@ class HostService : Service(), DeskHost.Listener {
         if (desk != null) return
         deskId = prefs.deskId.ifEmpty { null }
         desk = DeskHost(prefs.hostPassword, this, directPort = 7071, server = prefs.serverAddress,
-            deskId = deskId).also { it.start() }
+            deskId = deskId, machineKey = prefs.machineKey, deviceName = deviceName()).also { it.start() }
         statusText = if (prefs.serverAddress == null) "Sharing on — no server set (Tailscale / local network only)"
         else "Connecting to the server…"
         online = prefs.serverAddress == null
@@ -120,6 +120,14 @@ class HostService : Service(), DeskHost.Listener {
     }
 
     fun setPassword(pw: String) { desk?.password = pw }
+
+    /** The name the user gave the phone (Settings → About), else the model. */
+    private fun deviceName(): String {
+        val n = try {
+            android.provider.Settings.Global.getString(contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+        } catch (_: Exception) { null }
+        return n?.takeIf { it.isNotBlank() } ?: "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+    }
 
     private fun goForeground(projection: Boolean) {
         val n = statusNotification()

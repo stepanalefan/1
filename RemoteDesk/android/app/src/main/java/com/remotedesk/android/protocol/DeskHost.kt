@@ -16,6 +16,10 @@ class DeskHost(
     private val directPort: Int = 7071,
     private val server: Pair<String, Int>? = null,
     @Volatile var deskId: String? = null,
+    /** Identifies this device to the server so it keeps its ID (generated once, stored). */
+    private val machineKey: String? = null,
+    /** Shown in the server's desk list. */
+    private val deviceName: String? = null,
 ) {
     interface Listener {
         fun onId(id: String) {}
@@ -64,7 +68,8 @@ class DeskHost(
                 control = ctrl
                 ctrl.connect(InetSocketAddress(srv.first, srv.second), 10_000)
                 ctrl.soTimeout = 15_000
-                Connector.sendLine(ctrl, "{\"role\": \"host\", \"id\": ${deskId?.let { Json.quote(it) } ?: "null"}}")
+                Connector.sendLine(ctrl, String(Json.obj("role" to "host", "id" to deskId,
+                    "key" to machineKey, "name" to deviceName), Charsets.UTF_8))
                 val reply = Connector.readLine(ctrl.getInputStream())
                 val id = Regex("\"id\"\\s*:\\s*\"(\\d+)\"").find(reply)?.groupValues?.get(1)
                     ?: throw IOException("Bad reply from server")
@@ -83,6 +88,14 @@ class DeskHost(
                 val inp = ctrl.getInputStream()
                 while (running) {
                     val line = Connector.readLine(inp)
+                    if (!line.contains("\"connect\"")) {
+                        // the server admin gave this desk another ID
+                        Regex("\"id\"\\s*:\\s*\"(\\d+)\"").find(line)?.groupValues?.get(1)?.let {
+                            deskId = it
+                            listener.onId(it)
+                        }
+                        continue
+                    }
                     val token = Regex("\"connect\"\\s*:\\s*\"([0-9a-f]+)\"").find(line)?.groupValues?.get(1) ?: continue
                     val from = Regex("\"from\"\\s*:\\s*\"([^\"]*)\"").find(line)?.groupValues?.get(1) ?: "unknown"
                     thread(name = "rd-data", isDaemon = true) {
