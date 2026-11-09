@@ -24,8 +24,26 @@ Self-hosted remote desktop with two applications:
    the other user clicks **Accept**.
 
 ### Build .exe files
-Run `build_windows.bat` → `dist\RemoteDesk.exe` and `dist\RemoteDeskServer.exe`
-(single files, no Python needed on target machines).
+Run `build_windows.bat` → `dist\RemoteDesk\RemoteDesk.exe` and
+`dist\RemoteDeskServer\RemoteDeskServer.exe` (folders, also zipped in `dist\`; no Python
+needed on target machines — copy the whole folder).
+
+### Smart App Control / SmartScreen
+Windows 11 Smart App Control blocks programs that are not signed with a trusted
+code-signing certificate. To ship RemoteDesk to other PCs, sign it:
+
+1. Get a code-signing certificate from a trusted authority, for example
+   **Azure Trusted Signing** (Microsoft, monthly fee; identity check) or a classic
+   certificate (Certum, Sectigo, DigiCert …; on a USB token or cloud HSM).
+   Self-signed certificates do **not** work.
+2. Create `sign_config.bat` next to `build_windows.bat` (it is not committed), e.g.
+   `set SIGN_CERT_SHA1=<thumbprint>` — or for Azure `set SIGN_AZURE_DLIB=…` and
+   `set SIGN_AZURE_METADATA=…` (see `sign_windows.ps1`).
+3. Run `build_windows.bat`: every .exe/.dll/.pyd is signed and checked.
+
+Without a certificate: run from source (`python RemoteDesk.py`), or on your own PCs turn
+Smart App Control off (Windows Security → App & browser control; it cannot be turned back
+on without resetting Windows).
 
 ### Icons
 `assets/RemoteDesk.ico` (client, red) and `assets/RemoteDeskServer.ico` (server, blue)
