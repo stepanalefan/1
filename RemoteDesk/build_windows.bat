@@ -16,6 +16,7 @@ if not exist "assets\RemoteDesk.ico" %PY% make_icons.py || goto :fail
 %PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name RemoteDesk ^
   --icon assets\RemoteDesk.ico --add-data "assets;assets" ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
+  --collect-data soundcard --collect-submodules av ^
   RemoteDesk.py || goto :fail
 
 %PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name RemoteDeskServer ^

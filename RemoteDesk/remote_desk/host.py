@@ -7,6 +7,7 @@ visible banner and the local user can end it at any time.
 import hashlib, io, json, logging, os, socket, struct, sys, threading, time
 
 from . import protocol as P
+from .media import AudioCapture, VideoEncoder
 from .netutil import clean_ip, connect, format_hostport, listen
 
 log = logging.getLogger("host")
@@ -103,16 +104,40 @@ class Frame:
     def __init__(self, seq, img, geometry):
         self.seq, self.img, self.geometry = seq, img, geometry
         self.w, self.h = img.size
-        raw = img.tobytes()
-        row = self.w * 3
-        self.hashes = {}
-        for ty in range(0, self.h, TILE):
-            th = min(TILE, self.h - ty)
-            rows = [raw[(ty + r) * row:(ty + r + 1) * row] for r in range(th)]
-            for tx in range(0, self.w, TILE):
-                tw = min(TILE, self.w - tx)
-                self.hashes[(tx, ty)] = hashlib.blake2b(
-                    b"".join(r[tx * 3:(tx + tw) * 3] for r in rows), digest_size=8).digest()
+        self._raw = None
+        self._hashes = None
+        self._digest = None
+        self._lock = threading.Lock()
+
+    @property
+    def raw(self):
+        if self._raw is None:
+            self._raw = self.img.tobytes()
+        return self._raw
+
+    @property
+    def digest(self):
+        """One hash of the whole image (video mode only needs 'changed or not')."""
+        with self._lock:
+            if self._digest is None:
+                self._digest = hashlib.blake2b(self.raw, digest_size=16).digest()
+            return self._digest
+
+    @property
+    def hashes(self):
+        """Per-tile hashes for JPEG tiles, computed on first use and shared by viewers."""
+        with self._lock:
+            if self._hashes is None:
+                raw, row, hs = self.raw, self.w * 3, {}
+                for ty in range(0, self.h, TILE):
+                    th = min(TILE, self.h - ty)
+                    rows = [raw[(ty + r) * row:(ty + r + 1) * row] for r in range(th)]
+                    for tx in range(0, self.w, TILE):
+                        tw = min(TILE, self.w - tx)
+                        hs[(tx, ty)] = hashlib.blake2b(
+                            b"".join(r[tx * 3:(tx + tw) * 3] for r in rows), digest_size=8).digest()
+                self._hashes = hs
+            return self._hashes
 
 
 class CaptureHub:
@@ -190,6 +215,11 @@ class ViewerConn:
         self._info_dirty = True
         self._last_seq = -1
         self._file = None
+        self.mode = "jpeg"                # or "video" (H.264), chosen by the viewer
+        self.audio = False                # viewer wants sound
+        self._video = None                # VideoEncoder while in video mode
+        self._video_digest = None
+        self._want_key = True
 
     def start(self):
         threading.Thread(target=self._send_loop, daemon=True).start()
@@ -227,16 +257,23 @@ class ViewerConn:
                 if not self.running or frame is None:
                     continue
                 t0 = time.time()
-                if self._info_dirty or info != (frame.w, frame.h):
-                    info = (frame.w, frame.h)
+                if self._info_dirty or info != (frame.w, frame.h, self.mode):
+                    info = (frame.w, frame.h, self.mode)
                     self._info_dirty = False
                     self._sent.clear()
+                    self._want_key = True
                     self.chan.send(P.FRAME_INFO, {"w": frame.w, "h": frame.h, "monitors": hub.monitors,
-                                                  "monitor": self.monitor})
+                                                  "monitor": self.monitor, "mode": self.mode})
                 if self._force_full:
                     self._force_full = False
                     self._sent.clear()
+                    self._want_key = True
                 self._last_seq = frame.seq
+                if self.mode == "video":
+                    self._send_video(frame)
+                    time.sleep(max(0.0, 1 / self.fps - (time.time() - t0)))
+                    continue
+                self._close_video()
                 sent = 0
                 for (tx, ty), hsh in frame.hashes.items():
                     if self._sent.get((tx, ty)) == hsh:
@@ -252,7 +289,33 @@ class ViewerConn:
                 time.sleep(max(0.0, 1 / self.fps - (time.time() - t0)))
         except Exception as e:
             log.info("viewer %s: %s", self.peer, e)
+        self._close_video()
         self.stop()
+
+    # ------------------------------------------------------------ video
+    def _send_video(self, frame):
+        if self._video_digest == frame.digest and not self._want_key:
+            return                                     # static screen: nothing to encode
+        enc = self._video
+        if enc is None or enc.size != VideoEncoder.even(frame.w, frame.h) or enc.quality != self.quality:
+            self._close_video()
+            try:
+                enc = self._video = VideoEncoder(frame.w, frame.h, self.fps, self.quality)
+            except Exception as e:                     # no PyAV / encoder: fall back to JPEG tiles
+                log.warning("video encoder unavailable (%s); using JPEG tiles", e)
+                self.mode = "jpeg"
+                self._info_dirty = True
+                return
+            self._want_key = True
+        for key, data in enc.encode(frame.img, self._want_key):
+            self.chan.send(P.VIDEO, bytes([1 if key else 0]) + data)
+        self._want_key = False
+        self._video_digest = frame.digest
+
+    def _close_video(self):
+        if self._video:
+            self._video.close()
+            self._video = None
 
     def _recv_loop(self):
         try:
@@ -287,7 +350,16 @@ class ViewerConn:
             q = json.loads(data)
             self.quality = max(10, min(95, int(q.get("quality", self.quality))))
             self.fps = max(1, min(60, int(q.get("fps", self.fps))))
+            mode = q.get("mode", self.mode)
+            if mode in ("jpeg", "video") and mode != self.mode:
+                self.mode = mode
+                self._info_dirty = True
             self._force_full = True
+        elif t == P.KEYFRAME:
+            self._want_key = True
+        elif t == P.AUDIO_CTRL:
+            self.audio = bool(json.loads(data).get("enabled"))
+            host.audio_changed()
         elif t == P.HELLO:
             hello = json.loads(data)
             self.name = str(hello.get("name") or self.peer)[:64]
@@ -329,6 +401,8 @@ class Host:
         self.hub = None
         self._vlock = threading.RLock()
         self._injector = None
+        self._audio = None                 # AudioCapture while someone listens
+        self._audio_error = None
         self._fails = {}
         self._gen = 0
         self._ctrl = None
@@ -466,6 +540,7 @@ class Host:
                 self.hub.stop()
                 self.hub = None
         self.update_roles()
+        self.audio_changed()
         if empty:
             self.ev("session_end", None)
 
@@ -498,6 +573,34 @@ class Host:
                 log.warning("input injection unavailable: %s", e)
                 self._injector = False
         return self._injector or None
+
+    # -------------------------------------------------------------- audio
+    def audio_changed(self):
+        """Starts sound capture when a viewer turns sound on, stops it when nobody listens."""
+        listeners = [v for v in self.viewer_list() if v.audio]
+        with self._vlock:
+            if listeners and self._audio is None:
+                self._audio_error = None
+                self._audio = AudioCapture(self._audio_packet, self._audio_failed)
+            elif not listeners and self._audio is not None:
+                self._audio.stop()
+                self._audio = None
+        status = {"available": self._audio_error is None, "error": self._audio_error}
+        for v in listeners:
+            v.send(P.AUDIO_CTRL, status)
+
+    def _audio_packet(self, pkt):
+        for v in self.viewer_list():
+            if v.audio:
+                v.send(P.AUDIO, pkt)
+
+    def _audio_failed(self, msg):
+        self._audio_error = msg
+        with self._vlock:
+            self._audio = None
+        for v in self.viewer_list():
+            if v.audio:
+                v.send(P.AUDIO_CTRL, {"available": False, "error": msg})
 
     # --------------------------------------------------------------- chat
     def on_chat(self, viewer, data):

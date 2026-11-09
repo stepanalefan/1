@@ -3,3 +3,6 @@ mss>=9.0
 Pillow>=10.0
 pynput>=1.7
 cryptography>=41.0
+av>=12.0          # H.264 video and Opus audio (optional: JPEG tiles / no sound without it)
+soundcard>=0.4    # sound capture / playback
+numpy>=1.24

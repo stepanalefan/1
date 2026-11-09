@@ -110,6 +110,7 @@ class Canvas(QtWidgets.QWidget):
 
 class ViewerWindow(QtWidgets.QMainWindow):
     sig = QtCore.pyqtSignal(int, bytes)
+    frame_sig = QtCore.pyqtSignal(object)          # decoded video frame (QImage)
 
     def __init__(self, chan, title):
         super().__init__()
@@ -122,6 +123,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._out_file = None
         self._build_toolbar()
         self.sig.connect(self._on_msg)
+        self.frame_sig.connect(self._on_video_frame)
         self.setAcceptDrops(True)
         threading.Thread(target=self._recv_loop, daemon=True).start()
 
@@ -141,12 +143,39 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.mon_action = tb.addWidget(self.mon_box)
         self.mon_action.setVisible(False)
         self._monitors = None
-        self.qual = QtWidgets.QComboBox()
-        self.qual.addItems(["Best quality", "Balanced", "Fast"])
-        self.qual.setCurrentIndex(1)
-        self.qual.currentIndexChanged.connect(self._quality)
-        tb.addWidget(QtWidgets.QLabel("  Mode: "))
-        tb.addWidget(self.qual)
+        # display menu: picture mode (JPEG tiles / H.264 video) and quality
+        self.settings = QtCore.QSettings("RemoteDesk", "Viewer")
+        self.mode = self.settings.value("mode", "jpeg")
+        self.quality_idx = int(self.settings.value("quality", 1))
+        menu = QtWidgets.QMenu(self)
+        menu.addSection("Picture")
+        self.mode_group = QtWidgets.QActionGroup(self)
+        for key, label in (("jpeg", "JPEG tiles — sharp text, low traffic when idle"),
+                           ("video", "Video stream (H.264) — smooth motion and video")):
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == self.mode)
+            a.setData(key)
+            self.mode_group.addAction(a)
+        self.mode_group.triggered.connect(lambda a: self._set_mode(a.data()))
+        menu.addSection("Quality")
+        self.qual_group = QtWidgets.QActionGroup(self)
+        for i, label in enumerate(("Best quality", "Balanced", "Fast (slow networks)")):
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(i == self.quality_idx)
+            a.setData(i)
+            self.qual_group.addAction(a)
+        self.qual_group.triggered.connect(lambda a: self._quality(a.data()))
+        disp = QtWidgets.QToolButton()
+        disp.setText("Display")
+        disp.setMenu(menu)
+        disp.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        tb.addWidget(disp)
+        self.sound_action = tb.addAction("Sound")
+        self.sound_action.setCheckable(True)
+        self.sound_action.setChecked(self.settings.value("sound", "true") == "true")
+        self.sound_action.toggled.connect(self._set_sound)
         tb.addSeparator()
         tb.addAction("Ctrl+Alt+Del", self._cad)
         tb.addAction("Send clipboard", lambda: self.send(
@@ -178,6 +207,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.control = True             # until the host says otherwise (older hosts never do)
         self.my_name = socket.gethostname()
         self.send(P.HELLO, {"name": self.my_name})
+        self._player = None
+        self._decoder = None
+        self._send_display()
+        self._set_sound(self.sound_action.isChecked())
 
     def _set_monitors(self, monitors, current):
         key = (tuple((m["w"], m["h"]) for m in monitors))
@@ -236,9 +269,34 @@ class ViewerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    QUALITY = [{"quality": 85, "fps": 20}, {"quality": 60, "fps": 15}, {"quality": 35, "fps": 12}]
+
     def _quality(self, i):
-        self.send(P.SET_QUALITY, [{"quality": 85, "fps": 20}, {"quality": 60, "fps": 15},
-                                  {"quality": 35, "fps": 12}][i])
+        self.quality_idx = i
+        self.settings.setValue("quality", i)
+        self._send_display()
+
+    def _set_mode(self, mode):
+        self.mode = mode
+        self.settings.setValue("mode", mode)
+        self._send_display()
+
+    def _send_display(self):
+        q = dict(self.QUALITY[self.quality_idx])
+        q["fps"] = q["fps"] + (10 if self.mode == "video" else 0)    # video can afford more frames
+        q["mode"] = self.mode
+        self.send(P.SET_QUALITY, q)
+
+    def _set_sound(self, on):
+        self.sound_action.setText("Sound: on" if on else "Sound: off")
+        self.settings.setValue("sound", "true" if on else "false")
+        self.send(P.AUDIO_CTRL, {"enabled": bool(on)})
+        if on and self._player is None:
+            from .media import AudioPlayer
+            self._player = AudioPlayer(lambda m: self.sig.emit(-2, m.encode()))
+        elif not on and self._player is not None:
+            self._player.stop()
+            self._player = None
 
     def _cad(self):
         for k in ("control", "alt", "delete"):
@@ -275,11 +333,41 @@ class ViewerWindow(QtWidgets.QMainWindow):
         try:
             while True:
                 t, data = self.chan.recv()
+                if t == P.VIDEO:
+                    self._decode_video(data)        # decoded here, off the UI thread
+                    continue
+                if t == P.AUDIO:
+                    if self._player:
+                        self._player.push(data)
+                    continue
                 self.sig.emit(t, data)
                 if t == P.BYE:
                     break
         except Exception:
             self.sig.emit(P.BYE, b"")
+
+    def _decode_video(self, data):
+        try:
+            if self._decoder is None:
+                from .media import VideoDecoder
+                self._decoder = VideoDecoder()
+            rgb = self._decoder.decode(data[1:])
+        except ImportError:
+            self.sig.emit(-2, b"Video needs the 'av' package; switching to JPEG tiles")
+            self.mode = "jpeg"
+            self._send_display()
+            return
+        except Exception:
+            self.send(P.KEYFRAME)                    # lost sync: ask for a fresh keyframe
+            return
+        if rgb is not None:
+            h, w, _ = rgb.shape
+            img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).copy()
+            self.frame_sig.emit(img)
+
+    def _on_video_frame(self, img):
+        self.canvas.img = img
+        self.canvas.update()
 
     def _on_msg(self, t, data):
         if t == P.FRAME_INFO:
@@ -291,6 +379,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.status.showMessage(f"Remote screen {info['w']}x{info['h']}")
         elif t == P.ROLE:
             self._set_role(json.loads(data))
+        elif t == P.AUDIO_CTRL:
+            st = json.loads(data)
+            if not st.get("available", True):
+                self.status.showMessage(st.get("error") or "No sound from the remote computer", 8000)
+                self.sound_action.setToolTip(st.get("error") or "")
+        elif t == -2:                                   # local media message
+            self.status.showMessage(data.decode(), 8000)
         elif t == P.CHAT:
             s = data.decode("utf-8", "replace")
             try:
@@ -318,5 +413,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.close()
 
     def closeEvent(self, e):
+        if self._player:
+            self._player.stop()
+            self._player = None
         self.chan.close()
         super().closeEvent(e)

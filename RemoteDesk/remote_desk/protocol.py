@@ -38,6 +38,11 @@ FILE_END = 32
 CURSOR = 40      # json {x,y}
 ROLE = 41        # host -> viewer: json {control, controller, viewers: [{name, control}]}
 HELLO = 42       # viewer -> host: json {name}
+VIDEO = 50       # host -> viewer: flags (1 byte, bit0 = keyframe) + H.264 Annex-B access unit
+AUDIO = 51       # host -> viewer: one Opus packet (48 kHz stereo, 20 ms)
+AUDIO_CTRL = 52  # viewer -> host: json {enabled}; host -> viewer: json {available, error}
+KEYFRAME = 53    # viewer -> host: please send a keyframe (decoder lost sync)
+# SET_QUALITY may carry "mode": "jpeg" (tiles) or "video" (H.264); FRAME_INFO echoes "mode".
 BYE = 99
 
 
