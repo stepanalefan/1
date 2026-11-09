@@ -150,15 +150,26 @@ class RemoteView(context: Context, private val input: Input) : View(context) {
         clampOffsets()
     }
 
+    /** Video mode: the picture comes from a TextureView underneath; this view only
+     *  handles input and draws the pointer, and reports zoom/pan through [onTransform]. */
+    var videoMode = false
+        set(v) { field = v; invalidate() }
+    var onTransform: ((offX: Float, offY: Float, scale: Float) -> Unit)? = null
+    private var lastTransform = Triple(Float.NaN, 0f, 0f)
+
     override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(0xFF1E1E1E.toInt())
-        synchronized(lock) {
-            val f = frame ?: return
-            canvas.save()
-            canvas.translate(offX, offY)
-            canvas.scale(scale, scale)
-            canvas.drawBitmap(f, 0f, 0f, bitmapPaint)
-            canvas.restore()
+        val t = Triple(offX, offY, scale)
+        if (t != lastTransform) { lastTransform = t; onTransform?.invoke(offX, offY, scale) }
+        if (!videoMode) {
+            canvas.drawColor(0xFF1E1E1E.toInt())
+            synchronized(lock) {
+                val f = frame ?: return
+                canvas.save()
+                canvas.translate(offX, offY)
+                canvas.scale(scale, scale)
+                canvas.drawBitmap(f, 0f, 0f, bitmapPaint)
+                canvas.restore()
+            }
         }
         if (touchpad) {
             val x = curX * scale + offX

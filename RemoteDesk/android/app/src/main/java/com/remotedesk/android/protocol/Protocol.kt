@@ -30,8 +30,53 @@ object Msg {
     const val SET_MONITOR = 12
     const val SET_QUALITY = 13
     const val CLIPBOARD = 20
-    const val CHAT = 21
+    const val CHAT = 21            // json {from, text, ts}; older peers: plain text
+    const val ROLE = 41            // desk -> viewer: json {control, controller, viewers: [{name, control}]}
+    const val HELLO = 42           // viewer -> desk: json {name}
+    const val VIDEO = 50           // desk -> viewer: flags byte (bit0 keyframe) + H.264 Annex-B access unit
+    const val AUDIO = 51           // desk -> viewer: Opus packet (48 kHz stereo, 20 ms)
+    const val AUDIO_CTRL = 52      // viewer -> desk {enabled}; desk -> viewer {available, error}
+    const val KEYFRAME = 53        // viewer -> desk: send a keyframe
     const val BYE = 99
+}
+
+/** A chat message; [mine] = typed on this device. */
+data class ChatMessage(val from: String, val text: String, val ts: Long, val mine: Boolean = false) {
+    fun toJson(): ByteArray = Json.obj("from" to from, "text" to text, "ts" to ts / 1000.0)
+
+    companion object {
+        /** Parses a CHAT payload (JSON, or plain text from older peers). */
+        fun parse(data: ByteArray, fallbackFrom: String): ChatMessage {
+            val s = String(data, Charsets.UTF_8)
+            if (s.startsWith("{")) {
+                fun field(name: String) = Regex("\"$name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(s)
+                    ?.groupValues?.get(1)?.let { unescape(it) }
+                val ts = Regex("\"ts\"\\s*:\\s*([0-9.]+)").find(s)?.groupValues?.get(1)?.toDoubleOrNull()
+                return ChatMessage(field("from") ?: fallbackFrom, field("text") ?: "",
+                    ts?.let { (it * 1000).toLong() } ?: System.currentTimeMillis())
+            }
+            return ChatMessage(fallbackFrom, s, System.currentTimeMillis())
+        }
+
+        private fun unescape(s: String): String {
+            val out = StringBuilder()
+            var i = 0
+            while (i < s.length) {
+                val c = s[i]
+                if (c == '\\' && i + 1 < s.length) {
+                    when (val n = s[i + 1]) {
+                        'n' -> out.append('\n'); 't' -> out.append('\t'); 'r' -> out.append('\r')
+                        'u' -> if (i + 5 < s.length) {
+                            out.append(s.substring(i + 2, i + 6).toInt(16).toChar()); i += 4
+                        }
+                        else -> out.append(n)
+                    }
+                    i += 2
+                } else { out.append(c); i++ }
+            }
+            return out.toString()
+        }
+    }
 }
 
 class AuthException(message: String) : IOException(message)

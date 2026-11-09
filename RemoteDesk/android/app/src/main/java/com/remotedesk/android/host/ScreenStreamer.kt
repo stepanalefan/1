@@ -11,27 +11,45 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.DisplayMetrics
 import android.view.Display
-import com.remotedesk.android.protocol.Json
 import com.remotedesk.android.protocol.Msg
 import com.remotedesk.android.protocol.SecureChannel
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+/** One captured screen: pixels plus a hash per 64x64 tile, shared by all viewers. */
+class CapturedFrame(val seq: Long, val w: Int, val h: Int, val stride: Int, val pixels: IntArray) {
+    val cols = (w + TILE - 1) / TILE
+    val rows = (h + TILE - 1) / TILE
+    val hashes = LongArray(cols * rows).also { hs ->
+        for (r in 0 until rows) for (c in 0 until cols) {
+            val tx = c * TILE; val ty = r * TILE
+            val tw = minOf(TILE, w - tx); val th = minOf(TILE, h - ty)
+            var hash = -3750763034362895579L                   // FNV-1a 64
+            for (row in ty until ty + th) {
+                var i = row * stride + tx
+                val end = i + tw
+                while (i < end) { hash = (hash xor pixels[i].toLong()) * 1099511628211L; i++ }
+            }
+            hs[r * cols + c] = hash
+        }
+    }
+
+    companion object { const val TILE = 64 }
+}
+
 /**
- * Streams the screen to one viewer: MediaProjection -> ImageReader -> changed
- * 64x64 tiles as JPEG (same format as the PC host). Messages that are not about
- * the stream (mouse, keys, clipboard, chat) are passed to [onMessage].
+ * Captures the screen once (MediaProjection -> ImageReader) and streams it to any
+ * number of viewers, each with its own quality, frame rate and tile state.
  */
 class ScreenStreamer(
     private val context: Context,
     private val projection: MediaProjection,
-    private val channel: SecureChannel,
-    private val onMessage: (Int, ByteArray) -> Unit,
     private val onEnd: () -> Unit,
 ) {
     private val running = AtomicBoolean(true)
@@ -39,19 +57,16 @@ class ScreenStreamer(
     private val handler = Handler(ht.looper)
     private var reader: ImageReader? = null
     private var display: VirtualDisplay? = null
-    @Volatile private var quality = 60
-    @Volatile private var fps = 10
+    val viewers = CopyOnWriteArrayList<StreamViewer>()
+    private val lock = Object()
+    @Volatile var latest: CapturedFrame? = null
+        private set
+    private var seq = 0L
     @Volatile private var maxSide = 1280
-    @Volatile private var forceFull = true
-
     private var w = 0
     private var h = 0
-    private var dpi = 0
-    private val hashes = HashMap<Long, Long>()
-    private var pixels = IntArray(0)
-    private var frameBitmap: Bitmap? = null
     private var copyBuf: ByteBuffer? = null
-    private var haveFrame = false
+    private var bitmap: Bitmap? = null
 
     val isRunning get() = running.get()
 
@@ -60,16 +75,37 @@ class ScreenStreamer(
             override fun onStop() = stop()
         }, handler)
         val (cw, ch, d) = captureSize()
-        w = cw; h = ch; dpi = d
+        w = cw; h = ch
         val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = r
-        display = projection.createVirtualDisplay("RemoteDesk", w, h, dpi,
+        display = projection.createVirtualDisplay("RemoteDesk", w, h, d,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler)
-        thread(name = "rd-stream", isDaemon = true) { sendLoop() }
-        thread(name = "rd-session-recv", isDaemon = true) { recvLoop() }
+        thread(name = "rd-capture", isDaemon = true) { captureLoop() }
     }
 
-    /** Capture size: the real screen, scaled so the long side is at most [maxSide]. */
+    fun addViewer(v: StreamViewer) {
+        viewers.add(v)
+        v.start(this)
+    }
+
+    fun removeViewer(v: StreamViewer) { viewers.remove(v) }
+
+    /** Highest resolution any viewer asked for (quality -> long side). */
+    fun qualityChanged() {
+        val q = viewers.maxOfOrNull { it.quality } ?: 60
+        maxSide = when { q >= 80 -> 1920; q >= 50 -> 1280; else -> 960 }
+    }
+
+    /** Viewer threads wait here for a frame newer than [seen]. */
+    fun awaitFrame(seen: Long, timeoutMs: Long): CapturedFrame? {
+        synchronized(lock) {
+            val f = latest
+            if (f != null && f.seq != seen) return f
+            lock.wait(timeoutMs)
+            return latest
+        }
+    }
+
     private fun captureSize(): Triple<Int, Int, Int> {
         val dm = context.getSystemService(DisplayManager::class.java)
         val m = DisplayMetrics()
@@ -81,24 +117,17 @@ class ScreenStreamer(
         return Triple(max(cw, 2), max(ch, 2), m.densityDpi)
     }
 
-    private fun sendInfo() {
-        channel.send(Msg.FRAME_INFO, ("{\"w\": $w, \"h\": $h, \"monitors\": [{\"w\": $w, \"h\": $h}], " +
-                "\"monitor\": 0}").toByteArray())
-    }
-
-    private fun sendLoop() {
+    private fun captureLoop() {
         try {
-            sendInfo()
             while (running.get()) {
                 val t0 = System.currentTimeMillis()
                 checkResize()
                 val img = try { reader?.acquireLatestImage() } catch (_: Exception) { null }
                 if (img != null) {
-                    try { readFrame(img) } finally { img.close() }
-                    sendTiles()
-                } else if (forceFull && haveFrame) {
-                    sendTiles()
+                    val frame = try { readFrame(img) } finally { img.close() }
+                    if (frame != null) synchronized(lock) { latest = frame; lock.notifyAll() }
                 }
+                val fps = viewers.maxOfOrNull { it.fps } ?: 10
                 val wait = 1000L / fps - (System.currentTimeMillis() - t0)
                 if (wait > 0) Thread.sleep(wait)
             }
@@ -107,24 +136,20 @@ class ScreenStreamer(
         stop()
     }
 
-    /** Rotation / quality change: rebuild the reader at the new size. */
     private fun checkResize() {
         val (cw, ch, d) = captureSize()
         if (cw == w && ch == h) return
-        w = cw; h = ch; dpi = d
+        w = cw; h = ch
         val old = reader
         val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = r
-        display?.resize(w, h, dpi)
+        display?.resize(w, h, d)
         display?.surface = r.surface
         old?.close()
-        haveFrame = false
-        hashes.clear()
-        sendInfo()
     }
 
-    private fun readFrame(img: android.media.Image) {
-        if (img.width != w || img.height != h) return
+    private fun readFrame(img: android.media.Image): CapturedFrame? {
+        if (img.width != w || img.height != h) return null
         val plane = img.planes[0]
         val bw = plane.rowStride / plane.pixelStride
         val need = bw * h * 4
@@ -135,53 +160,99 @@ class ScreenStreamer(
         if (src.remaining() > need) src.limit(src.position() + need)
         buf.put(src)
         buf.rewind()
-        val bmp = frameBitmap?.takeIf { it.width == bw && it.height == h }
-            ?: Bitmap.createBitmap(bw, h, Bitmap.Config.ARGB_8888).also { frameBitmap = it }
+        val bmp = bitmap?.takeIf { it.width == bw && it.height == h }
+            ?: Bitmap.createBitmap(bw, h, Bitmap.Config.ARGB_8888).also { bitmap = it }
         bmp.copyPixelsFromBuffer(buf)
-        if (pixels.size != bw * h) pixels = IntArray(bw * h)
+        val pixels = IntArray(bw * h)                    // new array: viewers may still read the old one
         bmp.getPixels(pixels, 0, bw, 0, 0, bw, h)
-        stride = bw
-        haveFrame = true
+        return CapturedFrame(++seq, w, h, bw, pixels)
     }
 
-    private var stride = 0
+    fun stop() {
+        if (!running.getAndSet(false)) return
+        viewers.forEach { it.stop() }
+        synchronized(lock) { lock.notifyAll() }
+        handler.post {
+            try { display?.release() } catch (_: Exception) {}
+            try { reader?.close() } catch (_: Exception) {}
+            try { projection.stop() } catch (_: Exception) {}
+            ht.quitSafely()
+        }
+        onEnd()
+    }
+}
 
-    private fun sendTiles() {
-        if (!haveFrame) return
-        if (forceFull) { hashes.clear(); forceFull = false }
-        var sent = 0
+/** One viewer of the shared screen. [onMessage] gets input / chat / clipboard messages. */
+class StreamViewer(
+    val channel: SecureChannel,
+    val peer: String,
+    val mayControl: Boolean,
+    private val onMessage: (StreamViewer, Int, ByteArray) -> Unit,
+    private val onClosed: (StreamViewer) -> Unit,
+) {
+    @Volatile var name: String = peer
+    @Volatile var control = false
+    @Volatile var quality = 60
+    @Volatile var fps = 10
+    val since = System.currentTimeMillis()
+    private val running = AtomicBoolean(true)
+    @Volatile private var forceFull = true
+    private lateinit var streamer: ScreenStreamer
+
+    fun start(s: ScreenStreamer) {
+        streamer = s
+        thread(name = "rd-view-send", isDaemon = true) { sendLoop() }
+        thread(name = "rd-view-recv", isDaemon = true) { recvLoop() }
+    }
+
+    fun send(type: Int, payload: ByteArray = ByteArray(0)) {
+        try { channel.send(type, payload) } catch (_: Exception) { stop() }
+    }
+
+    private fun sendLoop() {
+        var seen = -1L
+        var infoW = -1
+        var infoH = -1
+        var sent = LongArray(0)
         val out = ByteArrayOutputStream(16 * 1024)
-        var ty = 0
-        while (ty < h) {
-            val th = minOf(TILE, h - ty)
-            var tx = 0
-            while (tx < w) {
-                val tw = minOf(TILE, w - tx)
-                var hash = -3750763034362895579L          // FNV-1a 64
-                for (row in ty until ty + th) {
-                    var i = row * stride + tx
-                    val end = i + tw
-                    while (i < end) {
-                        hash = (hash xor pixels[i].toLong()) * 1099511628211L
-                        i++
-                    }
+        try {
+            while (running.get()) {
+                val f = streamer.awaitFrame(seen, 1000) ?: continue
+                if (f.seq == seen && !forceFull) continue
+                val t0 = System.currentTimeMillis()
+                seen = f.seq
+                if (f.w != infoW || f.h != infoH) {
+                    infoW = f.w; infoH = f.h
+                    channel.send(Msg.FRAME_INFO, ("{\"w\": ${f.w}, \"h\": ${f.h}, \"monitors\": " +
+                            "[{\"w\": ${f.w}, \"h\": ${f.h}}], \"monitor\": 0}").toByteArray())
+                    sent = LongArray(0)
                 }
-                val key = (tx.toLong() shl 32) or ty.toLong()
-                if (hashes[key] != hash) {
-                    hashes[key] = hash
-                    val tile = Bitmap.createBitmap(pixels, ty * stride + tx, stride, tw, th, Bitmap.Config.ARGB_8888)
+                if (forceFull || sent.size != f.hashes.size) {
+                    forceFull = false
+                    sent = LongArray(f.hashes.size) { it.toLong() xor 0x5bd1e995L }   // never equal to a hash
+                }
+                var count = 0
+                for (r in 0 until f.rows) for (c in 0 until f.cols) {
+                    val i = r * f.cols + c
+                    if (sent[i] == f.hashes[i]) continue
+                    sent[i] = f.hashes[i]
+                    val tx = c * CapturedFrame.TILE; val ty = r * CapturedFrame.TILE
+                    val tw = minOf(CapturedFrame.TILE, f.w - tx); val th = minOf(CapturedFrame.TILE, f.h - ty)
+                    val tile = Bitmap.createBitmap(f.pixels, ty * f.stride + tx, f.stride, tw, th, Bitmap.Config.ARGB_8888)
                     out.reset()
                     out.write(byteArrayOf((tx shr 8).toByte(), tx.toByte(), (ty shr 8).toByte(), ty.toByte()))
                     tile.compress(Bitmap.CompressFormat.JPEG, quality, out)
                     tile.recycle()
                     channel.send(Msg.TILE, out.toByteArray())
-                    sent++
+                    count++
                 }
-                tx += TILE
+                if (count > 0) channel.send(Msg.FRAME_END)
+                val wait = 1000L / fps - (System.currentTimeMillis() - t0)
+                if (wait > 0) Thread.sleep(wait)
             }
-            ty += TILE
+        } catch (_: Exception) {
         }
-        if (sent > 0) channel.send(Msg.FRAME_END)
+        stop()
     }
 
     private fun recvLoop() {
@@ -194,12 +265,11 @@ class ScreenStreamer(
                         val o = JSONObject(String(data))
                         quality = o.optInt("quality", quality).coerceIn(10, 95)
                         fps = o.optInt("fps", fps).coerceIn(1, 30)
-                        // phones: fewer pixels on "fast", full HD-ish on "best"
-                        maxSide = when { quality >= 80 -> 1920; quality >= 50 -> 1280; else -> 960 }
                         forceFull = true
+                        streamer.qualityChanged()
                     }
-                    Msg.SET_MONITOR -> forceFull = true
-                    else -> onMessage(type, data)
+                    Msg.SET_MONITOR, Msg.KEYFRAME -> forceFull = true
+                    else -> onMessage(this, type, data)
                 }
             }
         } catch (_: Exception) {
@@ -210,16 +280,7 @@ class ScreenStreamer(
     fun stop() {
         if (!running.getAndSet(false)) return
         thread(isDaemon = true) { channel.close() }
-        handler.post {
-            try { display?.release() } catch (_: Exception) {}
-            try { reader?.close() } catch (_: Exception) {}
-            try { projection.stop() } catch (_: Exception) {}
-            ht.quitSafely()
-        }
-        onEnd()
-    }
-
-    companion object {
-        private const val TILE = 64
+        if (::streamer.isInitialized) streamer.removeViewer(this)
+        onClosed(this)
     }
 }

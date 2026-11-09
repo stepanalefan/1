@@ -18,7 +18,9 @@ import android.os.Looper
 import android.os.PowerManager
 import com.remotedesk.android.Prefs
 import com.remotedesk.android.formatId
+import com.remotedesk.android.protocol.ChatMessage
 import com.remotedesk.android.protocol.DeskHost
+import com.remotedesk.android.protocol.Json
 import com.remotedesk.android.protocol.Msg
 import com.remotedesk.android.protocol.SecureChannel
 
@@ -82,7 +84,7 @@ class HostService : Service(), DeskHost.Listener {
         when (intent?.action) {
             ACTION_STOP -> { stopSharing(); return START_NOT_STICKY }
             ACTION_DECLINE -> decline()
-            ACTION_END_SESSION -> streamer?.stop()
+            ACTION_END_SESSION -> streamer?.stop()          // disconnects every viewer
             ACTION_PROJECTION -> {
                 val code = intent.getIntExtra(EXTRA_CODE, 0)
                 @Suppress("DEPRECATION")
@@ -159,7 +161,7 @@ class HostService : Service(), DeskHost.Listener {
         val peer = sessionPeer
         val title = if (peer != null) "Remote session active" else "Sharing this device"
         val text = when {
-            peer != null -> "$peer can see${if (prefs.allowControl) " and control" else ""} this screen"
+            peer != null -> "Connected: $peer"
             deskId != null -> "Desk ID ${formatId(deskId!!)}"
             else -> statusText
         }
@@ -200,15 +202,16 @@ class HostService : Service(), DeskHost.Listener {
 
     override fun onIncoming(channel: SecureChannel, peer: String) {
         main.post {
-            if (streamer != null || pending != null) {
+            if (pending != null) {                         // one prompt at a time
                 Thread { channel.close() }.start()
                 return@post
             }
             pending = channel
             pendingPeer = peer
+            val joining = streamer != null
             val n = builder(CH_ALERT)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("$peer wants to connect")
+                .setContentTitle("$peer wants to ${if (joining) "join the session" else "connect"}")
                 .setContentText("Tap to allow or decline")
                 .setCategory(Notification.CATEGORY_CALL)
                 .setPriority(Notification.PRIORITY_HIGH)
@@ -223,6 +226,15 @@ class HostService : Service(), DeskHost.Listener {
     }
 
     // ------------------------------------------------------------ session
+    /** Viewers of the running session, in connection order. */
+    val viewers: List<StreamViewer> get() = streamer?.viewers?.toList() ?: emptyList()
+
+    /** Name of the viewer that has control, if any. */
+    val controllerName: String? get() = viewers.firstOrNull { it.control }?.name
+
+    /** Chat of the current session (newest last). */
+    val chat = java.util.Collections.synchronizedList(mutableListOf<ChatMessage>())
+
     fun decline() {
         val ch = pending ?: return
         pending = null
@@ -230,6 +242,26 @@ class HostService : Service(), DeskHost.Listener {
         Thread { ch.close() }.start()
         getSystemService(NotificationManager::class.java).cancel(NOTIF_INCOMING)
         changed()
+    }
+
+    /** Accept the waiting viewer into the running session (no new recording consent needed). */
+    fun acceptPending() {
+        val s = streamer
+        val ch = pending
+        val peer = pendingPeer
+        pending = null
+        pendingPeer = null
+        getSystemService(NotificationManager::class.java).cancel(NOTIF_INCOMING)
+        if (ch == null) return
+        if (s == null || !s.isRunning || ch.closed) { Thread { ch.close() }.start(); changed(); return }
+        addViewer(s, ch, peer ?: "unknown")
+        changed()
+    }
+
+    private fun addViewer(s: ScreenStreamer, ch: SecureChannel, peer: String) {
+        val v = StreamViewer(ch, peer, prefs.allowControl, ::onViewerMessage) { main.post { updateRoles() } }
+        s.addViewer(v)
+        updateRoles()
     }
 
     private fun startSession(code: Int, data: Intent?) {
@@ -243,20 +275,42 @@ class HostService : Service(), DeskHost.Listener {
             changed()
             return
         }
-        sessionPeer = peer
         try {
             goForeground(projection = true)       // must come before getMediaProjection (Android 14)
             val mpm = getSystemService(MediaProjectionManager::class.java)
             val projection = mpm.getMediaProjection(code, data) ?: throw IllegalStateException("no projection")
-            val s = ScreenStreamer(this, projection, ch, ::onSessionMessage) { main.post { sessionEnded() } }
+            val s = ScreenStreamer(this, projection) { main.post { sessionEnded() } }
             streamer = s
+            chat.clear()
             s.start()
+            addViewer(s, ch, peer ?: "unknown")
             acquireWakeLock()
         } catch (e: Exception) {
             Thread { ch.close() }.start()
             sessionEnded()
             statusText = "Could not start screen capture: ${e.message}"
         }
+        changed()
+    }
+
+    /** First viewer allowed to control gets control; the others view. Tells everyone. */
+    private fun updateRoles() {
+        val s = streamer ?: return
+        val list = s.viewers.toList()
+        if (list.isEmpty()) {
+            s.stop()                                  // last viewer left: stop recording the screen
+            return
+        }
+        val controller = list.firstOrNull { it.mayControl && prefs.allowControl }
+        list.forEach { it.control = it === controller }
+        val names = list.joinToString(", ", "[", "]") {
+            "{\"name\": ${Json.quote(it.name)}, \"control\": ${it.control}}"
+        }
+        for (v in list) {
+            v.send(Msg.ROLE, ("{\"control\": ${v.control}, \"controller\": " +
+                    "${controller?.name?.let { Json.quote(it) } ?: "null"}, \"viewers\": $names}").toByteArray())
+        }
+        sessionPeer = list.joinToString(", ") { it.name + if (it.control) " (control)" else "" }
         changed()
     }
 
@@ -268,26 +322,51 @@ class HostService : Service(), DeskHost.Listener {
         changed()
     }
 
-    private fun onSessionMessage(type: Int, data: ByteArray) {
-        val control = prefs.allowControl
+    private fun onViewerMessage(v: StreamViewer, type: Int, data: ByteArray) {
+        if (type in setOf(Msg.MOUSE, Msg.KEY, Msg.CLIPBOARD) && !v.control) return   // view-only viewers
         when (type) {
-            Msg.MOUSE -> if (control) InputService.instance?.mouse(data)
-            Msg.KEY -> if (control) InputService.instance?.key(data)
+            Msg.MOUSE -> InputService.instance?.mouse(data)
+            Msg.KEY -> InputService.instance?.key(data)
+            Msg.HELLO -> {
+                Regex("\"name\"\\s*:\\s*\"([^\"]{1,64})\"").find(String(data))?.groupValues?.get(1)?.let { v.name = it }
+                main.post { updateRoles() }
+            }
+            Msg.AUDIO_CTRL -> if (String(data).contains("true"))
+                v.send(Msg.AUDIO_CTRL, "{\"available\": false, \"error\": \"This phone does not send sound yet\"}".toByteArray())
             Msg.CLIPBOARD -> main.post {
                 getSystemService(ClipboardManager::class.java)
                     .setPrimaryClip(ClipData.newPlainText("RemoteDesk", String(data, Charsets.UTF_8)))
             }
-            Msg.CHAT -> main.post {
-                val n = builder(CH_ALERT)
-                    .setSmallIcon(android.R.drawable.ic_dialog_email)
-                    .setContentTitle("Message from the remote user")
-                    .setContentText(String(data, Charsets.UTF_8))
-                    .setStyle(Notification.BigTextStyle().bigText(String(data, Charsets.UTF_8)))
-                    .setAutoCancel(true)
-                    .build()
-                getSystemService(NotificationManager::class.java).notify(NOTIF_MESSAGE, n)
+            Msg.CHAT -> {
+                val m = ChatMessage.parse(data, v.name)
+                viewers.filter { it !== v }.forEach { it.send(Msg.CHAT, m.toJson()) }   // relay to the others
+                main.post { onChat(m) }
             }
         }
+    }
+
+    private fun onChat(m: ChatMessage) {
+        chat += m
+        val ui = observer
+        if (ui is ShareActivity && ui.chatVisible) { changed(); return }
+        val n = builder(CH_ALERT)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(m.from)
+            .setContentText(m.text)
+            .setStyle(Notification.BigTextStyle().bigText(m.text))
+            .setAutoCancel(true)
+            .setContentIntent(openUi(30))
+            .build()
+        getSystemService(NotificationManager::class.java).notify(NOTIF_MESSAGE, n)
+        changed()
+    }
+
+    /** Message typed on this phone, to every viewer. */
+    fun sendChat(text: String): ChatMessage {
+        val m = ChatMessage(deviceName(), text, System.currentTimeMillis(), mine = true)
+        chat += m
+        viewers.forEach { it.send(Msg.CHAT, m.toJson()) }
+        return m
     }
 
     @Suppress("DEPRECATION")

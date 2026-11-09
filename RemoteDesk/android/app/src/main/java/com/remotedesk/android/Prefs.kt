@@ -50,6 +50,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("allow_control", true)
         set(v) = sp.edit().putBoolean("allow_control", v).apply()
 
+    /** Viewer: H.264 video instead of JPEG tiles, and sound on. */
+    var videoMode: Boolean
+        get() = sp.getBoolean("video_mode", false)
+        set(v) = sp.edit().putBoolean("video_mode", v).apply()
+
+    var sound: Boolean
+        get() = sp.getBoolean("sound", true)
+        set(v) = sp.edit().putBoolean("sound", v).apply()
+
     var showHelp: Boolean
         get() = sp.getBoolean("show_help", true)
         set(v) = sp.edit().putBoolean("show_help", v).apply()

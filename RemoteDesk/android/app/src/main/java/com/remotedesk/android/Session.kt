@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicReference
 object Session {
     @Volatile var channel: SecureChannel? = null
     @Volatile var title: String = ""
+    /** Chat history of the current session (kept while the screen rotates etc.). */
+    val chat = java.util.Collections.synchronizedList(mutableListOf<com.remotedesk.android.protocol.ChatMessage>())
     private val sender = Executors.newSingleThreadExecutor { r -> Thread(r, "rd-send").apply { isDaemon = true } }
 
     fun send(type: Int, payload: ByteArray = ByteArray(0)) {
@@ -39,6 +41,7 @@ object Session {
     fun close() {
         val ch = channel ?: return
         channel = null
+        chat.clear()
         sender.execute { ch.close() }
     }
 }

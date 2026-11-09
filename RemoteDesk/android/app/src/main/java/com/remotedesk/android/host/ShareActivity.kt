@@ -48,8 +48,14 @@ class ShareActivity : Activity(), HostService.Observer {
     private lateinit var status: TextView
     private lateinit var toggle: android.widget.Button
     private lateinit var banner: TextView
+    private lateinit var bannerBox: LinearLayout
     private lateinit var permBox: LinearLayout
     private var acceptDialog: AlertDialog? = null
+    private lateinit var chatPanel: com.remotedesk.android.ChatView
+    private lateinit var chatButton: TextView
+    private var shownChat = 0
+    /** HostService checks this to decide whether a chat message needs a notification. */
+    val chatVisible get() = ::chatPanel.isInitialized && chatPanel.visibility == View.VISIBLE
 
     companion object { private const val REQ_CAPTURE = 1; private const val REQ_NOTIF = 2 }
 
@@ -91,6 +97,12 @@ class ShareActivity : Activity(), HostService.Observer {
             root.setPadding(0, 0, 0, b)
         }
         if (Build.VERSION.SDK_INT < 35) header.setPadding(0, dp(12), dp(12), dp(12))
+        chatPanel = com.remotedesk.android.ChatView(this) { text ->
+            HostService.instance?.let { svc ->
+                if (svc.viewers.isEmpty()) chatPanel.info("Nobody is connected")
+                else chatPanel.add(svc.sendChat(text)).also { shownChat = svc.chat.size }
+            }
+        }.apply { visibility = View.GONE }
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -98,15 +110,24 @@ class ShareActivity : Activity(), HostService.Observer {
         }
         root.addView(ScrollView(this).apply { addView(body) }, lp(MATCH, 0, 1f))
 
-        banner = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+        bannerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             background = rounded(0xFFC0392B.toInt(), dp(10).toFloat())
+            setPadding(dp(14), dp(12), dp(14), dp(10))
             visibility = View.GONE
-            setOnClickListener { endSession() }
         }
-        body.addView(banner, lp(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        banner = TextView(this).apply { setTextColor(Color.WHITE); textSize = 15f }
+        bannerBox.addView(banner)
+        val bRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+        chatButton = text("Chat", 15f, Color.WHITE, bold = true).apply {
+            setPadding(dp(14), dp(8), dp(14), dp(8)); setOnClickListener { toggleChat() }
+        }
+        bRow.addView(chatButton)
+        bRow.addView(text("End session", 15f, Color.WHITE, bold = true).apply {
+            setPadding(dp(14), dp(8), dp(4), dp(8)); setOnClickListener { endSession() }
+        })
+        bannerBox.addView(bRow)
+        body.addView(bannerBox, lp(MATCH, WRAP).apply { bottomMargin = dp(12) })
 
         // this device
         val c = card()
@@ -161,7 +182,21 @@ class ShareActivity : Activity(), HostService.Observer {
                 "start screen recording — choose \"Entire screen\". The phone screen stays on during a " +
                 "session. A locked phone shows only the lock screen.", 13f, MUTED),
             lp(MATCH, WRAP).apply { topMargin = dp(14) })
-        return root
+        val frame = android.widget.FrameLayout(this)
+        frame.addView(root)
+        frame.addView(chatPanel, android.widget.FrameLayout.LayoutParams(MATCH, MATCH).apply { topMargin = dp(64) })
+        return frame
+    }
+
+    private fun toggleChat() {
+        chatPanel.visibility = if (chatVisible) View.GONE else View.VISIBLE
+        if (chatVisible) chatPanel.focusInput()
+        refresh()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (chatVisible) toggleChat() else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
     private fun permRow(ok: Boolean, title: String, detail: String, action: String?, onClick: () -> Unit) {
@@ -209,9 +244,21 @@ class ShareActivity : Activity(), HostService.Observer {
         }
         status.setTextColor(if (sharing && svc?.online == true) 0xFF2EA44F.toInt() else MUTED)
 
-        val peer = svc?.sessionPeer
-        banner.visibility = if (peer != null) View.VISIBLE else View.GONE
-        banner.text = "⚠  $peer is connected to this phone — tap to end the session"
+        val viewers = svc?.viewers.orEmpty()
+        bannerBox.visibility = if (viewers.isNotEmpty()) View.VISIBLE else View.GONE
+        banner.text = "⚠  Connected to this phone: " + viewers.joinToString(", ") {
+            it.name + if (it.control) " (control)" else " (view only)"
+        }
+        // new chat messages
+        val chat = svc?.chat?.toList().orEmpty()
+        if (chat.size < shownChat) shownChat = 0
+        chat.drop(shownChat).forEach { chatPanel.add(it) }
+        val fresh = chat.size - shownChat
+        shownChat = chat.size
+        if (fresh > 0 && !chatVisible) {
+            chatPanel.visibility = View.VISIBLE                // a new message opens the chat
+        }
+        chatButton.text = "Chat"
 
         permBox.removeAllViews()
         val a11y = InputService.isEnabled(this)
@@ -303,14 +350,25 @@ class ShareActivity : Activity(), HostService.Observer {
     }
 
     private fun showAccept(peer: String) {
+        val svc = HostService.instance
+        val joining = svc?.hasSession == true
+        val controller = svc?.controllerName
+        val msg = if (joining)
+            "$peer entered the correct password and wants to join the session." +
+                    (controller?.let { "\n\n$it has control, so $peer can only watch." } ?: "")
+        else "$peer entered the correct password and wants to " +
+                (if (prefs.allowControl) "see and control" else "see") + " this phone.\n\n" +
+                "Next, Android asks to start recording — choose \"Entire screen\"."
         acceptDialog = AlertDialog.Builder(this)
-            .setTitle("Allow remote access?")
-            .setMessage("$peer entered the correct password and wants to " +
-                    (if (prefs.allowControl) "see and control" else "see") + " this phone.\n\n" +
-                    "Next, Android asks to start recording — choose \"Entire screen\".")
+            .setTitle(if (joining) "Allow another viewer?" else "Allow remote access?")
+            .setMessage(msg)
             .setCancelable(false)
             .setPositiveButton("Allow") { _, _ ->
                 acceptDialog = null
+                if (joining) {
+                    HostService.instance?.acceptPending()
+                    return@setPositiveButton
+                }
                 val mpm = getSystemService(MediaProjectionManager::class.java)
                 @Suppress("DEPRECATION")
                 startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE)
@@ -341,7 +399,7 @@ class ShareActivity : Activity(), HostService.Observer {
         refresh()
 
     private fun endSession() {
-        AlertDialog.Builder(this).setTitle("End the remote session?")
+        AlertDialog.Builder(this).setTitle("End the session for everyone?")
             .setPositiveButton("End") { _, _ ->
                 startService(Intent(this, HostService::class.java).setAction(HostService.ACTION_END_SESSION))
             }.setNegativeButton("Cancel", null).show()

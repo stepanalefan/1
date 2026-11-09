@@ -21,6 +21,11 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
+import com.remotedesk.android.protocol.ChatMessage
 import com.remotedesk.android.protocol.Json
 import com.remotedesk.android.protocol.Msg
 import org.json.JSONObject
@@ -39,6 +44,23 @@ class SessionActivity : Activity(), RemoteView.Input {
     private var fullscreen = true
     @Volatile private var ended = false
     private var gotFrame = false
+    private lateinit var video: TextureView
+    private lateinit var chatPanel: ChatView
+    private lateinit var chatButton: TextView
+    private lateinit var soundButton: TextView
+    private lateinit var roleBadge: TextView
+    @Volatile private var decoder: VideoDecoder? = null
+    @Volatile private var player: AudioPlayer? = null
+    @Volatile private var control = true          // until the desk says otherwise
+    @Volatile private var remoteW = 0
+    @Volatile private var remoteH = 0
+    private var unread = 0
+    private var toldNoVideo = false
+    private val myName by lazy {
+        (try { android.provider.Settings.Global.getString(contentResolver,
+            android.provider.Settings.Global.DEVICE_NAME) } catch (_: Exception) { null })
+            ?.takeIf { it.isNotBlank() } ?: "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+    }
 
     /** Sticky modifiers from the key bar: name -> its button. */
     private val sticky = linkedMapOf<String, TextView>()
@@ -52,8 +74,10 @@ class SessionActivity : Activity(), RemoteView.Input {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(buildUi())
         applyFullscreen()
-        val (q, fps) = Prefs.QUALITY[prefs.quality]
-        Session.send(Msg.SET_QUALITY, Json.obj("quality" to q, "fps" to fps))
+        Session.send(Msg.HELLO, Json.obj("name" to myName))
+        sendDisplay()
+        setSound(prefs.sound)
+        Session.chat.forEach { chatPanel.add(it) }
         thread(name = "rd-recv", isDaemon = true) { receiveLoop() }
         if (prefs.showHelp) remote.postDelayed({ if (!isFinishing) showHelp() }, 600)
     }
@@ -62,7 +86,29 @@ class SessionActivity : Activity(), RemoteView.Input {
     private fun buildUi(): View {
         val root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
-        remote = RemoteView(this, this).apply { touchpad = prefs.touchpad }
+        // video mode: hardware-decoded H.264 shown on a TextureView under the input layer
+        video = TextureView(this).apply {
+            isOpaque = false
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                    decoder = VideoDecoder(Surface(st)) { Session.send(Msg.KEYFRAME) }
+                    if (prefs.videoMode && remoteW > 0) decoder?.configure(remoteW, remoteH)
+                }
+                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
+                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                    decoder?.release(); decoder = null; return true
+                }
+                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+                    if (!gotFrame) { gotFrame = true; waiting.visibility = View.GONE }
+                }
+            }
+        }
+        root.addView(video, FrameLayout.LayoutParams(MATCH, MATCH))
+        remote = RemoteView(this, this).apply {
+            touchpad = prefs.touchpad
+            videoMode = prefs.videoMode
+            onTransform = { ox, oy, sc -> applyVideoTransform(ox, oy, sc) }
+        }
         root.addView(remote, FrameLayout.LayoutParams(MATCH, MATCH))
 
         waiting = text("Waiting for the remote screen…", 15f, 0xFFBBBBBB.toInt())
@@ -78,6 +124,10 @@ class SessionActivity : Activity(), RemoteView.Input {
         toolbar.addView(barButton("Keys") { keyBar.visibility = if (keyBar.visibility == View.VISIBLE) View.GONE else View.VISIBLE })
         modeButton = barButton(modeLabel()) { toggleMode() }
         toolbar.addView(modeButton)
+        chatButton = barButton("Chat") { toggleChat() }
+        toolbar.addView(chatButton)
+        soundButton = barButton("") { setSound(!prefs.sound) }
+        toolbar.addView(soundButton)
         toolbar.addView(barButton("More") { v -> showMenu(v) })
         toolbar.addView(barButton("▲") { setToolbarVisible(false) })
         root.addView(toolbar, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
@@ -117,6 +167,17 @@ class SessionActivity : Activity(), RemoteView.Input {
         keys.addView(keyButton("Ctrl+Alt+Del") { ctrlAltDel() })
         keyBar.addView(keys)
         root.addView(keyBar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+
+        roleBadge = text("", 13f, Color.WHITE).apply {
+            background = rounded(0xCCB06A00.toInt(), dp(10).toFloat())
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            visibility = View.GONE
+        }
+        root.addView(roleBadge, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+            .apply { bottomMargin = dp(64) })
+
+        chatPanel = ChatView(this) { sendChat(it) }.apply { visibility = View.GONE; elevation = dp(8).toFloat() }
+        root.addView(chatPanel, FrameLayout.LayoutParams(MATCH, MATCH).apply { topMargin = dp(56) })
         // stay clear of the status / nav bars, notch and keyboard (zero while fullscreen)
         root.onSystemInsets { l, t, r, b -> root.setPadding(l, t, r, b) }
         return root
@@ -188,10 +249,89 @@ class SessionActivity : Activity(), RemoteView.Input {
         if (hasFocus) applyFullscreen()
     }
 
+    // ---------------------------------------------------------- media
+    private fun applyVideoTransform(ox: Float, oy: Float, sc: Float) {
+        if (remoteW == 0 || video.width == 0) return
+        val m = Matrix()
+        // the TextureView stretches the video to its own size; map it onto the zoomed remote screen
+        m.setScale(remoteW * sc / video.width, remoteH * sc / video.height)
+        m.postTranslate(ox, oy)
+        video.setTransform(m)
+    }
+
+    private fun sendDisplay() {
+        val (q, fps) = Prefs.QUALITY[prefs.quality]
+        Session.send(Msg.SET_QUALITY, Json.obj("quality" to q, "fps" to fps + (if (prefs.videoMode) 10 else 0),
+            "mode" to if (prefs.videoMode) "video" else "jpeg"))
+    }
+
+    private fun setSound(on: Boolean) {
+        prefs.sound = on
+        soundButton.text = if (on) "Sound: on" else "Sound: off"
+        Session.send(Msg.AUDIO_CTRL, Json.obj("enabled" to on))
+        if (on && player == null) {
+            player = AudioPlayer { msg -> runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } }
+        } else if (!on) {
+            player?.stop(); player = null
+        }
+    }
+
+    private fun choosePicture() {
+        AlertDialog.Builder(this).setTitle("Picture")
+            .setSingleChoiceItems(arrayOf("JPEG tiles — sharp text, low traffic when idle",
+                "Video stream (H.264) — smooth motion and video"), if (prefs.videoMode) 1 else 0) { d, which ->
+                prefs.videoMode = which == 1
+                remote.videoMode = prefs.videoMode
+                if (prefs.videoMode && remoteW > 0) decoder?.configure(remoteW, remoteH)
+                sendDisplay()
+                d.dismiss()
+            }.show()
+    }
+
+    // ----------------------------------------------------------- chat
+    private fun toggleChat() {
+        val show = chatPanel.visibility != View.VISIBLE
+        chatPanel.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) {
+            unread = 0
+            chatButton.text = "Chat"
+            chatPanel.focusInput()
+        } else {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .hideSoftInputFromWindow(chatPanel.windowToken, 0)
+        }
+    }
+
+    private fun sendChat(text: String) {
+        val m = ChatMessage(myName, text, System.currentTimeMillis(), mine = true)
+        Session.send(Msg.CHAT, m.toJson())
+        Session.chat += m
+        chatPanel.add(m)
+    }
+
+    private fun onChat(m: ChatMessage) {
+        Session.chat += m
+        chatPanel.add(m)
+        if (chatPanel.visibility != View.VISIBLE) {
+            unread++
+            chatButton.text = "Chat ($unread)"
+            Toast.makeText(this, "${m.from}: ${m.text}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun onRole(o: JSONObject) {
+        control = o.optBoolean("control", true)
+        val n = o.optJSONArray("viewers")?.length() ?: 1
+        val who = o.optString("controller").takeIf { it.isNotEmpty() && it != "null" }
+        roleBadge.visibility = if (control) View.GONE else View.VISIBLE
+        roleBadge.text = "View only" + (who?.let { " — $it has control" } ?: "") +
+                (if (n > 1) " · $n connected" else "")
+    }
+
     private fun showMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
         val items = listOf("Fit to screen", "Monitor…", "Quality…", "Send my clipboard",
-            "Send a message…", "Ctrl+Alt+Del", if (fullscreen) "Exit fullscreen" else "Fullscreen",
+            "Picture: JPEG / video…", "Ctrl+Alt+Del", if (fullscreen) "Exit fullscreen" else "Fullscreen",
             "Gesture help", "Disconnect")
         items.forEachIndexed { i, s -> m.menu.add(0, i, i, s) }
         m.setOnMenuItemClickListener {
@@ -200,7 +340,7 @@ class SessionActivity : Activity(), RemoteView.Input {
                 1 -> chooseMonitor()
                 2 -> chooseQuality()
                 3 -> sendClipboard()
-                4 -> sendMessage()
+                4 -> choosePicture()
                 5 -> ctrlAltDel()
                 6 -> { fullscreen = !fullscreen; applyFullscreen() }
                 7 -> showHelp()
@@ -227,8 +367,7 @@ class SessionActivity : Activity(), RemoteView.Input {
         AlertDialog.Builder(this).setTitle("Quality")
             .setSingleChoiceItems(Prefs.QUALITY_NAMES, prefs.quality) { d, which ->
                 prefs.quality = which
-                val (q, fps) = Prefs.QUALITY[which]
-                Session.send(Msg.SET_QUALITY, Json.obj("quality" to q, "fps" to fps))
+                sendDisplay()
                 d.dismiss()
             }.show()
     }
@@ -242,20 +381,6 @@ class SessionActivity : Activity(), RemoteView.Input {
         }
         Session.send(Msg.CLIPBOARD, text.toByteArray(Charsets.UTF_8))
         Toast.makeText(this, "Clipboard sent — paste it on the remote computer", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun sendMessage() {
-        val e = EditText(this).apply {
-            hint = "Message to the remote user"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-        }
-        AlertDialog.Builder(this).setTitle("Send a message")
-            .setView(FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(e) })
-            .setPositiveButton("Send") { _, _ ->
-                val t = e.text.toString()
-                if (t.isNotBlank()) Session.send(Msg.CHAT, t.toByteArray(Charsets.UTF_8))
-            }
-            .setNegativeButton("Cancel", null).show()
     }
 
     private fun showHelp() {
@@ -295,6 +420,8 @@ class SessionActivity : Activity(), RemoteView.Input {
     override fun onDestroy() {
         super.onDestroy()
         ended = true
+        player?.stop(); player = null
+        decoder?.release(); decoder = null
         if (isFinishing) Session.close()
     }
 
@@ -313,8 +440,37 @@ class SessionActivity : Activity(), RemoteView.Input {
                             val m = arr!!.getJSONObject(i)
                             "Monitor ${i + 1}  (${m.optInt("w")}×${m.optInt("h")})"
                         }
-                        remote.setRemoteSize(o.getInt("w"), o.getInt("h"))
-                        runOnUiThread { monitors = list; monitorIndex = o.optInt("monitor") }
+                        remoteW = o.getInt("w"); remoteH = o.getInt("h")
+                        remote.setRemoteSize(remoteW, remoteH)
+                        val isVideo = o.optString("mode") == "video"
+                        if (isVideo) decoder?.configure(remoteW, remoteH)
+                        runOnUiThread {
+                            monitors = list; monitorIndex = o.optInt("monitor")
+                            if (!isVideo && prefs.videoMode && !o.has("mode") && !toldNoVideo) {
+                                toldNoVideo = true      // e.g. a phone desk: JPEG tiles only
+                                Toast.makeText(this, "This desk sends JPEG tiles only", Toast.LENGTH_SHORT).show()
+                            }
+                            remote.videoMode = isVideo
+                            video.visibility = if (isVideo) View.VISIBLE else View.INVISIBLE
+                            remote.invalidate()
+                        }
+                    }
+                    Msg.VIDEO -> decoder?.feed(data)
+                    Msg.AUDIO -> player?.push(data)
+                    Msg.AUDIO_CTRL -> {
+                        val o = JSONObject(String(data, Charsets.UTF_8))
+                        if (!o.optBoolean("available", true)) runOnUiThread {
+                            Toast.makeText(this, o.optString("error", "No sound from the remote computer"),
+                                Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    Msg.ROLE -> {
+                        val o = JSONObject(String(data, Charsets.UTF_8))
+                        runOnUiThread { onRole(o) }
+                    }
+                    Msg.CHAT -> {
+                        val m = ChatMessage.parse(data, Session.title)
+                        runOnUiThread { onChat(m) }
                     }
                     Msg.TILE -> {
                         val x = ((data[0].toInt() and 0xff) shl 8) or (data[1].toInt() and 0xff)
@@ -345,13 +501,30 @@ class SessionActivity : Activity(), RemoteView.Input {
     }
 
     // ------------------------------------------------------------ input
+    private var warnedViewOnly = 0L
+
+    private fun viewOnly(): Boolean {
+        if (control) return false
+        val now = System.currentTimeMillis()
+        if (now - warnedViewOnly > 4000) {
+            warnedViewOnly = now
+            runOnUiThread { Toast.makeText(this, "View only — another user has control", Toast.LENGTH_SHORT).show() }
+        }
+        return true
+    }
+
     override fun mouse(x: Double, y: Double, action: String, button: String?, dx: Int, dy: Int) {
+        if (action != "move" && viewOnly()) return
+        if (!control) return
         val p = Json.obj("x" to x, "y" to y, "action" to action, "btn" to button, "dx" to dx, "dy" to dy)
         if (action == "move") Session.sendMove(p, Msg.MOUSE) else Session.send(Msg.MOUSE, p)
     }
 
-    private fun sendKey(name: String, text: String, down: Boolean) =
+    private fun sendKey(name: String, text: String, down: Boolean) {
+        if (down && viewOnly()) return
+        if (!control) return
         Session.send(Msg.KEY, Json.obj("key" to name, "text" to text, "down" to down))
+    }
 
     override fun typeText(text: String) {
         sendKey("", text, true)
