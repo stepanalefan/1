@@ -14,7 +14,9 @@
 #        set SIGN_AZURE_METADATA=C:\path\to\metadata.json
 #
 #   Optional: SIGN_TIMESTAMP_URL (default http://timestamp.digicert.com, or Microsoft's for Azure)
-param([Parameter(Mandatory = $true)][string[]]$Folders)
+# Folders to sign, e.g.:  sign_windows.ps1 dist\RemoteDesk dist\RemoteDeskServer
+# (with "powershell -File" every folder arrives as its own argument, so collect them all)
+param([Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)][string[]]$Folders)
 
 $ErrorActionPreference = "Stop"
 
