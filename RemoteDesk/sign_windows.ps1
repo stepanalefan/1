@@ -30,13 +30,13 @@ function Find-SignTool {
     throw "signtool.exe not found. Install the Windows SDK (component 'Windows SDK Signing Tools')."
 }
 
-$args = @("sign", "/fd", "SHA256", "/td", "SHA256")
+$signArgs = @("sign", "/fd", "SHA256", "/td", "SHA256")
 if ($env:SIGN_AZURE_DLIB) {
     $ts = if ($env:SIGN_TIMESTAMP_URL) { $env:SIGN_TIMESTAMP_URL } else { "http://timestamp.acs.microsoft.com" }
-    $args += @("/tr", $ts, "/dlib", $env:SIGN_AZURE_DLIB, "/dmdf", $env:SIGN_AZURE_METADATA)
+    $signArgs += @("/tr", $ts, "/dlib", $env:SIGN_AZURE_DLIB, "/dmdf", $env:SIGN_AZURE_METADATA)
 } elseif ($env:SIGN_CERT_SHA1) {
     $ts = if ($env:SIGN_TIMESTAMP_URL) { $env:SIGN_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
-    $args += @("/tr", $ts, "/sha1", $env:SIGN_CERT_SHA1)
+    $signArgs += @("/tr", $ts, "/sha1", $env:SIGN_CERT_SHA1)
 } else {
     Write-Host "No signing certificate configured - skipping signing (see sign_windows.ps1)."
     exit 0
@@ -52,7 +52,7 @@ Write-Host "Signing $($todo.Count) of $(@($files).Count) files with $signtool"
 # signtool accepts many files per call; sign in batches to keep command lines short
 for ($i = 0; $i -lt $todo.Count; $i += 50) {
     $batch = $todo[$i..([Math]::Min($i + 49, $todo.Count - 1))] | ForEach-Object { $_.FullName }
-    & $signtool @args @batch
+    & $signtool @signArgs @batch
     if ($LASTEXITCODE -ne 0) { throw "signtool failed (exit $LASTEXITCODE)" }
 }
 
