@@ -55,6 +55,7 @@ verdict, the findings and the report.
 | PA linearity | compression and ACLR at nominal and +6 dB Atten_EIRP | PA compression vs. digital clipping |
 | LO harmonics | lines at carrier × k/4 | ADMV1013 LO / multiplier leakage |
 | Stability | power, frequency, MER over time with temperature | thermal drift |
+| Data / BER (УР) | decoded КБД: frame sync, RS(255,223)×5 corrections, transport-frame CRC, SCID, frame counter, idle content, channel BER | FPGA coding / framing / buffer faults, data errors with a clean RF signal |
 
 Default plans: *Full test*, *Quick check*, *Modulation only*, *Attenuator*, *Burn-in (stability)*.
 
@@ -119,6 +120,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
+| `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
 | `bos_protocol.py` | BOS CAN protocol: identifiers, command codes and parameters, acknowledgements, CRC-16, КОНФИГ decoding |
 | `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |

@@ -247,6 +247,17 @@ rectangular pulses: occupied bandwidth, ACLR and PAPR compression are not judged
 by the PA-linearity test from the output power (a 6 dB attenuation step must lower the power by 6 dB) and, with
 a wide FSW, from the OQPSK PAPR. The OQPSK chip rate is 262.144 MHz (131.072 Msym/s per rail), RRC roll-off 0.22.
 
+### Does the station decode the data?
+УР (BPSK), yes — document 0202 section 4.2: the BPSK symbols are SP-L (Manchester) decoded, the 32-bit
+synchromarker 0x1ACFFC1D is searched (this also resolves the BPSK 180° ambiguity), each 1275-byte code block is
+Reed-Solomon (255,223) decoded with interleaving 5 (CCSDS 131.0-B-3, dual basis) and the 1115-byte transport frame
+is checked (CRC-16, SCID, virtual channel counter, idle-frame content per table 4.4). The channel BER is counted
+exactly: received code bits vs. the re-encoded corrected block. Results appear in the BPSK test, on the Signal page
+and in the *Data / BER (УР)* test, which collects *BER test: bits* (default 10⁶; proving the TZ's 10⁻⁷ needs about
+3·10⁷ error-free bits). Errors with a clean RF signal (good MER) point at the digital data path (FPGA, buffer,
+interface). Switch it off with *Decode УР data*.
+ШР (OQPSK with spreading, turbo code 1/2, randomizer) is not decoded yet.
+
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
 **cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply

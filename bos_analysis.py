@@ -322,6 +322,12 @@ def analyze_modulated(x, fs, cfg, expected_mod):
         out["compression_db"] = float("nan")
         out["compression_note"] = "n/a: FSW bandwidth cuts the spectral regrowth (see PA-linearity gain compression)"
     out["spectrum"] = spectrum_metrics(x, fs, sr, alpha, r["cfe"])
+    if expected_mod == "BPSK" and cfg.get("decode_ur", True) and "i" in out:
+        try:
+            import bos_decode
+            out["decode"] = bos_decode.decode_ur(out["i"], cfg.get("scid"))
+        except Exception as e:
+            out["decode"] = {"error": f"{type(e).__name__}: {e}"}
     if filt == "NONE":                               # rectangular pulses: no channel bandwidth
         out["spectrum"]["aclr"] = out["spectrum"]["obw_ratio"] = float("nan")
     if bw and bw < sr * (1 + alpha):                 # OBW can be at most the FSW I/Q bandwidth
@@ -835,6 +841,43 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                              f"{cw['pn_band'][1] / 1e3:g} kHz: noisy LO.", {"LMX": 0.6, "REF": 0.25, "CLK": 0.15},
                              ["Check the LMX2594 loop filter and VCO calibration", "Check the 10 MHz reference"], "CW"))
 
+    # ---- УР data path (decoded КБД)
+    for key in ("ber", "mod_BPSK"):
+        d = res.get(key) if key == "ber" else (res.get(key) or {}).get("decode")
+        if not d or "frames" not in d:
+            continue
+        mer_ok = bpsk is not None and _finite(bpsk.get("mer")) and bpsk["mer"] >= lim.get("mer_min", 20)
+        if d["n_frames"] == 0 and mer_ok:
+            F.append(Finding("fail", "УР: no frames found although the BPSK signal is clean",
+                             f"MER {bpsk['mer']:.1f} dB but the synchromarker 0x1ACFFC1D is not in the bit stream "
+                             f"(SP-L violations {100 * d['manchester_violations']:.0f} %): data format, rate or framing "
+                             f"in the FPGA is wrong, or the buffer sends no КБД.",
+                             {"FPGA": 0.8, "OUT": 0.05}, ["Check the УР data rate (symbol rate = 2 × rate)",
+                                                         "Check the SP-L coding and the КБД framing in the FPGA"], "data"))
+        elif d["n_frames"]:
+            if d["rs_fail"] or d["crc_fail"] or (_finite(d["ber"]) and d["ber"] > 1e-7 and mer_ok):
+                F.append(Finding("fail", f"УР data errors with a clean RF signal ({key})",
+                                 f"BER {d['ber']:.2e}, RS corrected {d['rs_corrected']} bytes, uncorrectable "
+                                 f"{d['rs_fail']}, CRC errors {d['crc_fail']}"
+                                 + (f", MER {bpsk['mer']:.1f} dB: the bits are wrong before modulation - digital "
+                                    f"data path (FPGA coding / buffer / interface)." if mer_ok else "."),
+                                 {"FPGA": 0.7, "DAC": 0.1, "PWR": 0.1} if mer_ok else {"FPGA": 0.3},
+                                 ["Check the IPPD / MLVDS data input and the КБД buffer",
+                                  "Check the RS encoder setting (K7/8 mode) in the FPGA"], "data"))
+            if d["idle_bad"]:
+                F.append(Finding("warn", "Idle frame content differs from table 4.4",
+                                 f"{d['idle_bad']} idle frame(s) with unexpected bytes.", {"FPGA": 0.6},
+                                 ["Check the idle frame generator in the FPGA"], "data"))
+            if d["vcfc_gaps"]:
+                F.append(Finding("warn", f"Frame counter jumps ({d['vcfc_gaps']})",
+                                 "The virtual channel frame counter is not continuous: frames lost in the buffer.",
+                                 {"FPGA": 0.6}, ["Check the КБД buffer (≥ 37 КБД) and the IPPD interface"], "data"))
+            if not d["scid_ok"]:
+                F.append(Finding("warn", f"Spacecraft ID {d['scid']} (expected {cfg.get('scid', 0)})",
+                                 "SCID in the transport frames differs from the setting.", {"FPGA": 0.3},
+                                 ["Check the SCID stored in the BOS non-volatile memory"], "data"))
+        break
+
     # ---- BPSK vs OQPSK: which rail is bad
     if bpsk and oq and _finite(bpsk.get("mer")) and _finite(oq.get("mer")):
         pn_oq = _finite(oq.get("phase_err_res_deg")) and oq["phase_err_res_deg"] > lim.get("phase_err_max", 3)
@@ -957,6 +1000,8 @@ FAULTS = [  # key, label, default magnitude, unit
     ("rail", "1.8 V rail low", 1.70, "V"),
     ("hot", "Over-temperature", 85.0, "°C"),
     ("q_dead", "Q rail dead (DAC ch B)", 1, ""),
+    ("data_err", "Data path bit errors (FPGA / buffer)", 1e-3, "BER"),
+    ("no_rs", "Reed-Solomon check symbols missing", 1, ""),
 ]
 
 
@@ -1072,6 +1117,10 @@ class BosSimulator:
                 s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
                                        clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)
                 s = resample(s4, 4 * sr, fs)[0][:n]
+            elif mod == "BPSK" and sps >= 2:
+                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
+                                      clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng,
+                                      symbols=self.ur_symbols(n // sps + 61))[:n]
             else:
                 s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
                                       clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
@@ -1117,6 +1166,27 @@ class BosSimulator:
             return -120.0
         base = -55.0 if "leak" not in self.faults else -35.0
         return p + base + self.rng.normal(0, 0.5)
+
+    def ur_symbols(self, nsym):
+        """УР data: idle КБД (document 0202 table 4.4), SP-L coded; faults corrupt the data path."""
+        import bos_decode as bd
+        nfr = nsym // (2 * bd.CBD_UR * 8) + 2
+        start = int(self.rng.integers(0, 2 * bd.CBD_UR * 8))
+        self._vcfc = getattr(self, "_vcfc", 0)
+        stream = []
+        for k in range(nfr):
+            stream.append(bd.cbd_ur(bd.idle_frame(self.cfg.get("scid", 0), (self._vcfc + k) & 0xFF)))
+        self._vcfc = (self._vcfc + nfr) & 0xFF
+        bits = bd.bytes_to_bits(b"".join(stream))
+        if "data_err" in self.faults:                       # digital data path corrupts bits
+            flip = self.rng.random(len(bits)) < self.faults["data_err"]
+            bits = bits ^ flip.astype(np.uint8)
+        if "no_rs" in self.faults:                          # check symbols not generated (zeros)
+            b = bits.reshape(-1, bd.CBD_UR * 8).copy()
+            b[:, (4 + bd.TF_LEN) * 8:] = 0
+            bits = b.ravel()
+        sym = bd.manchester_encode(bits)
+        return np.roll(sym, -start)[:nsym]
 
     def telemetry(self):
         f = self.faults

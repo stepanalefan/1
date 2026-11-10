@@ -242,11 +242,15 @@ def spectrum(x, fs: float, nfft: int = 1024):
 
 
 def simulate(mod="QPSK", symbol_rate=16e3, sps=8, nsym=2000, snr_db=25.0, cfo=300.0, filt="RRC",
-             alpha=0.35, clock_ppm=0.0, delay=0.37, phase=0.6, power_dbm=-30.0, iq_offset=0.0, rng=None):
-    """Synthetic capture (volts) for tests and demo mode."""
+             alpha=0.35, clock_ppm=0.0, delay=0.37, phase=0.6, power_dbm=-30.0, iq_offset=0.0, rng=None,
+             symbols=None):
+    """Synthetic capture (volts) for tests and demo mode. symbols: given symbol values (e.g. coded data)."""
     rng = rng or np.random.default_rng()
     pts = ideal_points(mod)
     sym = pts[rng.integers(len(pts), size=nsym + 60)]
+    if symbols is not None:
+        s0 = np.asarray(symbols, complex)[:nsym + 60]
+        sym[20:20 + len(s0) - 20] = s0[:len(s0) - 20] if len(s0) > 20 else sym[20:20]
     up = np.zeros((nsym + 60) * sps, complex)
     if mod == "OQPSK":
         up[::sps] = sym.real

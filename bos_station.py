@@ -83,6 +83,11 @@ CFG_FIELDS = [
      "The OQPSK signal occupies ~177 MHz; below that its edges are cut (OBW / PAPR then judged against this "
      "bandwidth; PA compression is harder to see)"),
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
+    ("decode_ur", "Decode УР data (BPSK)", "b", True, "", "Frame sync 0x1ACFFC1D, RS(255,223)×5, transport frame "
+     "CRC, idle-frame content, channel BER. The BPSK capture is lengthened to ≥ 3 КБД (64 000 symbols)"),
+    ("scid", "Spacecraft ID (SCID)", "i", 0, "", "Expected spacecraft identifier in the transport frames (default 0)"),
+    ("ber_bits", "BER test: bits", "i", 1000000, "", "Code bits to collect in the BER test (TZ BER ≤ 1·10⁻⁷ needs "
+     "≥ 3·10⁷ error-free bits for a 95 % statement)"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
     ("power_nom", "Nominal output power", "f", -5.5, "dBm", "TZ: maximum output power −9…−2 dBm at the HF output "
      "(set −5.5 ± 3.5). At the technological connector: −30…−10 dBm (set −20 ± 10)"),
@@ -146,10 +151,11 @@ TESTS = [  # id, name, description
     ("lin", "PA linearity", "Compression and ACLR at nominal and higher attenuation"),
     ("harm", "LO harmonics", "Lines at carrier × k/4 (LO and multiplier products)"),
     ("drift", "Stability / drift", "Power, frequency and MER over time vs. temperature"),
+    ("ber", "Data / BER (УР)", "Decoded КБД collected until the bit count is reached: BER, RS corrections, CRC"),
 ]
 TEST_NAME = {t: n for t, n, _ in TESTS}
 DEFAULT_PLANS = {
-    "Full test": ["pre", "supply", "cw", "bpsk", "oqpsk", "att", "lin", "harm"],
+    "Full test": ["pre", "supply", "cw", "bpsk", "oqpsk", "att", "lin", "harm", "ber"],
     "Quick check": ["pre", "cw", "oqpsk"],
     "Modulation only": ["bpsk", "oqpsk"],
     "Attenuator": ["att"],
@@ -716,7 +722,7 @@ class BosStation(QtWidgets.QWidget):
             c = QtWidgets.QCheckBox(label)
             s = QtWidgets.QDoubleSpinBox()
             s.setRange(-1e6, 1e6)
-            s.setDecimals(2)
+            s.setDecimals(5 if unit == "BER" else 2)
             s.setValue(default)
             s.setSuffix(f" {unit}" if unit else "")
             s.setVisible(bool(unit))
@@ -1588,7 +1594,8 @@ class BosStation(QtWidgets.QWidget):
         """Settings for one modulation: its symbol rate and samples per symbol."""
         if mod == "BPSK":
             sr = self.cfg["sr_bpsk"]
-            return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"],
+            nsym = max(self.cfg["nsym"], 64000) if self.cfg.get("decode_ur", True) else self.cfg["nsym"]
+            return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"], nsym=nsym,
                         filter="NONE" if self.cfg.get("bpsk_rect", True) else "RRC")
         sr = self.cfg["sr_oqpsk"]
         return dict(self.cfg, symbol_rate=sr, fs=min(self.cfg["fs_oqpsk"], sr * 8),
@@ -1744,6 +1751,62 @@ class BosStation(QtWidgets.QWidget):
 
     def _t_bpsk(self):
         yield from self._mod_test("BPSK")
+        r = self.res.get("mod_BPSK") or {}
+        if r.get("decode"):
+            self._decode_rows(TEST_NAME["bpsk"], r["decode"])
+
+    def _decode_rows(self, T, d):
+        if "error" in d:
+            self._row(T, "Data decoding", None, "", "", "ERROR", note=d["error"])
+            return
+        self._row(T, "Frames (КБД) decoded", d["n_frames"], "", "≥ 1", "PASS" if d["n_frames"] else "FAIL",
+                  spec="{:.0f}", note="" if d["n_frames"] else "synchromarker 0x1ACFFC1D not found")
+        if not d["n_frames"]:
+            self._row(T, "SP-L (Manchester) violations", 100 * d["manchester_violations"], "%", "", "INFO")
+            return
+        self._row(T, "RS uncorrectable frames", d["rs_fail"], "", "0", "PASS" if not d["rs_fail"] else "FAIL", spec="{:.0f}")
+        self._row(T, "RS corrected bytes", d["rs_corrected"], "", "", "INFO", spec="{:.0f}")
+        self._row(T, "Transport frame CRC errors", d["crc_fail"], "", "0", "PASS" if not d["crc_fail"] else "FAIL", spec="{:.0f}")
+        if d["raw_bits"]:
+            ok = d["ber"] <= 1e-7 or (d["ber"] == 0)
+            self._row(T, "Channel BER (raw code bits)", d["ber"], "", "≤ 1e-7", "PASS" if ok else "FAIL", spec="{:.2e}",
+                      note=f"{d['raw_bits']} bits" + (f", < {d['ber_upper']:.1e} (95 %)" if d["ber"] == 0 else ""))
+        idle = [f for f in d["frames"] if f.get("idle")]
+        if idle:
+            self._row(T, "Idle frame content", None, "", "as table 4.4", "PASS" if not d["idle_bad"] else "FAIL",
+                      text=f"{len(idle) - d['idle_bad']}/{len(idle)} ok")
+        if d["scid"] is not None:
+            self._row(T, "Spacecraft ID", d["scid"], "", f"{self.cfg.get('scid', 0)}", "PASS" if d["scid_ok"] else "FAIL",
+                      spec="{:.0f}")
+        self._row(T, "Frame counter gaps", d["vcfc_gaps"], "", "0", "PASS" if not d["vcfc_gaps"] else "FAIL", spec="{:.0f}")
+
+    def _t_ber(self):
+        T = TEST_NAME["ber"]
+        if not self.cfg.get("decode_ur", True):
+            raise _Skip("УР decoding is switched off (Unit / signal page)")
+        yield from self._set_mode("bpsk")
+        tot = {"n_frames": 0, "rs_fail": 0, "rs_corrected": 0, "crc_fail": 0, "idle_bad": 0, "vcfc_gaps": 0,
+               "raw_bits": 0, "err": 0, "frames": [], "manchester_violations": 0.0, "scid": None, "scid_ok": True}
+        k = 0
+        target = int(self.cfg.get("ber_bits", 1e6))
+        while tot["raw_bits"] < target and k < 2000 and not self.abort_flag:
+            k += 1
+            r = yield from self._mod_capture("BPSK", f"BER {tot['raw_bits']:,}/{target:,} bits")
+            d = r.get("decode") or {}
+            if "frames" not in d:
+                continue
+            for key in ("n_frames", "rs_fail", "rs_corrected", "crc_fail", "idle_bad", "vcfc_gaps", "raw_bits"):
+                tot[key] += d[key]
+            tot["err"] += sum(f.get("raw_bit_err", 0) for f in d["frames"])
+            tot["frames"] += d["frames"]
+            tot["scid"] = d["scid"] if d["scid"] is not None else tot["scid"]
+            tot["scid_ok"] &= d["scid_ok"]
+            if k >= 3 and tot["n_frames"] == 0:
+                break
+        tot["ber"] = tot["err"] / tot["raw_bits"] if tot["raw_bits"] else float("nan")
+        tot["ber_upper"] = 3.0 / tot["raw_bits"] if tot["raw_bits"] and not tot["err"] else float("nan")
+        self.res["ber"] = tot
+        self._decode_rows(T, tot)
 
     def _t_oqpsk(self):
         yield from self._mod_test("OQPSK")
@@ -1971,6 +2034,15 @@ class BosStation(QtWidgets.QWidget):
                       f"{'Asymmetry, dB':<26} {fmt(s['asym_db'], '{:+.2f}')}"]
             for f0, lv in s.get("spurs", [])[:4]:
                 lines.append(f"{'Spur':<26} {f0 / 1e6:+.3f} MHz  {lv:.1f} dBc")
+        d = r.get("decode")
+        if d and "frames" in d:
+            lines += ["", f"УР data: {d['n_frames']} КБД, RS corrected {d['rs_corrected']} bytes, "
+                          f"uncorrectable {d['rs_fail']}, CRC errors {d['crc_fail']}, BER {fmt(d['ber'], '{:.2e}')}"
+                          + (" (polarity inverted)" if d.get("inverted") else "")]
+            for f in d["frames"][:6]:
+                lines.append(f"  SCID {f['scid']} VC {f['vcid']} cnt {f['vcfc']:3d} {'idle' if f['idle'] else 'data'}"
+                             f"  RS {f['rs']}  CRC {'ok' if f['crc_ok'] else 'BAD'}"
+                             + ("" if f.get("idle_content_ok", True) else "  content BAD"))
         self.sig_info.setPlainText("\n".join(lines))
 
     def _draw_att(self, fit):
