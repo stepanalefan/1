@@ -25,14 +25,10 @@ Features
   channel power. Switching tabs switches the FSW channel (only the selected one
   measures).
 
-* Tabs: Main (dashboard.py: device status, test sequences driving HMP / SMW / CAN /
-  FSW / scan, constellation + MER/Power/CFE, voltages, telemetry watch list),
-  Spectrum Analyzer (VSA + Spectrum), SMW200A (smw_generator.py), TFG6806 (tfg_generator.py),
-  N5183B (mxg_generator.py),
-  Bench, CAN, Telemetry.
-* Bench tab (bench_monitor.py, keep it in the same folder): 176-channel voltage
-  scanner (Arduino + CD74HC4067 multiplexers + Agilent 34405A) with plot, table and
-  daily CSV log, plus HMP4040 control (USB / LAN) with timed power cycling.
+* Tabs: BOS Test Station (bos_station.py: automated test + fault diagnosis of the BOS
+  modulator from the FSW signal and the BOS CAN telemetry), Main (dashboard.py: device
+  status, test sequences, constellation, telemetry watch list), Spectrum Analyzer
+  (VSA + Spectrum + I/Q), TFG6806, HMP4040, N6701C, CAN, Telemetry, Logs, Help.
 
 Install
 -------
@@ -207,7 +203,7 @@ try:
 except ImportError:  # pragma: no cover - demo mode still works
     pyvisa = None
 
-try:  # Bench tab (176-channel voltage monitor + HMP4040), file next to this script
+try:  # HMP4040 tab + shared VISA helpers, file next to this script
     import bench_monitor
     _BENCH_ERR = None
 except Exception as _e:  # pragma: no cover
@@ -219,20 +215,10 @@ try:  # software demodulator for the I/Q Analyzer (constellation without FSW-K70
 except Exception:  # pragma: no cover
     iq_demod = None
 
-try:  # SMW200A generator tab
-    import smw_generator
-except Exception:  # pragma: no cover
-    smw_generator = None
-
 try:  # Suin TFG6806 function generator tab
     import tfg_generator
 except Exception:  # pragma: no cover
     tfg_generator = None
-
-try:  # Keysight N5183B MXG signal generator tab
-    import mxg_generator
-except Exception:  # pragma: no cover
-    mxg_generator = None
 
 try:  # Keysight N6701C power system tab
     import n6700_supply
@@ -251,15 +237,12 @@ try:  # Main (dashboard) tab
 except Exception:  # pragma: no cover
     dashboard = None
 
-try:  # 1-Wire temperature tab (sensors on the bench Arduino, pin A3)
-    import onewire_temp
-except Exception:  # pragma: no cover
-    onewire_temp = None
-
-try:  # switch outputs on the slave Arduino + BOS watchdog (panel on the Main tab)
-    import slave_switch
-except Exception:  # pragma: no cover
-    slave_switch = None
+try:  # BOS Test Station tab (automated test + fault diagnosis)
+    import bos_station
+    _BOS_ERR = None
+except Exception as _e:  # pragma: no cover
+    bos_station = None
+    _BOS_ERR = f"{type(_e).__name__}: {_e}"
 
 try:  # Logs tab (all CSV logs on one plot)
     import log_viewer
@@ -1541,8 +1524,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.bench:
             self.bench.log.connect(self.logmsg)
         else:
-            self.logmsg(f"Bench tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
+            self.logmsg(f"HMP4040 tab disabled - bench_monitor.py could not be loaded ({_BENCH_ERR}). "
                         f"Put it in the same folder as this script.", "warn")
+        if bos_station is None:
+            self.logmsg(f"BOS Test Station disabled - bos_station.py could not be loaded ({_BOS_ERR})", "warn")
         if not self.can_win:
             self.logmsg(f"CAN tab disabled - canable_analyzer.py / can_commands.py could not be "
                         f"loaded ({_CAN_ERR}). Put them in the same folder as this script.", "warn")
@@ -1555,15 +1540,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bench.demo_chk.setChecked(True)
             if self.n67:
                 self.n67.demo_chk.setChecked(True)
-            if self.smw:
-                self.smw.proto.setCurrentIndex(3)
-                QtCore.QTimer.singleShot(400, self.smw.on_connect)
             if self.tfg:
                 self.tfg.demo.setChecked(True)
                 QtCore.QTimer.singleShot(500, self.tfg.on_connect)
-            if self.mxg:
-                self.mxg.demo.setChecked(True)
-                QtCore.QTimer.singleShot(600, self.mxg.on_connect)
+            if self.bos:
+                self.bos.demo_setup()
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
 
@@ -1906,44 +1887,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if iq_demod is None:
             self.fsw_tabs.setTabEnabled(2, False)
         self.fsw_tabs.currentChanged.connect(self.on_fsw_tab)
-        self.smw = smw_generator.SmwTab(vsa_settings=lambda: self.last_read) if smw_generator else None
-        if self.smw:
-            self.smw.log.connect(self.logmsg)
         self.tfg = tfg_generator.TfgTab() if tfg_generator else None
         if self.tfg:
             self.tfg.log.connect(self.logmsg)
-        self.mxg = mxg_generator.MxgTab() if mxg_generator else None
-        if self.mxg:
-            self.mxg.log.connect(self.logmsg)
-        self.switch = None
-        if slave_switch and self.bench:
-            self.switch = slave_switch.SwitchController(self.bench, self.logmsg, self)
-            if self.can_win:
-                self.can_win.frame_listeners.append(self.switch.on_frames)
+        self.bos = bos_station.BosStation(self) if bos_station else None
+        if self.bos and self.can_win:
+            self.can_win.frame_listeners.append(self.bos.on_frames)
         self.dash = dashboard.Dashboard(self) if dashboard else None
+        if self.bos:
+            self.tabs.addTab(self.bos, "BOS Test Station")
         if self.dash:
             self.tabs.addTab(page(self.dash), "Main")
         rc.addWidget(self.fsw_tabs, 1)
         self.tabs.addTab(split, "Spectrum Analyzer")
-        if self.smw:
-            self.tabs.addTab(page(self.smw), "SMW200A")
         if self.tfg:
             self.tabs.addTab(self.tfg, "TFG6806")
-        if self.mxg:
-            self.tabs.addTab(self.mxg, "N5183B")
         if self.bench:
-            for panel, pg_, title in ((self.bench.hmp_settings_panel, self.bench.hmp_page, "HMP4040"),
-                                      (self.bench.volt_settings_panel, self.bench.volt_page, "Voltage Control")):
-                b_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-                bscroll = QtWidgets.QScrollArea()
-                bscroll.setWidget(panel)
-                bscroll.setWidgetResizable(True)
-                bscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-                bscroll.setMinimumWidth(380)
-                b_split.addWidget(bscroll)
-                b_split.addWidget(page(pg_))
-                b_split.setSizes([390, 1170])
-                self.tabs.addTab(b_split, title)
+            b_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            bscroll = QtWidgets.QScrollArea()
+            bscroll.setWidget(self.bench.hmp_settings_panel)
+            bscroll.setWidgetResizable(True)
+            bscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            bscroll.setMinimumWidth(380)
+            b_split.addWidget(bscroll)
+            b_split.addWidget(page(self.bench.hmp_page))
+            b_split.setSizes([390, 1170])
+            self.tabs.addTab(b_split, "HMP4040")
         if self.n67:
             n_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
             nscroll = QtWidgets.QScrollArea()
@@ -1955,11 +1924,6 @@ class MainWindow(QtWidgets.QMainWindow):
             n_split.addWidget(page(self.n67.page))
             n_split.setSizes([340, 1220])
             self.tabs.addTab(n_split, "N6701C")
-        self.temps = None
-        if onewire_temp and self.bench:
-            self.temps = onewire_temp.TempTab(self.bench)
-            self.bench.folder_listeners.append(self.temps.folder_changed)
-            self.tabs.addTab(page(self.temps), "1-Wire Temp")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN")
         if self.telem:
@@ -2426,8 +2390,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_iq(self, r: dict):
         if self.dash and r["i"].size:
             self.dash.update_vsa(r)
-        if self.switch:
-            self.switch.on_vsa(r)                 # BOS watchdog: I/Q results count like VSA results
+        if self.bos:
+            self.bos.on_live(r)
         self.iq_err.setText(("Demodulation failed: " + r["error"]) if r.get("error") else "")
         if r.get("spec_f") is not None:
             self.iq_spec_curve.setData(r["spec_f"], r["spec_p"])
@@ -2875,8 +2839,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_vsa(self, r: dict):
         if self.dash:
             self.dash.update_vsa(r)
-        if self.switch:
-            self.switch.on_vsa(r)
+        if self.bos:
+            self.bos.on_live(r)
         now = r["t"]
         if self.t_start is None:
             self.t_start = now
@@ -2928,12 +2892,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trend_curve.setData([], [])
 
     def closeEvent(self, ev):
+        if self.bos:
+            self.bos.shutdown()
         if self.dash:
             self.dash.shutdown()
-        if self.temps:
-            self.temps.shutdown()
-        if self.switch:
-            self.switch.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()
@@ -2943,12 +2905,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.n67.shutdown()
         if self.can_win:
             self.can_win.close()            # stops worker, script, recording
-        if self.smw:
-            self.smw.shutdown()
         if self.tfg:
             self.tfg.shutdown()
-        if self.mxg:
-            self.mxg.shutdown()
         self.worker.running = False
         self.worker.quit = True
         self.worker_thread.quit()

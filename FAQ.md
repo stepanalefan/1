@@ -1,10 +1,9 @@
 # KTR RAD TEST — FAQ
 
-Bench program for controlling and monitoring the test setup: R&S FSW spectrum analyzer,
-R&S SMW200A, Keysight N5183B and Suin TFG6806 generators, R&S HMP4040 power supply,
-176-channel voltage scanner (Arduino + multiplexers + Agilent 34405A), 1-Wire temperature
-sensors and a switch on a second ("slave") Arduino, three CAN lines (CANable + IXXAT) with
-telemetry decoding, test sequences and CSV logging.
+Automated test station for the **BOS** modulator unit (BPSK / OQPSK; MPF300T FPGA, DAC38J82, LMX2594,
+ADMV1013, ADRF5730, CHA3397): R&S FSW signal analyzer, BOS CAN control and telemetry, automatic
+fault diagnosis with reports, plus R&S HMP4040 / Keysight N6701C power supplies, Suin TFG6806
+generator, three CAN lines (CANable + IXXAT), test sequences and CSV logging.
 
 ---
 
@@ -20,11 +19,10 @@ CANable with *candleLight* firmware).
 ### What else must be installed on the PC?
 | For | Install |
 |---|---|
-| Instruments over **USB** (34405A, TFG6806 / N5183B via USB) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
+| Instruments over **USB** (TFG6806, N6701C via USB) | **Keysight IO Libraries Suite** (or NI-VISA). Restart Windows afterwards. |
 | IXXAT CAN adapter | **IXXAT VCI 4** driver |
-| Uploading the Arduino sketches | Arduino IDE + library **OneWire** (Paul Stoffregen) |
 
-Instruments on **LAN** (FSW, SMW200A, N5183B, TFG6806, HMP4040) need no driver.
+Instruments on **LAN** (FSW, TFG6806, HMP4040, N6701C) need no driver.
 
 ### How do I start the program?
 Run **`fsw_vsa_monitor.py`** (in PyCharm: right-click → Run). All other `.py` files must be in
@@ -39,13 +37,13 @@ python fsw_vsa_monitor.py --ip 192.168.0.10 --protocol socket
 ```
 
 ### Can I try the program without instruments?
-Yes: `--demo`. FSW, generators, scanner, HMP4040, 1-Wire sensors, switch and three CAN lines
-(BOS / AFAR / UPNG) are simulated. Demo mode never overwrites your saved CAN line settings.
+Yes: `--demo`. FSW, TFG6806, HMP4040, N6701C, three CAN lines (BOS / AFAR / UPNG) and a complete
+BOS unit with injectable faults (BOS Test Station → *Simulator*) are simulated. Demo mode never overwrites your saved CAN line settings.
 
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name KTR_RAD_TEST --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import smw_generator --hidden-import dashboard --hidden-import log_viewer --hidden-import onewire_temp --hidden-import slave_switch --hidden-import tfg_generator --hidden-import mxg_generator --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name KTR_RAD_TEST --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod --hidden-import bos_station --hidden-import bos_analysis --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
 Result: `dist\KTR_RAD_TEST.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
@@ -61,21 +59,18 @@ folder instead.
 
 ## 2. Files the program creates
 
-All next to the program / EXE (logs: in the log folder chosen on the Voltage Control tab, default the same).
+All next to the program / EXE (logs: in the log folder chosen on the HMP4040 tab, default the same).
 
 | File | Contents |
 |---|---|
-| `channels.txt` | Names of the 176 voltage channels (`17=VCC_CORE`). Name a channel `GND` to skip it in scans. |
-| `onewire_names.txt` | Names of the 1-Wire sensors (`28FF4A1B931603D8=Cold plate`) |
+| `bos_station.json` | BOS Test Station: signal / chain settings, limits, unit control, test plans |
+| `bos_reports\BOS_<serial>_<date>.html` | Test report per run (verdict, findings, measurements, plots, corrections) |
+| `bos_reports\bos_history.csv` | One row per run of every unit (History sub-tab) |
 | `dashboard.json` | Test sequences, telemetry watch list, Main-tab settings |
-| `switch.json` | Switch output names, watchdog settings |
 | `can_commands.json` | CAN command library and CAN scripts |
 | `can_lines.json` | CAN line setup (adapter, channel, bitrate per line) |
-| `voltage_log_YYYY-MM-DD.csv` | Voltage scan: Time, Channel, Voltage |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
-| `temperature_log_YYYY-MM-DD.csv` | 1-Wire: ROM, name, temperature, CRC checks, status, bus |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
-| `switch_log_YYYY-MM-DD.csv` | Every switch action and its reason (manual / sequence / watchdog) |
 | `can_log_*.log` | CAN recording (candump format, line name as interface) |
 
 Every log starts a new file each day. All CSV logs can be plotted together on the **Logs** tab
@@ -104,23 +99,16 @@ Yes. On connect the program checks the options (`*OPT?`). Without K70 the **VSA 
 **I/Q (software demod)** is selected: the FSW's standard I/Q Analyzer records raw I/Q, and the program
 demodulates it (BPSK, QPSK, OQPSK, 8PSK, 16QAM; RRC filter, frequency / phase / timing recovery). Set center,
 level, modulation, symbol rate, filter / roll-off, samples per symbol and capture length on the left.
-Results (MER, EVM, power, carrier frequency error, symbol-rate error, I/Q offset) feed the Main tab, the BOS
-watchdog, the log and *FSW single* / *FSW set* steps. MER / EVM are not calibrated like K70's, and the signal
+Results (MER, EVM, power, carrier frequency error, symbol-rate error, I/Q offset) feed the Main tab, the log and *FSW single* / *FSW set* steps. MER / EVM are not calibrated like K70's, and the signal
 should be continuous (no burst search). Try it without hardware: `python fsw_vsa_monitor.py --demo-no-k70`.
 
-## 4. Generators (SMW200A, N5183B, TFG6806)
+## 4. Generator (TFG6806)
 
 ### General behaviour
 * **Apply** sends only the values that differ from the instrument; output/RF switches are sent last.
 * After every change the instrument's error queue is read; an error appears in the log next to
   the setting that caused it (e.g. `Frequency: -222,"Data out of range"`).
 * Each tab has a SCPI console for anything without a field.
-
-### N5183B: how do I connect?
-LAN (HiSLIP / VXI-11 / socket 5025) with the IP address, or *USB / GPIB / VISA address* → ⟳ lists
-instruments (★ = Keysight). After connecting, the status shows the frequency/power range and
-installed options. Sections greyed out = option not installed (AM/FM/ΦM need **UNT**, pulse needs
-**UNU/UNW**).
 
 ### TFG6806: how do I connect?
 * **LAN:** IP from the generator's Utility → LAN menu, port **5025**.
@@ -139,20 +127,7 @@ Select *Built-in / arb #* and enter the waveform number (the manual does not lis
 
 ---
 
-## 5. Voltage Control (scanner, multimeter) and HMP4040
-
-### Do the Arduino and the multimeter have to be connected together?
-No — each has its own Connect button. 1-Wire and the switch need only the Arduino; the voltage
-scan needs both.
-
-### Auto-detect does not find the 34405A.
-1. Install **Keysight IO Libraries Suite**, restart Windows, re-plug USB.
-2. Device Manager must show the 34405A under **"USB Test and Measurement Devices"**
-   (not "Other devices" — then the driver is missing; an IVI/MATLAB driver package is *not* the
-   USB driver).
-3. Check the log line after Auto-detect:
-   `VISA: Visa Library at C:\WINDOWS\system32\visa32.dll` → correct.
-   `VISA: pyvisa-py …` → the installed VISA could not be loaded; the line says why.
+## 5. Power supplies (HMP4040, N6701C) and VISA
 
 ### Error "PyUSB does not seem to be properly installed … No backend available".
 The program used pyvisa's pure-Python fallback instead of the installed VISA. Make sure the
@@ -178,29 +153,6 @@ If the program is closed while cycling runs, it asks first and then switches the
 ### "CC" on the Main tab
 The channel is in current limit (current at the set limit and voltage below the set value).
 
-### How are the −5…0 V and 16 V channels converted?
-* Channels **144–159**: an op-amp inverter (−3 V in → +3 V at the multiplexer); the program flips
-  the sign.
-* Channels **160–175**: divider 100 kΩ (to the source) / 33 kΩ (to GND); the program multiplies by
-  (100 + 33) / 33 = 4.03. The values are `R_TOP` / `R_BOTTOM` at the top of `bench_monitor.py`.
-
-### How do I skip unused channels?
-Name them `GND` in `channels.txt` (or double-click the name in the table). They are greyed out and
-left out of range scans; manual mode can still read them.
-
-### The scan is slow.
-The timing line under *Last scan* shows *switch* and *DMM* time per channel.
-* *switch* ≈ 16–20 ms → set the USB-serial adapter's **Latency Timer** to 1 ms
-  (Device Manager → COM port → Port Settings → Advanced).
-* *DMM* is the multimeter's own speed (NPLC 1 + auto-zero); scan fewer channels if needed.
-
-### Voltages drop when many units are connected.
-Usually signals outside the multiplexer's 0…5 V supply range (leaking through the CD74HC4067
-protection diodes even when switched off), high-impedance sources, or ground loops. Every input
-must stay within 0…5 V at the multiplexer pin; all grounds should meet at one point.
-
----
-
 ### N6701C: how do I connect?
 N6701C tab: IP address (raw socket 5025) or a VISA string (`TCPIP0::…::inst0::INSTR`, USB via Keysight IO
 Libraries). The module models and ranges are read from the unit. *Clear protection* resets OV / OC / OT.
@@ -210,60 +162,73 @@ Main tab → *Power watchdog* → *Conditions…*: switch the HMP4040 master and
 the sequence when a step fails, a supply stops communicating, an output stays in current limit (CC) longer
 than N s (short inrush is ignored), an N6701C protection trips, or a current exceeds N A. Monitor only during
 sequences or always. A trigger stays latched (red) until *Reset* or the next run and is written to
-`watchdog_log_YYYY-MM-DD.csv`. It is separate from the BOS watchdog of the switch panel.
+`watchdog_log_YYYY-MM-DD.csv`.
 
 ### The TFG6806 waveform display
 Drawn from the channel's settings (the generator has no command to read its screen), like the generator's own
 display: very fast carriers in modulation / sweep / burst are drawn with fewer cycles ("not to scale").
 
-## 6. Arduinos, 1-Wire sensors and switch
+## 6. BOS Test Station
 
-### How are the two Arduinos wired?
-| Master | | Slave |
+### What does it do?
+It tests a BOS modulator automatically and tells the operator **what is wrong and where to look**. A test plan
+switches the unit through its modes over CAN (RF off, carrier, BPSK, OQPSK, attenuator codes), captures the output
+with the FSW (raw I/Q from the I/Q Analyzer — K70 is not needed), reads the BOS telemetry (PLL locks, JESD,
+FPGA rails, temperatures, 10 MHz reference) and analyses everything. Results: a verdict (PASS / PASS with
+warnings / FAIL), a measurement table with limits, **findings** with the most likely faulty block, a block
+diagram of the modulator coloured by suspicion, suggested **corrections**, an HTML report and a history.
+
+### Which tests are there?
+| Test | Measures | Typical faults it finds |
 |---|---|---|
-| A5 (TX) | → | D2 (RX) |
-| A4 (RX) | ← | D3 (TX) |
-| GND | — | GND (required) |
+| Pre-check | Telemetry present, 6 PLL / JESD flags, 1 V / 1.8 V / 2.5 V rails, temperatures, 10 MHz, Err_Ref_LO | Unlocked LMK / LMX2594 / DAC clock / FPGA PLLs, JESD link error, bad rail, overheating |
+| Supply current | Bench supply current RF off → RF on | PA not biased / not enabled, short circuit |
+| Carrier (CW) | Frequency (Hz, ppm), power, integrated phase noise, spurs | Reference offset, LO programming error, noisy LO |
+| BPSK / OQPSK | MER, EVM, frequency, symbol-rate error, carrier leakage, gain imbalance, quadrature error, phase / magnitude error, PA compression (PAPR), ACLR, OBW, asymmetry, spurs, detected modulation | DAC / ADMV1013 I/Q errors, LO leakage, Q-rail fault, wrong mode, PA compression, clock errors |
+| Attenuator | Output power at 11 codes → least-squares weight of each ADRF5730 bit | Stuck / missing bit, wrong bit weight |
+| PA linearity | Compression and ACLR at the nominal and a higher attenuation | Confirms PA compression vs. digital clipping |
+| LO harmonics | Lines at carrier × k/4 | LO / multiplier leakage of the ADMV1013 |
+| Stability | Power, frequency, MER over time with temperature | Thermal drift of PA / reference |
 
-Sketches: `arduino/sketch_sep24a` on the **master**, `arduino/slave_onewire_switch` on the
-**slave** (needs the OneWire library). Link speed 19200 on both sides.
+### How does the diagnosis decide?
+By cross-checking measurements that point at different blocks, for example:
+* carrier error and symbol-rate error with the **same ppm** → the common 10 MHz reference; carrier error with a
+  correct symbol clock → LMX2594 / LO frequency plan; symbol-rate error with a correct carrier → DAC/FPGA clock;
+* **BPSK good but OQPSK bad** → the Q rail (DAC channel B, its lanes, ADMV1013 Q input);
+* high phase error with little magnitude error → LO phase noise (slow wander = loop, fast = VCO / clock jitter);
+* PAPR loss that **disappears with more attenuation** → PA compression; that does not → digital clipping;
+* power low with a verified attenuator → PA / cable; telemetry PLL / JESD flags override signal-based guesses.
 
-### Switch or 1-Wire does not work — where is the problem?
-Voltage Control tab → Arduino connected → **Test slave link**. It checks PC → master → slave → 1-Wire step
-by step and tells where it stops (wrong COM port, old master sketch, slave not answering =
-wiring/GND/baud, no 1-Wire device, sensors and their readings). It does not switch any output.
+Each finding lists suspect blocks with weights and concrete next steps. The rules rank where to look first; they
+are not proof. Click a block in the diagram to see only its findings.
 
-You can also test the slave alone: Serial Monitor on its USB, 115200, "Newline":
-`SW:SET:0:1` → `SW:STATE:10`, `OW:CONV` then `OW:READ` → one `OW:DEV:…` line per sensor.
+### How is the unit switched between modes?
+*Unit control*: pick a command from the CAN library (CAN tab) for RF off, carrier, BPSK and OQPSK. The attenuator
+can use a CAN template (ID + data with `XX` = code). Anything not mapped is asked from the operator in a dialog
+(semi-automatic test). *Settle time* is waited after every change.
 
-### 1-Wire: "No 1-Wire device answers"
-* Line **LOW (0 V)**: short to GND, missing pull-up, or a sensor connected the wrong way round
-  (it gets warm). **Swapped GND and +5 V** is a common cause.
-* Line **+5 V but no answer**: data wire broken, sensor GND not connected to the slave's GND,
-  legs swapped, or VDD floating (with parasitic power VDD must be tied to **GND** at the sensor).
-* DS18B20 pins (flat side facing you, legs down): **GND – DQ – VDD**.
-* For a standalone check upload `arduino/onewire_check` and read the Serial Monitor (115200).
+### What do I have to set first?
+*Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
+**cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply
+output*: which HMP4040 / N6701C output powers the unit (for the supply-current test).
 
-### Long cables (10 m) with parasitic power
-Use **2.2 kΩ** pull-up (not below ~1.5 kΩ) from each data line to +5 V of the slave, twisted pair
-data + GND, no branches. Most reliable: power the sensors from a third wire (VDD → +5 V).
-"85 °C power-on value" = the conversion did not get enough power.
+### What are the Corrections?
+Values for the DAC38J82 QMC gain / phase / offset (from the measured gain imbalance, quadrature error and
+carrier leakage), the frequency correction (reference trim or LMX2594), the attenuator steps to reach nominal
+power and an attenuator calibration table. The LSB scaling factors are on *Unit / signal* — check them against
+the datasheet. The offset sign can be swapped by the demodulator's 90° ambiguity: apply half, re-measure.
 
-### How do I rename a sensor?
-1-Wire Temp tab → double-click the name. Names are kept in `onewire_names.txt`.
+### Live diagnose
+Captures and diagnoses continuously what the unit transmits now (pick OQPSK / BPSK / CW), without switching it.
+Useful while adjusting the board or probing with a scope.
 
-### Can the Arduino output 3.3 V?
-No — a 5 V Arduino pin is 5 V when high. Use a divider (1 kΩ series + 2 kΩ to GND ≈ 3.33 V) for a
-high-impedance input, a 3.3 V logic buffer / level shifter, or a transistor switching the 3V3 rail.
+### Can I practise without a unit?
+Start with `--demo`. The *Simulator* page injects faults into the simulated BOS (reference offset, LMX unlock,
+JESD error, I/Q imbalance, LO leakage, PA compression, stuck attenuator bit, dead Q rail, wrong modulation, …).
+*Random fault (blind test)* hides which one — run a plan and see whether you (and the diagnosis) find it.
 
-### The switch is active-low (relay module).
-Set `SW_ACTIVE_LOW = true` in the slave sketch and upload it again.
-
-### What does the BOS watchdog do?
-If no BOS data arrives for the set time (default 60 min) it switches an output (pulse or ON).
-"BOS data" = CAN frames with the BOS ID prefix `0x1A46` and/or FSW VSA results with MER above the
-threshold (default 10 dB). Choose *CAN or FSW*, *both*, *CAN only* or *FSW only*. The time counts
-from arming / the last trigger. Every trigger goes to `switch_log`.
+### Can a test plan run from a sequence?
+Yes: Main tab → *+ BOS test*. The step waits for the verdict and can stop the sequence on FAIL.
 
 ---
 
@@ -299,10 +264,9 @@ Check that the line carrying the unit is connected and frames arrive (Monitor vi
 ## 8. Main tab and test sequences
 
 ### Which steps can a sequence contain?
-HMP outputs, SMW, CAN command, Pause, FSW (run / stop / single / auto level), FSW settings,
-voltage Scan start/stop, Repeat … End, Log message, **Switch** (ON / OFF / pulse), **TFG**
-(channel(s), any parameters, trigger / align / recall), **MXG** (any parameters, single sweep /
-trigger / recall / preset).
+HMP outputs, N6701C outputs, CAN command, Pause, **BOS test** (a BOS Test Station plan, waits for the
+verdict), FSW (run / stop / single / auto level), FSW settings, **TFG** (channel(s), any parameters,
+trigger / align / recall), Repeat … End, Log message.
 
 ### What happens when a step fails?
 The sequence stops and the log says why (device not connected, SCPI error, timeout).

@@ -1,10 +1,10 @@
 # KTR RAD TEST
 
-**Test bench control and monitoring software**
+**BOS modulator test station and bench control software**
 
 | Field | Value |
 |---|---|
-| Version | 1.0 (2026-10) |
+| Version | 2.0 (2026-11) |
 | Organization | *Your organization name* |
 | Department | *Department / laboratory* |
 | Author / inventor | *Name Surname* |
@@ -12,13 +12,14 @@
 | Developed with | Claude Code (Anthropic) |
 
 ## What it does
-Controls and monitors the test bench: R&S FSW spectrum analyzer, R&S SMW200A, Keysight N5183B and
-Suin TFG6806 generators, R&S HMP4040 and Keysight N6701C power supplies, 176-channel voltage scanner (Arduino +
-multiplexers + Agilent 34405A), 1-Wire temperature sensors, switch outputs with BOS watchdog,
-three CAN lines (CANable + IXXAT) with telemetry decoding, test sequences and daily CSV logs.
+Automated test and fault diagnosis of the BOS modulator (BPSK / OQPSK; MPF300T, DAC38J82, LMX2594,
+ADMV1013, ADRF5730, CHA3397) with an R&S FSW and the BOS CAN telemetry: test plans, limits, findings with
+the most likely faulty block, corrections, HTML reports and history. Also R&S HMP4040 and Keysight N6701C
+power supplies, Suin TFG6806 generator, three CAN lines (CANable + IXXAT) with telemetry decoding, test
+sequences and daily CSV logs.
 
 ## Built with
-Python, PyQt5, pyqtgraph, NumPy, PyVISA, pyserial, python-can; Arduino (OneWire library).
+Python, PyQt5, pyqtgraph, NumPy, PyVISA, pyserial, python-can.
 
 ## Documentation
 See the **Readme** and **FAQ** tabs.

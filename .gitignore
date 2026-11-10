@@ -16,3 +16,6 @@ switch.json
 can_lines.json
 n6700_log_*.csv
 watchdog_log_*.csv
+bos_station.json
+bos_station.json.tmp
+bos_reports/

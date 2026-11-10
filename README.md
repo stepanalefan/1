@@ -1,65 +1,102 @@
-# KTR RAD TEST
+# KTR RAD TEST — BOS Test Station
 
-One program to control and monitor the test bench: spectrum analyzer, signal generators,
-power supply, 176-channel voltage scanner, temperature sensors, switch, three CAN lines and
-telemetry — with test sequences and daily CSV logs.
+Automated test station for the **BOS** modulator unit (BPSK / OQPSK). It controls the unit over CAN,
+measures its output with an R&S FSW, reads the BOS telemetry, and tells the operator **whether the unit is
+good, what is wrong and where to look** — down to the block of the modulator chain:
+
+```
+REF 10 MHz ─► clock PLLs ─► FPGA MPF300T ══JESD204B══► DAC38J82 ─► ADMV1013 (I/Q, LO ×4) ─► ADRF5730 ─► CHA3397 ─► FSW
+                    └───────────────► LMX2594 (LO) ─────────┘
+```
+
+Also on board: R&S HMP4040 and Keysight N6701C supplies, Suin TFG6806 generator, three CAN lines with
+telemetry decoding, test sequences, daily CSV logs.
 
 ```
 pip install PyQt5 pyqtgraph numpy pyvisa pyvisa-py pyserial python-can
 python fsw_vsa_monitor.py            # start
-python fsw_vsa_monitor.py --demo     # try it without hardware
+python fsw_vsa_monitor.py --demo     # everything simulated, incl. a BOS with injectable faults
 ```
 USB instruments need **Keysight IO Libraries Suite**, the IXXAT adapter the **IXXAT VCI 4** driver.
 Questions and troubleshooting: see **[FAQ.md](FAQ.md)**.
 
 ---
 
-## Windows (tabs)
+## BOS Test Station (first tab)
+
+**Workflow:** enter the unit serial number and operator → pick a test plan → **▶ Run test plan** → read the
+verdict, the findings and the report.
+
+| Area | What it shows / does |
+|---|---|
+| Top bar | Unit S/N, operator, test plan (*Plans ▾* edit / new / delete), Run / Abort, **Live diagnose** (continuous capture + diagnosis of what the unit sends now, without switching it), progress, verdict **PASS / PASS (warnings) / FAIL** |
+| **Diagnosis** | Block diagram of the modulator, each block coloured by how suspicious it is; list of findings (fault / warning / info) with explanation, most likely location (weighted) and *what to do*. Click a block to see only its findings. |
+| **Measurements** | Every measured value with its limit and PASS / FAIL |
+| **Signal** | For each capture: constellation, spectrum, phase error per symbol, all numbers (MER, EVM, frequency / clock error, carrier leakage, gain imbalance, quadrature error, image rejection, phase / magnitude error, MER after I/Q correction, PAPR loss, OBW, ACLR, asymmetry, spurs) |
+| **Attenuator** | Output power vs. ADRF5730 code (measured vs. nominal) and the fitted weight of each bit |
+| **BOS telemetry** | Live: 6 PLL / JESD flags, FPGA rails 1 V / 1.8 V / 2.5 V, temperatures, 10 MHz reference, Err_Ref_LO, mode, firmware |
+| **Corrections** | Suggested DAC38J82 QMC gain / phase / offset, frequency correction (reference trim or LMX2594), attenuator steps to nominal power, attenuator calibration |
+| **History** | All runs of all units (`bos_reports/bos_history.csv`), filter, open report, most frequent suspect blocks |
+| Left: *Unit / signal* | Carrier, symbol rate, roll-off, capture length, LO multiplier, nominal power and attenuator code, **cable loss**, FSW auto level, phase-noise band, stability and linearity settings, QMC scaling, supply output feeding the BOS |
+| Left: *Limits* | All pass / fail limits |
+| Left: *Unit control* | CAN library command for RF off / carrier / BPSK / OQPSK, attenuator CAN template (`XX` = code), settle time. Unmapped steps are asked from the operator. |
+| Left: *Simulator* | Demo only: inject faults into the simulated BOS; *Random fault (blind test)* for training |
+
+### Tests
+
+| Test | Measurement | Typical faults found |
+|---|---|---|
+| Pre-check | BOS telemetry: PLLs (LMK, DAC clock, LMX2594, FPGA JESD, FPGA), JESD link, rails, temperatures, 10 MHz, Err_Ref_LO | unlocked PLL, JESD error, bad rail, overheating, missing reference |
+| Supply current | bench supply current RF off → RF on | PA not biased / not enabled, short |
+| Carrier (CW) | frequency (Hz, ppm), power, integrated phase noise, spurs | reference offset, LO programming error, noisy LO |
+| BPSK, OQPSK | full modulation analysis (see *Signal*), detected modulation | I/Q imbalance, LO leakage, dead Q rail, wrong mode, PA compression, clock error |
+| Attenuator | power at 11 codes → least-squares bit weights | stuck / missing / wrong-weight bit |
+| PA linearity | compression and ACLR at nominal and +6 dB attenuation | PA compression vs. digital clipping |
+| LO harmonics | lines at carrier × k/4 | ADMV1013 LO / multiplier leakage |
+| Stability | power, frequency, MER over time with temperature | thermal drift |
+
+Default plans: *Full test*, *Quick check*, *Modulation only*, *Attenuator*, *Burn-in (stability)*.
+
+### How the diagnosis reasons
+Measurements that point at different blocks are cross-checked: equal ppm on carrier and symbol rate → the
+common reference; carrier error with a correct clock → LO (LMX2594); clock error with a correct carrier →
+DAC/FPGA clock; BPSK good but OQPSK bad → Q rail; phase error without magnitude error → LO phase noise;
+PAPR loss that disappears with more attenuation → PA; power low with a verified attenuator → PA / cable;
+telemetry flags (PLL, JESD, rails) take precedence. Findings rank where to look first, they are not proof.
+
+The FSW is used through its **I/Q Analyzer** (raw I/Q, demodulated by the program), so the station works with
+or without FSW-K70. Each report (`bos_reports/BOS_<serial>_<date>.html`) contains the verdict, findings, block
+diagram, all measurements, corrections, telemetry and plots.
+
+---
+
+## Other tabs
 
 | Tab | What it does |
 |---|---|
-| **Main** | Overview: device status (green = connected), HMP4040 outputs, switch + BOS watchdog, 1-Wire temperatures, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, voltage plot, telemetry watch list. |
-| **Spectrum Analyzer** | R&S FSW. Sub-tabs **I/Q (software demod)** (for an FSW **without K70**: raw I/Q from the I/Q Analyzer, demodulated by the program — BPSK, QPSK, OQPSK, 8PSK, 16QAM; constellation, spectrum, MER / EVM / power / frequency error / symbol-rate error / I/Q offset, trend), **VSA (K70)** (demodulation: modulation, symbol rate, filters, constellation, results, trend) and **Spectrum**. Run continuously or single sweeps; only changed settings are sent. |
-| **SMW200A** | R&S SMW200A vector generator: frequency, level, RF on/off, digital modulation (format, symbol rate, filter, data source). *Copy from VSA* takes the FSW settings. |
-| **TFG6806** | Suin TFG6806, both channels, each with a **waveform display** like the generator's screen (CH1 yellow, CH2 cyan, drawn from the settings): waveform, mode (continuous / modulation / sweep / burst / double pulse), frequency, amplitude, offset, phase, output settings, all modulation types. LAN or USB. Trigger, align phases, save/recall, SCPI console. |
-| **N5183B** | Keysight N5183B MXG: frequency, power, ALC, offsets, AM / FM / ΦM, pulse modulation, step sweep, LF out, RF and MOD switches. LAN / USB / GPIB. Single sweep, trigger, preset, save/recall, SCPI console. |
-| **N6701C** | Keysight N6701C power system (LAN / USB / GPIB): per output voltage, current limit, OVP, OCP, on/off, mode CV / CC / OFF / PROT, all outputs ON/OFF, clear protection, plot, daily `n6700_log`. |
-| **HMP4040** | R&S HMP4040 (USB or LAN): 4 channels (V, I limit, on/off, measured V / I / P), master output, power cycling, plot of current / voltage / power per channel, daily `hmp_log`. |
-| **Voltage Control** | 176-channel voltage scanner (Arduino + multiplexers + 34405A): connect Arduino and multimeter separately, scan a range or one channel, plot + table with min/max, daily `voltage_log`. *Auto-detect devices*, *Test slave link*. |
-| **1-Wire Temp** | DS18B20 sensors on the slave Arduino (A3 / A4 / A5): temperature, status, bus, unique ID with CRC, scratchpad, resolution, power mode, min/max. Poll every N s or *Poll now*; double-click a name to rename; daily log. |
-| **CAN** | Three CAN lines at once (default BOS = CANable, AFAR = IXXAT CAN1, UPNG = IXXAT CAN2). **Trace** (every frame) and **Monitor** (one row per ID, changed bytes highlighted), ID filter + per-line show/hide, transmit (single / periodic), command library with hotkeys, block scripts, record / save / open candump logs. |
-| **Telemetry** | Decoded arrays of BOS, UPNG and AFAR (IOK OSN, SOST, DOP, CONFIG, FAILURE …) with meaning of every field; raw view. |
-| **Logs** | Load any CSV logs of the program (voltage, HMP, temperature, switch, telemetry …) and overlay them on one time plot; filter, steps / points, cursor readout. |
-
-The log window at the bottom shows every action and error of all tabs.
-
----
+| **Main** | Device status (FSW, HMP4040, N6701C, TFG6806, CAN, BOS), supply outputs, BOS unit summary, power watchdog, **test sequence** editor/runner, FSW constellation with MER / power / frequency error, telemetry watch list |
+| **Spectrum Analyzer** | R&S FSW: **VSA (K70)**, **Spectrum**, **I/Q (software demod)** (BPSK, QPSK, OQPSK, 8PSK, 16QAM without K70) |
+| **TFG6806** | Suin TFG6806, both channels with waveform display; LAN or USB |
+| **HMP4040** | R&S HMP4040 (USB or LAN): 4 channels, master output, power cycling, plot, daily `hmp_log` |
+| **N6701C** | Keysight N6701C (LAN / USB / GPIB): per output V, I, OVP, OCP, on/off, plot, daily `n6700_log` |
+| **CAN** | Three CAN lines (BOS = CANable, AFAR = IXXAT CAN1, UPNG = IXXAT CAN2): trace, monitor, transmit, command library, scripts, record / open candump logs |
+| **Telemetry** | Decoded arrays of BOS, UPNG and AFAR with the meaning of every field |
+| **Logs** | Any CSV logs of the program on one time plot |
+| **Help** | FAQ / Readme / About |
 
 ## Test sequence steps (Main tab)
 
 | Button | Step |
 |---|---|
-| **+ HMP** | Set HMP4040 channels (V, I, on/off) and/or master output |
-| **+ N6701C** | Set N6701C outputs (V, I, on/off), all outputs on/off, clear protection; waits until accepted |
-| **+ SMW** | Set SMW200A parameters / RF on-off |
-| **+ CAN** | Send a command from the CAN library (on its line) |
-| **+ Pause** | Wait N ms |
-| **+ FSW** | FSW run / stop / single measurement (waits for the result) / auto level |
-| **+ FSW set** | Set FSW VSA or Spectrum parameters (frequency, symbol rate, modulation …) |
-| **+ Scan** | Start / stop the voltage scan |
-| **+ Repeat** | Repeat the following steps N times (0 = forever) up to *End repeat* |
-| **+ Log** | Write a message to the log |
-| **+ Switch** | Slave switch A0 / A1: ON, OFF or pulse |
-| **+ TFG** | TFG6806 CH1 / CH2 / both: any ticked parameters, then trigger / align / recall |
-| **+ MXG** | N5183B: any ticked parameters; recall / preset first, single sweep / trigger after |
+| **+ HMP** / **+ N6701C** | Set supply outputs (V, I, on/off), master / all outputs, clear protection |
+| **+ CAN** | Send a command from the CAN library |
+| **+ BOS test** | Run a BOS Test Station plan, wait for the verdict, optionally stop on FAIL |
+| **+ FSW** / **+ FSW set** | FSW run / stop / single / auto level; set VSA / Spectrum / I/Q parameters |
+| **+ TFG** | TFG6806 parameters, trigger / align / recall |
+| **+ Pause**, **+ Repeat**, **+ Log** | Wait, repeat N times (0 = forever) … End, log message |
 
-▲ ▼ move, *Copy*, *Edit* (or double-click), *Delete*; *Run sequence*, *Loop*. A step that fails
-stops the sequence with the reason in the log.
-
-**Power watchdog** (Main tab): when enabled, it switches the HMP4040 master output and/or all N6701C
-outputs OFF and stops the sequence if a step fails, a supply stops communicating, an output stays in
-current limit longer than N s, an N6701C protection trips or a current exceeds N A (*Conditions…*).
-Only during sequences or always; latched until *Reset* or the next run; logged to `watchdog_log_*.csv`.
+**Power watchdog** (Main tab): switches the HMP4040 master and/or all N6701C outputs OFF and stops the
+sequence on a failed step, lost supply communication, long current limit, N6701C protection or over-current.
 
 ---
 
@@ -68,39 +105,9 @@ Only during sequences or always; latched until *Reset* or the next run; logged t
 ```
 python fsw_vsa_monitor.py [--ip ADDR] [--protocol hislip|vxi11|socket] [--connect] [--demo] [--demo-no-k70]
 ```
-`--ip` FSW IP / hostname or full VISA string · `--connect` connect at start · `--demo` simulate everything · `--demo-no-k70` simulate an FSW without K70 (I/Q tab).
-
 The CAN sniffer can also run alone: `python canable_analyzer.py [--demo] [--interface slcan|gs_usb|ixxat|socketcan|demo] [--port COM7] [--bitrate 500000] [--connect] [--log file.log]`.
 
----
-
-## Arduino commands (115200 Bd, one line each, ending with LF)
-
-**Master** (`arduino/sketch_sep24a`) — multiplexer, relays the rest to the slave:
-
-| Command | Reply | |
-|---|---|---|
-| `SET:<0…175>` | `READY:<n>` | switch the multiplexer to channel n (`ERR:INVALID_CHANNEL`) |
-| `OW:…`, `SW:…` | slave's reply | forwarded to the slave (`ERR:SLAVE_TIMEOUT` if it does not answer) |
-
-**Slave** (`arduino/slave_onewire_switch`) — reached through the master, or directly on its own USB:
-
-| Command | Reply | |
-|---|---|---|
-| `OW:CONV` | `OW:CONV:OK:<bus mask>` / `OW:CONV:NODEV:<line levels>` | start temperature conversion on A3/A4/A5 |
-| `OW:READ` | `OW:DEV:<bus>:<ROM>:<scratchpad>:<power>` …, `OW:END:<n>` | read all sensors |
-| `SW:SET:<i>:<0\|1>` | `SW:STATE:<bits>` | switch output i (0 = A0, 1 = A1) off / on |
-| `SW:PULSE:<i>:<ms>` | `SW:STATE:<bits>` | output on for ms, then off (timed by the slave) |
-| `SW:STATE?` | `SW:STATE:<bits>` | e.g. `SW:STATE:10` = A0 on, A1 off |
-
-`arduino/onewire_check` is a standalone 1-Wire test sketch (prints presence and ROM codes).
-
----
-
-## CAN ID filter syntax
-
-`100-1FF` range · `7E8` single ID · `!7DF` exclude · `18FEF100` 29-bit ID · `700/700` id/mask —
-comma-separated, hex.
+CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FEF100` 29-bit · `700/700` id/mask.
 
 ---
 
@@ -109,15 +116,15 @@ comma-separated, hex.
 | File | Part |
 |---|---|
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
+| `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
+| `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
+| `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |
-| `bench_monitor.py` | HMP4040 and Voltage Control tabs, VISA loader |
-| `onewire_temp.py`, `slave_switch.py` | 1-Wire tab, switch + watchdog |
-| `smw_generator.py`, `tfg_generator.py`, `mxg_generator.py` | Generator tabs |
+| `bench_monitor.py` | HMP4040 tab, VISA / serial / socket helpers |
+| `n6700_supply.py`, `tfg_generator.py` | N6701C and TFG6806 tabs |
 | `canable_analyzer.py`, `can_commands.py` | CAN tab |
-| `telemetry.py`, `log_viewer.py` | Telemetry and Logs tabs |
-| `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_RAD_TEST.exe` (the hook opens VISA before Qt in the EXE) |
-| `arduino/` | Master, slave and 1-Wire test sketches |
-| `FAQ.md` | Installation, troubleshooting, wiring |
+| `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
+| `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_RAD_TEST.exe` |
 
-Settings (`channels.txt`, `dashboard.json`, `can_commands.json`, `can_lines.json`, `switch.json`,
-`onewire_names.txt`) and daily logs (`*_log_YYYY-MM-DD.csv`) are kept next to the program.
+Settings (`bos_station.json`, `dashboard.json`, `can_commands.json`, `can_lines.json`), reports
+(`bos_reports/`) and daily logs (`*_log_YYYY-MM-DD.csv`) are kept next to the program.
