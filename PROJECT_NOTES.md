@@ -93,8 +93,8 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * **Runner = Python generator**: each test is linear code that `yield`s requests (FSW job, sleep, operator
   prompt); the GUI resumes it when the FSW worker's job_done('bos', …) arrives. Capture + analysis run in the
   FSW worker thread, the GUI never blocks.
-* **Unit control** by CAN library commands (the BOS command set is the user's library) or operator prompts:
-  the station works semi-automatically before all commands are known.
+* **Unit control** by the BOS protocol (default; every command acknowledged, target-designation keep-alive,
+  session re-started before captures because of Time_SNR), or by CAN library commands / operator prompts.
 * **Diagnosis rules** live in `bos_analysis.diagnose`: each Finding has severity, explanation, suspect blocks
   with weights and actions; `suspicion()` combines them (1 − Π(1 − w·sev)). Add a rule there and a simulated
   fault in `FAULTS` / `BosSimulator` to test it. In demo the telemetry comes from the simulator.
@@ -113,8 +113,10 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * Telemetry layouts still missing (user will send tables): **BOS IOK CONFIG (0xFA) and IOK ARCHIVE
   (0xF9)**, **AFAR IOK CONFIG (0xFA) and IOK FV (0xFB)**. Questions left open earlier: AFAR page
   numbers, BOS DOP length (table says 16 B, unit sends 28 → 32), BOS OSN bytes 65–72.
-* BOS station: map the CAN library commands for RF off / CW / BPSK / OQPSK and the attenuator command
-  (Unit control page) once the BOS command table is available; confirm the DAC38J82 QMC register scaling
+* BOS protocol (bos_protocol.py, from ПИЛВ 0102-004): confirm on the unit which session command gives BPSK and
+  which OQPSK (defaults 0xA1 УР and 0xA4 ШР КБД), the allowed sender address (default КПА ИВУ 0x18), the symbol
+  rate per Rate / coding, and the bit order of the 11-bit N field (byte 3 bits 7-5 = low bits assumed, like Freq).
+  Confirm the DAC38J82 QMC register scaling
   (gain / phase / offset LSB factors on the Unit / signal page) against the datasheet; set real limits.
 * BOS station on the real FSW: verify capture levels (auto level) and the cable loss; validate the diagnosis
   rules on units with known faults and tune weights / thresholds.

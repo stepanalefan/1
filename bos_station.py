@@ -38,6 +38,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 import bos_analysis as ba
+import bos_protocol as bp
 
 try:
     import telemetry
@@ -64,16 +65,18 @@ SEV_ICON = {"fail": "✖", "warn": "▲", "info": "ℹ", "ok": "✔"}
 # --------------------------------------------------------------------------- #
 # key, label, kind (f = float, i = int, b = bool), default, unit / scale, tooltip
 CFG_FIELDS = [
-    ("carrier", "Carrier frequency", "f", 28e9, "GHz", "RF output frequency of the BOS"),
+    ("carrier", "Carrier frequency", "f", 37.75e9, "GHz", "RF output frequency of the BOS "
+     "(with protocol control: 37650 + 0.125·N MHz from the frequency code on the Unit control page)"),
     ("symbol_rate", "Symbol rate", "f", 10e6, "Msym/s", "Symbol rate of BPSK / OQPSK"),
     ("alpha", "RRC roll-off", "f", 0.35, "", "Roll-off of the pulse shaping filter in the FPGA"),
     ("sps", "Capture samples / symbol", "i", 8, "", "FSW I/Q sample rate = symbol rate × this (4…16)"),
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
     ("power_nom", "Nominal output power", "f", 10.0, "dBm", "Expected power at the BOS output with the nominal attenuator code"),
-    ("att_code", "Nominal ADRF5730 code", "i", 0, "", "Attenuator code (0…63, 0.5 dB / LSB) in normal operation"),
+    ("att_code", "Nominal Atten_EIRP", "i", 0, "dB", "EIRP attenuation (0…20 dB, 1 dB steps, sets the ADRF5730) "
+     "at which the nominal power is specified"),
     ("loss_db", "Cable / fixture loss", "f", 0.0, "dB", "Added to every power reading (BOS output -> FSW input)"),
-    ("ext_ref", "External 10 MHz expected", "b", False, "", "Warn when the BOS reports no external reference"),
+    ("ext_ref", "External 10 MHz expected", "b", True, "", "Warn when the BOS reports no external reference"),
     ("autolevel", "FSW auto level per capture", "b", True, "", "ADJ:LEV before each capture (recommended)"),
     ("ref_level", "FSW ref level (no auto)", "f", 0.0, "dBm", "Used when auto level is off"),
     ("cw_fs", "CW capture bandwidth", "f", 2e6, "MHz", "Sample rate of the carrier capture"),
@@ -81,7 +84,7 @@ CFG_FIELDS = [
     ("pn_hi", "Phase noise to", "f", 100e3, "kHz", "Upper limit of the integrated phase noise"),
     ("drift_n", "Stability: measurements", "i", 10, "", "Number of measurements of the stability test"),
     ("drift_s", "Stability: interval", "f", 30.0, "s", "Time between stability measurements"),
-    ("lin_step", "Linearity: extra attenuation", "i", 12, "codes", "Attenuator codes added for the linearity check (12 = 6 dB)"),
+    ("lin_step", "Linearity: extra attenuation", "i", 6, "dB", "Atten_EIRP added for the linearity check"),
     ("qmc_gain_lsb_per_unit", "QMC gain LSB per ×1.0", "f", 1024, "", "DAC38J82 QMC gain scaling (check datasheet)"),
     ("qmc_phase_lsb_per_rad", "QMC phase LSB per rad", "f", 4096, "", "DAC38J82 QMC phase scaling (check datasheet)"),
     ("dac_offset_lsb_per_rms", "QMC offset LSB per RMS", "f", 8192, "", "DAC codes per RMS symbol amplitude"),
@@ -116,12 +119,14 @@ LIM_FIELDS = [  # key, label, default, unit
 ]
 
 TESTS = [  # id, name, description
+    ("link", "Control link & BOS setup", "NOP acknowledgement, standby, session limit, telemetry periods, "
+                                         "stored КОНФИГ read back (protocol control only, added automatically)"),
     ("pre", "Pre-check (telemetry)", "BOS telemetry present, PLLs locked, JESD OK, rails, temperatures, reference"),
     ("supply", "Supply current", "Bench supply current with RF off and RF on (PA bias)"),
     ("cw", "Carrier (CW)", "Carrier frequency, power, integrated phase noise, spurs"),
     ("bpsk", "BPSK modulation", "MER / EVM / frequency / clock / leakage / compression / spectrum"),
     ("oqpsk", "OQPSK modulation", "As BPSK plus I/Q gain imbalance and quadrature error"),
-    ("att", "Attenuator ADRF5730", "Bit weights from 11 codes, stuck / weak bits"),
+    ("att", "Attenuator (Atten_EIRP / ADRF5730)", "Step weights 1…16 dB from 11 settings, stuck / weak steps"),
     ("lin", "PA linearity", "Compression and ACLR at nominal and higher attenuation"),
     ("harm", "LO harmonics", "Lines at carrier × k/4 (LO and multiplier products)"),
     ("drift", "Stability / drift", "Power, frequency and MER over time vs. temperature"),
@@ -314,7 +319,10 @@ class BosStation(QtWidgets.QWidget):
         self.host = host
         self.data = {"cfg": {k: d for k, _, _, d, _, _ in CFG_FIELDS},
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
-                     "ctl": {"cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS",
+                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS", "freq_n": 800, "rate": 0,
+                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
+                             "tm_enable": True,
+                             "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS",
                              "settle_ms": 1500, "prompt": True},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
                      "unit": {"serial": "", "operator": ""}}
@@ -353,11 +361,17 @@ class BosStation(QtWidgets.QWidget):
         self.cur_test = ""
         self.live_mode = False
         self.last_report = ""
+        self.cfg_rx = None                # (time, decoded ИОК_КОНФИГ)
+        self.cur_mode = None              # mode the station put the unit in (protocol control)
+        self.cur_att = 0
+        self._ack_code = None
         self._build()
         self._wire_host()
         self.tick = QtCore.QTimer(self, interval=1000, timeout=self._tick)
         self.tick.start()
         self.wait_timer = QtCore.QTimer(self, singleShot=True, timeout=lambda: self._advance(None))
+        self.ka_timer = QtCore.QTimer(self, interval=500, timeout=self._keepalive)
+        self.ka_timer.start()
 
     # ================================================================ build
     def _build(self):
@@ -508,7 +522,87 @@ class BosStation(QtWidgets.QWidget):
     def _build_control(self):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
+        g = QtWidgets.QGroupBox("Control method")
+        f = QtWidgets.QFormLayout(g)
+        self.method = QtWidgets.QComboBox()
+        for k, txt in (("protocol", "BOS protocol (ПИЛВ, direct CAN commands)"),
+                       ("library", "Commands from the CAN library"), ("prompt", "Ask the operator")):
+            self.method.addItem(txt, k)
+        self.method.setCurrentIndex(max(0, self.method.findData(self.ctl.get("method", "protocol"))))
+        self.method.currentIndexChanged.connect(lambda *_: (self._collect(), self._method_changed()))
+        f.addRow(self.method)
+        v.addWidget(g)
+        self.proto_box = QtWidgets.QGroupBox("BOS protocol")
+        f = QtWidgets.QFormLayout(self.proto_box)
+        self.p_sender = QtWidgets.QComboBox()
+        for a, name in bp.SENDERS:
+            self.p_sender.addItem(f"0x{a:02X}  {name}", a)
+        self.p_sender.setCurrentIndex(max(0, self.p_sender.findData(self.ctl.get("sender", 0x18))))
+        self.p_sender.setToolTip("Sender address of the station. The BOS executes commands only from allowed\n"
+                                 "addresses and answers КВ- otherwise - then try ВМ 1 (0x20).")
+        self.p_line = QtWidgets.QLineEdit(self.ctl.get("line", "BOS"))
+        self.p_line.setToolTip("CAN line (CAN tab) the BOS is connected to")
+        self.p_freq = QtWidgets.QSpinBox()
+        self.p_freq.setRange(656, 944)
+        self.p_freq.setValue(int(self.ctl.get("freq_n", 800)))
+        self.p_freq.setToolTip("Freq = 37650 + 0.125·N MHz. 656…944 is valid for every mode (carrier / УР allow 8…1592)")
+        self.p_freq_lbl = QtWidgets.QLabel()
+        self.p_bpsk = QtWidgets.QComboBox()
+        self.p_oqpsk = QtWidgets.QComboBox()
+        for cb, key in ((self.p_bpsk, "bpsk_cmd"), (self.p_oqpsk, "oqpsk_cmd")):
+            for code, name in bp.SR_COMMANDS.items():
+                if code != 0xA0:
+                    cb.addItem(f"0x{code:02X}  {name}", code)
+            cb.setCurrentIndex(max(0, cb.findData(self.ctl.get(key))))
+            cb.setToolTip("Session command whose signal has this modulation")
+        self.p_rate = QtWidgets.QComboBox()
+        for k, kb in bp.RATES.items():
+            self.p_rate.addItem(f"{kb} kbit/s", k)
+        self.p_rate.setCurrentIndex(max(0, self.p_rate.findData(self.ctl.get("rate", 0))))
+        self.p_rate.setToolTip("Channel data rate of the session commands (Rate field). The symbol rate on the\n"
+                               "'Unit / signal' page must match the rate, coding and modulation.")
+        self.p_tsnr = QtWidgets.QSpinBox()
+        self.p_tsnr.setRange(0, 255)
+        self.p_tsnr.setSuffix(" s")
+        self.p_tsnr.setSpecialValueText("don't change")
+        self.p_tsnr.setValue(int(self.ctl.get("time_snr", 255)))
+        self.p_tsnr.setToolTip("SET_Time_SNR before the test: the BOS ends a session after this time\n"
+                               "(factory default 30 s). Not saved to flash.")
+        self.p_keep = QtWidgets.QCheckBox("Send target designation every 0.5 s (0°, 0°)")
+        self.p_keep.setChecked(bool(self.ctl.get("keepalive", True)))
+        self.p_keep.setToolTip("The BOS transmits only while it has a valid target designation\n"
+                               "(Angle_ErdStation_BKU, valid for 3 s)")
+        self.p_tm = QtWidgets.QCheckBox("Enable ИОК_ДОП / ОСН / СОСТОЯНИЕ and read ИОК_КОНФИГ")
+        self.p_tm.setChecked(bool(self.ctl.get("tm_enable", True)))
+        for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate):
+            wd.currentIndexChanged.connect(lambda *_: self._collect())
+        for wd in (self.p_freq, self.p_tsnr):
+            wd.valueChanged.connect(lambda *_: self._collect())
+        for wd in (self.p_keep, self.p_tm):
+            wd.toggled.connect(lambda *_: self._collect())
+        self.p_line.editingFinished.connect(self._collect)
+        f.addRow("Sender address", self.p_sender)
+        f.addRow("CAN line", self.p_line)
+        f.addRow("Frequency code N", self.p_freq)
+        f.addRow("", self.p_freq_lbl)
+        f.addRow("BPSK signal from", self.p_bpsk)
+        f.addRow("OQPSK signal from", self.p_oqpsk)
+        f.addRow("Data rate", self.p_rate)
+        f.addRow("Session limit", self.p_tsnr)
+        f.addRow(self.p_keep)
+        f.addRow(self.p_tm)
+        hb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("Test link")
+        b.setToolTip("NOP, standby, telemetry setup, read the stored КОНФИГ")
+        b.clicked.connect(lambda: self.start_plan("(link test)", tests=["link"]))
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("RF off (standby)")
+        b.clicked.connect(lambda: self._send_now(0x01))
+        hb.addWidget(b)
+        f.addRow(hb)
+        v.addWidget(self.proto_box)
         g = QtWidgets.QGroupBox("Modes (commands from the CAN library)")
+        self.lib_box = g
         f = QtWidgets.QFormLayout(g)
         self.ctl_w = {}
         for key, label in CTL_MODES:
@@ -522,7 +616,8 @@ class BosStation(QtWidgets.QWidget):
         rb.clicked.connect(self._fill_ctl)
         f.addRow(rb)
         v.addWidget(g)
-        g = QtWidgets.QGroupBox("ADRF5730 attenuator control")
+        g = QtWidgets.QGroupBox("Attenuator control (library / operator method)")
+        self.att_box = g
         f = QtWidgets.QFormLayout(g)
         self.att_mode = QtWidgets.QComboBox()
         for k, t in (("prompt", "Ask the operator"), ("can", "CAN command template"), ("none", "Not adjustable (skip)")):
@@ -531,8 +626,8 @@ class BosStation(QtWidgets.QWidget):
         self.att_id = QtWidgets.QLineEdit(self.ctl.get("att_id", ""))
         self.att_id.setPlaceholderText("29-bit ID hex, e.g. 1A4612A0")
         self.att_data = QtWidgets.QLineEdit(self.ctl.get("att_data", "XX"))
-        self.att_data.setPlaceholderText("data hex, XX = code (0…63), e.g. 05 XX 00")
-        self.att_data.setToolTip("Data bytes in hex; XX is replaced by the attenuator code.")
+        self.att_data.setPlaceholderText("data hex, XX = attenuation in dB (0…20), e.g. 05 XX 00")
+        self.att_data.setToolTip("Data bytes in hex; XX is replaced by the attenuation in dB.")
         self.att_line = QtWidgets.QLineEdit(self.ctl.get("att_line", "BOS"))
         for wd in (self.att_mode,):
             wd.currentIndexChanged.connect(lambda *_: self._collect())
@@ -553,11 +648,32 @@ class BosStation(QtWidgets.QWidget):
         self.settle.valueChanged.connect(lambda *_: self._collect())
         f.addRow("Settle time", self.settle)
         v.addWidget(g)
-        v.addWidget(QtWidgets.QLabel("Without a mapped command the station asks the operator\n"
-                                     "to switch the unit (semi-automatic test)."))
+        v.addWidget(QtWidgets.QLabel("Library method: without a mapped command the station asks\n"
+                                     "the operator to switch the unit (semi-automatic test)."))
         v.addStretch(1)
         self._fill_ctl()
+        self._method_changed()
         return w
+
+    def _method_changed(self):
+        m = self.ctl.get("method", "protocol")
+        self.proto_box.setVisible(m == "protocol")
+        self.lib_box.setVisible(m == "library")
+        self.att_box.setVisible(m != "protocol")
+        if "carrier" in getattr(self, "cfg_w", {}):
+            self.cfg_w["carrier"][0].setEnabled(m != "protocol")
+        self._sync_carrier()
+
+    def _sync_carrier(self):
+        n = int(self.ctl.get("freq_n", 800))
+        if hasattr(self, "p_freq_lbl"):
+            self.p_freq_lbl.setText(f"= {bp.freq_hz(n) / 1e9:.6f} GHz")
+        if self.ctl.get("method") == "protocol" and "carrier" in getattr(self, "cfg_w", {}):
+            self.cfg["carrier"] = bp.freq_hz(n)
+            wdg, _, sc = self.cfg_w["carrier"]
+            wdg.blockSignals(True)
+            wdg.setValue(self.cfg["carrier"] / sc)
+            wdg.blockSignals(False)
 
     def _build_sim(self):
         w = QtWidgets.QWidget()
@@ -820,6 +936,13 @@ class BosStation(QtWidgets.QWidget):
             self.ctl.update(att_mode=self.att_mode.currentData(), att_id=self.att_id.text().strip(),
                             att_data=self.att_data.text().strip(), att_line=self.att_line.text().strip(),
                             settle_ms=self.settle.value())
+        if hasattr(self, "p_freq"):
+            self.ctl.update(method=self.method.currentData(), sender=self.p_sender.currentData(),
+                            line=self.p_line.text().strip() or "BOS", freq_n=self.p_freq.value(),
+                            bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
+                            rate=self.p_rate.currentData(), time_snr=self.p_tsnr.value(),
+                            keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
+            self._sync_carrier()
         if hasattr(self, "supply_cb"):
             self.data["supply"] = self.supply_cb.currentData()
         self.data["unit"] = {"serial": self.serial.text().strip(), "operator": self.operator.text().strip()} \
@@ -955,6 +1078,14 @@ class BosStation(QtWidgets.QWidget):
 
     # ---- CAN / telemetry
     def on_frames(self, frames):
+        if self.pending == "ack":
+            for fr in frames:
+                a = bp.parse_ack(fr.can_id, fr.ext, fr.data, self.ctl.get("sender", 0x18))
+                if a and a["code"] == self._ack_code:
+                    self.pending = "ack-received"
+                    self.wait_timer.stop()
+                    QtCore.QTimer.singleShot(0, lambda a=a: self._advance(a))
+                    break
         if self.rx is None or self._is_demo():          # demo: telemetry comes from the simulated BOS
             return
         for fr in frames:
@@ -963,6 +1094,12 @@ class BosStation(QtWidgets.QWidget):
                 continue
             base, t, data, ts = r
             if base >> 16 != 0x1A46:
+                continue
+            if t == 0xFA and len(data) >= 8 + bp.CONFIG_LEN:
+                try:
+                    self.cfg_rx = (time.time(), bp.decode_config(data[8:8 + bp.CONFIG_LEN]))
+                except ValueError:
+                    pass
                 continue
             layout = {0xFB: telemetry.BOS_DOP, 0xFC: telemetry.BOS_OSN, 0xFD: telemetry.BOS_SOST}.get(t)
             if not layout:
@@ -1083,7 +1220,9 @@ class BosStation(QtWidgets.QWidget):
             if done:
                 done("ABORTED", "the station is busy")
             return
-        tests = tests or self.data["plans"].get(name, [])
+        tests = list(tests or self.data["plans"].get(name, []))
+        if self.ctl.get("method") == "protocol" and tests != ["live"] and "link" not in tests:
+            tests.insert(0, "link")
         if not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
@@ -1098,6 +1237,8 @@ class BosStation(QtWidgets.QWidget):
         if hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
             self.host.run_btn.setChecked(False)          # stop the live FSW view while testing
         self.res, self.rows, self.findings = {}, [], []
+        self.cur_att = int(self.cfg.get("att_code", 0))
+        self.cur_mode = None
         self.table.setRowCount(0)
         self.find_list.clear()
         self.find_detail.clear()
@@ -1156,6 +1297,9 @@ class BosStation(QtWidgets.QWidget):
         if kind == "sleep":
             self.pending = "sleep"
             self.wait_timer.start(max(1, int(req[1] * 1000)))
+        elif kind == "ack":
+            self.pending = "ack"
+            self.wait_timer.start(max(1, int(req[1] * 1000)))
         elif kind == "fsw":
             self.pending = "fsw"
             self.host.worker.submit("bos", req[1])
@@ -1195,8 +1339,114 @@ class BosStation(QtWidgets.QWidget):
         self.progress.setValue(len(tests))
 
     # ---- unit control helpers (generators)
+    # ---- BOS protocol
+    def _sim_map(self):
+        return {self.ctl.get("bpsk_cmd", 0xA1): "BPSK", self.ctl.get("oqpsk_cmd", 0xA4): "OQPSK"}
+
+    def _frame(self, code, data=b"", ack=True, receiver=bp.BOS):
+        c = getattr(self.host, "can_win", None)
+        can_id, payload = bp.command(code, self.ctl.get("sender", 0x18), data, ack, receiver)
+        if c is None:
+            return False
+        return c.send_frame(c.FRAME(0, can_id, True, False, None, payload, bus=self.ctl.get("line", "BOS")))
+
+    def _send_now(self, code, data=b""):
+        """Fire-and-forget (RF off button, keep-alive, end of a test)."""
+        if self._is_demo():
+            self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
+            return True
+        ok = self._frame(code, data, ack=False, receiver=bp.GROUP_ANGLE if code == 0x0C else bp.BOS)
+        if code == 0x01:
+            self.log("BOS station: MODE_D (standby, RF off) sent" if ok else
+                     "BOS station: MODE_D not sent - BOS CAN line not connected", "info" if ok else "err")
+        return ok
+
+    def _keepalive(self):
+        if self.ctl.get("method") == "protocol" and self.ctl.get("keepalive", True) and \
+                self.cur_mode not in (None, "rf_off"):
+            self._send_now(0x0C, bp.p_angle(0.0, 0.0))
+
+    def _proto(self, code, data=b"", what=""):
+        """Send a command with acknowledgement request; returns the acknowledgement dict."""
+        name = bp.COMMANDS[code][0]
+        if self._is_demo():
+            ok = self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
+            yield ("sleep", 0.02)
+            a = {"code": code, "negative": not ok, "unknown": not ok, "can2": False, "byte": 0, "array": False}
+        else:
+            self._ack_code = code
+            if not self._frame(code, data):
+                raise _TestError(f"{name}: CAN send failed - line '{self.ctl.get('line')}' not connected (CAN tab)")
+            a = yield ("ack", 0.3)
+        if a is None:
+            raise _TestError(f"{name}: no acknowledgement within 300 ms (BOS off, wrong CAN line, "
+                             f"or bus problem - check the CAN tab)")
+        self.log(f"BOS station: {what or name} → {bp.ack_text(a)}", "info" if not a["negative"] else "err")
+        if a["negative"]:
+            hint = "" if a["unknown"] else (" — the sender address may not be allowed, or the command is only "
+                                             "executed in standby (ДЖР); try sender ВМ 1 (0x20)")
+            raise _TestError(bp.ack_text(a) + hint)
+        return a
+
+    def _session(self):
+        """(Re)start the session for the current mode / attenuation."""
+        if self.cur_mode in (None, "rf_off"):
+            yield from self._proto(0x01)
+            return
+        code = {"cw": 0xA0, "bpsk": self.ctl.get("bpsk_cmd", 0xA1), "oqpsk": self.ctl.get("oqpsk_cmd", 0xA4)}[self.cur_mode]
+        data = bp.p_session(code, int(self.ctl.get("freq_n", 800)), min(bp.ATTEN_MAX_DB, self.cur_att),
+                            coding=0, continuous=True, rate=int(self.ctl.get("rate", 0)), count=2047,
+                            reg=5 if code == 0xA1 else 1)
+        self._keepalive()                                   # valid target designation before the session
+        yield from self._proto(code, data, f"{bp.COMMANDS[code][0]} (N={self.ctl.get('freq_n')}, "
+                                           f"att {self.cur_att} dB)")
+        self._sr_t = time.monotonic()
+
+    def _t_link(self):
+        T = TEST_NAME["link"]
+        a = yield from self._proto(0x00, what="NOP (link check)")
+        self._row(T, "Control link (NOP)", None, "", "КВ+", "PASS", text=f"КВ+ via CAN{2 if a['can2'] else 1}")
+        self.cur_mode = "rf_off"
+        yield from self._proto(0x01, what="MODE_D (standby)")
+        self._row(T, "Standby (MODE_D)", None, "", "КВ+", "PASS", text="КВ+")
+        ts = int(self.ctl.get("time_snr", 255))
+        if ts:
+            yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s")
+            self._row(T, "Session limit (SET_Time_SNR)", ts, "s", "КВ+", "PASS", spec="{:.0f}")
+        if not self.ctl.get("tm_enable", True):
+            return
+        for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
+            yield from self._proto(0x10, bp.p_period_tm(tm, per), f"SET_Period_TM {bp.TM_TYPES[tm]} {per:g} s")
+        self.cfg_rx = None
+        yield from self._proto(0x11, bp.p_req_tm(0xFA), "REQ_TM ИОК_КОНФИГ")
+        if self._is_demo():
+            self.cfg_rx = (time.time(), bp.decode_config(self.sim.config()))
+        for _ in range(30):                                  # ИОК_КОНФИГ: 18 CAN frames, after the current ИОК
+            if self.cfg_rx:
+                break
+            yield ("sleep", 0.1)
+        if not self.cfg_rx:
+            self._row(T, "ИОК_КОНФИГ received", None, "", "within 3 s", "FAIL", text="not received")
+            return
+        c = self.cfg_rx[1]
+        self.res["config"] = c
+        self._row(T, "ИОК_КОНФИГ checksum", None, "", "CRC-16 ok", "PASS" if c["crc_ok"] else "FAIL",
+                  text=f"0x{c['Checksum']:04X}" + ("" if c["crc_ok"] else f" (calc 0x{c['crc_calc']:04X})"))
+        for k, txt in (("Config_Type", {0: "factory", 1: "user"}), ("Sour_10MHz", {0: "internal", 1: "external"}),
+                       ("Data_Random", {0: "off", 1: "on"})):
+            self._row(T, k, None, "", "", "INFO", text=txt[c[k]])
+        for k in ("Time_SNR", "Numb_Preamb", "Ttlm_main_FC", "Ttlm_dop_FB", "Ttlm_stat_FD", "Temp_Max_DT1",
+                  "Temp_Max_DT2", "Temp_Max_DT3"):
+            self._row(T, k, c[k], "", "", "INFO", spec="{:.0f}")
+        self._row(T, "Preamble", None, "", "", "INFO", text=f"0x{c['Preamb']:08X}")
+
     def _set_mode(self, mode):
         """mode: rf_off / cw / bpsk / oqpsk."""
+        if self.ctl.get("method") == "protocol":
+            self.cur_mode = mode
+            yield from self._session()
+            yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000 if not self._is_demo() else 0.05)
+            return
         if self._is_demo():
             self.sim.mode = {"rf_off": "off", "cw": "cw", "bpsk": "BPSK", "oqpsk": "OQPSK"}[mode]
             yield ("sleep", 0.05)
@@ -1216,7 +1466,13 @@ class BosStation(QtWidgets.QWidget):
         yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000)
 
     def _set_att(self, code):
-        code = int(max(0, min(63, code)))
+        code = int(max(0, min(bp.ATTEN_MAX_DB, code)))
+        if self.ctl.get("method") == "protocol":
+            self.cur_att = code
+            if self.cur_mode not in (None, "rf_off"):
+                yield from self._session()
+                yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000 if not self._is_demo() else 0.02)
+            return
         if self._is_demo():
             self.sim.att_code = code
             yield ("sleep", 0.02)
@@ -1234,7 +1490,7 @@ class BosStation(QtWidgets.QWidget):
             if not c or not c.send_frame(c.FRAME(0, can_id, can_id > 0x7FF, False, None, data, bus=self.ctl["att_line"])):
                 raise _TestError("CAN send failed for the attenuator command")
         else:
-            ok = yield ("prompt", f"Set the ADRF5730 attenuator code to <b>{code}</b> ({code * 0.5:.1f} dB)."
+            ok = yield ("prompt", f"Set the EIRP attenuation (Atten_EIRP) to <b>{code} dB</b>."
                                   f"<br><br>Press OK when it is done.")
             if not ok:
                 return
@@ -1259,6 +1515,10 @@ class BosStation(QtWidgets.QWidget):
             r["fsw_errors"] = errs
             r["t"] = time.time()
             return r
+        if self.ctl.get("method") == "protocol" and self.cur_mode not in (None, "rf_off") and \
+                time.monotonic() - getattr(self, "_sr_t", 0) > 20 and not self.live_mode:
+            yield from self._session()                      # keep the session inside Time_SNR
+            yield ("sleep", 0.6 if not self._is_demo() else 0.02)
         self.step_lbl.setText(f"{TEST_NAME.get(self.cur_test, self.cur_test)}: capturing {label} …")
         st, r = yield ("fsw", job)
         if st == "err":
@@ -1421,7 +1681,7 @@ class BosStation(QtWidgets.QWidget):
         if "error" in fit:
             raise _TestError(fit["error"])
         for b in fit["bits"]:
-            self._lim_row(T, f"Bit {b['bit']} weight (nominal {b['nominal']:g} dB)", b["measured"], "dB",
+            self._lim_row(T, f"{b['nominal']:g} dB step", b["measured"], "dB",
                           b["nominal"] - max(self.lim["att_step_max_db"], 0.05 * b["nominal"]),
                           b["nominal"] + max(self.lim["att_step_max_db"], 0.05 * b["nominal"]), "{:.3f}")
         self._row(T, "Fit residual RMS", fit["residual_rms"], "dB", "", "INFO", spec="{:.3f}")
@@ -1726,6 +1986,9 @@ class BosStation(QtWidgets.QWidget):
 
     def _finish2(self, verdict, summary):
         self.pending = None
+        if self.ctl.get("method") == "protocol" and self.cur_mode not in (None, "rf_off"):
+            self._send_now(0x01)                            # leave the unit in standby, RF off
+        self.cur_mode = None
         self.wait_timer.stop()
         self.run_btn.setText("▶ Run test plan")
         if self.live_btn.isChecked():

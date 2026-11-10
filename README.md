@@ -39,19 +39,20 @@ verdict, the findings and the report.
 | **History** | All runs of all units (`bos_reports/bos_history.csv`), filter, open report, most frequent suspect blocks |
 | Left: *Unit / signal* | Carrier, symbol rate, roll-off, capture length, LO multiplier, nominal power and attenuator code, **cable loss**, FSW auto level, phase-noise band, stability and linearity settings, QMC scaling, supply output feeding the BOS |
 | Left: *Limits* | All pass / fail limits |
-| Left: *Unit control* | CAN library command for RF off / carrier / BPSK / OQPSK, attenuator CAN template (`XX` = code), settle time. Unmapped steps are asked from the operator. |
+| Left: *Unit control* | **BOS protocol** (default): the station sends the BOS commands itself (ПИЛВ 0102-004): sender address, CAN line, frequency code N (37650 + 0.125·N MHz), which session command gives BPSK / OQPSK, data rate, session limit, target-designation keep-alive, telemetry enable; *Test link*, *RF off*. Alternatives: CAN library commands or operator prompts. |
 | Left: *Simulator* | Demo only: inject faults into the simulated BOS; *Random fault (blind test)* for training |
 
 ### Tests
 
 | Test | Measurement | Typical faults found |
 |---|---|---|
+| Control link & BOS setup | (protocol control, added automatically) NOP and MODE_D acknowledged, SET_Time_SNR, ИОК periods, ИОК_КОНФИГ read back and CRC-checked | no CAN link, КВ- (sender not allowed), corrupt / unexpected stored configuration |
 | Pre-check | BOS telemetry: PLLs (LMK, DAC clock, LMX2594, FPGA JESD, FPGA), JESD link, rails, temperatures, 10 MHz, Err_Ref_LO | unlocked PLL, JESD error, bad rail, overheating, missing reference |
 | Supply current | bench supply current RF off → RF on | PA not biased / not enabled, short |
 | Carrier (CW) | frequency (Hz, ppm), power, integrated phase noise, spurs | reference offset, LO programming error, noisy LO |
 | BPSK, OQPSK | full modulation analysis (see *Signal*), detected modulation | I/Q imbalance, LO leakage, dead Q rail, wrong mode, PA compression, clock error |
-| Attenuator | power at 11 codes → least-squares bit weights | stuck / missing / wrong-weight bit |
-| PA linearity | compression and ACLR at nominal and +6 dB attenuation | PA compression vs. digital clipping |
+| Attenuator | power at 11 Atten_EIRP settings (0…20 dB) → least-squares weight of the 1/2/4/8/16 dB steps | stuck / missing / wrong-weight step |
+| PA linearity | compression and ACLR at nominal and +6 dB Atten_EIRP | PA compression vs. digital clipping |
 | LO harmonics | lines at carrier × k/4 | ADMV1013 LO / multiplier leakage |
 | Stability | power, frequency, MER over time with temperature | thermal drift |
 
@@ -118,6 +119,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
+| `bos_protocol.py` | BOS CAN protocol: identifiers, command codes and parameters, acknowledgements, CRC-16, КОНФИГ decoding |
 | `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA / serial / socket helpers |

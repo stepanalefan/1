@@ -39,6 +39,7 @@ The rules are engineering heuristics, not proof: they rank where to look first a
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
@@ -62,7 +63,8 @@ BLOCKS = [
 ]
 BLOCK_IDS = [b[0] for b in BLOCKS]
 BLOCK_NAME = {b[0]: f"{b[1]} ({b[2]})" for b in BLOCKS}
-ATT_BITS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)          # ADRF5730 bit weights, dB
+ATT_BITS = (1.0, 2.0, 4.0, 8.0, 16.0)               # Atten_EIRP bits (1 dB LSB, BOS command), dB
+ATT_MAX = 20                                        # Atten_EIRP saturates above 20 dB
 
 
 def _db(x):
@@ -321,20 +323,21 @@ def tone_power(x, fs, loss_db=0.0):
 # --------------------------------------------------------------------------- #
 #  ADRF5730 attenuator                                                         #
 # --------------------------------------------------------------------------- #
-ATT_CODES_DEFAULT = [0, 1, 2, 4, 8, 16, 32, 63, 21, 42, 0]
+ATT_CODES_DEFAULT = [0, 1, 2, 4, 8, 16, 3, 12, 20, 5, 0]
 
 
 def fit_attenuator(codes, powers):
-    """Least-squares bit weights from measured output power per attenuator code.
-    Returns per-bit weight, error vs nominal, verdict text and the per-code residuals."""
+    """Least-squares bit weights from measured output power per Atten_EIRP code (dB, 1 dB LSB;
+    the BOS drives the ADRF5730 with it). Returns per-bit weight, error vs nominal, per-code residuals."""
     codes = np.asarray(codes, int)
     pw = np.asarray(powers, float)
     ok = np.isfinite(pw)
     codes, pw = codes[ok], pw[ok]
-    bits = ((codes[:, None] >> np.arange(6)[None, :]) & 1).astype(float)
+    nb = len(ATT_BITS)
+    bits = ((codes[:, None] >> np.arange(nb)[None, :]) & 1).astype(float)
     A = np.column_stack([np.ones(len(codes)), -bits])
-    if len(codes) < 7 or np.linalg.matrix_rank(A) < 7:
-        return {"error": "need at least the 6 single-bit codes and code 0"}
+    if len(codes) < nb + 1 or np.linalg.matrix_rank(A) < nb + 1:
+        return {"error": f"need at least the {nb} single-bit codes and code 0"}
     sol, *_ = np.linalg.lstsq(A, pw, rcond=None)
     p0, w = float(sol[0]), sol[1:]
     model = A @ sol
@@ -393,16 +396,16 @@ def corrections(res: dict, cfg: dict) -> list[tuple[str, str, str]]:
         r = res.get(key)
         if r and _finite(r.get("power")) and _finite(cfg.get("power_nom")):
             dp = r["power"] - cfg["power_nom"]
-            steps = round(dp / 0.5)
+            steps = round(dp)
             out.append(("Output power", f"{dp:+.2f} dB vs nominal",
-                        f"Change the ADRF5730 setting by {steps:+d} steps ({steps * 0.5:+.1f} dB) to reach "
-                        f"{cfg['power_nom']:.1f} dBm (code now {cfg.get('att_code', 0)} → {cfg.get('att_code', 0) + steps})."))
+                        f"Change Atten_EIRP by {steps:+d} dB to reach {cfg['power_nom']:.1f} dBm (now "
+                        f"{cfg.get('att_code', 0)} dB → {max(0, min(ATT_MAX, cfg.get('att_code', 0) + steps))} dB)."))
             break
     a = res.get("att")
     if a and "bits" in a:
         bad = [b for b in a["bits"] if b["state"] != "ok"]
         if bad:
-            out.append(("Attenuator calibration table", ", ".join(f"bit{b['bit']} {b['measured']:.2f} dB" for b in bad),
+            out.append(("Attenuator calibration table", ", ".join(f"{b['nominal']:g} dB step = {b['measured']:.2f} dB" for b in bad),
                         "Use the measured bit weights for a code→dB table, or replace the ADRF5730 if a bit has no effect."))
     return out
 
@@ -509,9 +512,40 @@ def check_telemetry(tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
     return out
 
 
+def check_config(c: dict | None, cfg: dict, lim: dict) -> list[Finding]:
+    """Stored BOS configuration (ИОК_КОНФИГ, bos_protocol.decode_config) vs. what the test expects."""
+    out = []
+    if not c:
+        return out
+    if not c.get("crc_ok"):
+        out.append(Finding("warn", "ИОК_КОНФИГ checksum does not match",
+                           f"Stored 0x{c['Checksum']:04X}, calculated 0x{c['crc_calc']:04X}: the configuration in "
+                           f"flash may be corrupt - the BOS would then start with its default settings.",
+                           {"FPGA": 0.3}, ["Re-send МД_КОНФИГ and save it (SAVE_CONFIG_NEW)"], "config"))
+    if bool(c["Sour_10MHz"]) != bool(cfg.get("ext_ref", False)):
+        out.append(Finding("warn", f"10 MHz source in КОНФИГ is {'external' if c['Sour_10MHz'] else 'internal'}",
+                           f"The test expects the {'external' if cfg.get('ext_ref') else 'internal'} reference "
+                           f"('External 10 MHz expected' setting). A wrong stored setting is not a hardware fault.",
+                           {"REF": 0.2}, ["Set the source with SET_Sour_10MHz (0x02) and save the КОНФИГ"], "config"))
+    if c["Ttlm_dop_FB"] == 0:
+        out.append(Finding("info", "ИОК_ДОП is disabled in the stored КОНФИГ",
+                           "Ttlm_dop_FB = 0 (factory default): PLL / JESD / rail telemetry only arrives after "
+                           "SET_Period_TM. The station enables it for the test.", {}, [], "config"))
+    if c["Time_SNR"] and c["Time_SNR"] < 60:
+        out.append(Finding("info", f"Session limit Time_SNR = {c['Time_SNR']} s",
+                           "The BOS ends every session after this time; the station re-starts the session before "
+                           "each capture.", {}, [], "config"))
+    for k in ("Temp_Max_DT1", "Temp_Max_DT2", "Temp_Max_DT3"):
+        if c[k] > lim.get("temp_max", 70) + 10:
+            out.append(Finding("info", f"{k} = {c[k]} °C", "Over-temperature shutdown threshold is higher than the "
+                               "test limit.", {}, [], "config"))
+    return out
+
+
 def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
     """res: {"cw": .., "mod_BPSK": .., "mod_OQPSK": .., "att": .., "harm": .., "supply": .., "drift": ..}."""
     F = list(check_telemetry(tlm, cfg, lim))
+    F += check_config(res.get("config"), cfg, lim)
     tlm_ok = bool(tlm) and tlm.get("age_dop") is not None and \
         all(tlm.get(k) != 0 for k in ("pll_lmk", "pll_lmx (DAC)", "pll_lmx (mod)", "pll_jesd", "pll_all", "jesd_err"))
     lo_unlocked = bool(tlm) and tlm.get("pll_lmx (mod)") == 0
@@ -527,6 +561,8 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                          "None of the captures shows a signal above the FSW noise floor"
                          + (" although all PLLs are locked and JESD is OK." if tlm_ok else "."),
                          sus, ["Check Mode / Mode_SNR telemetry: is the BOS really transmitting?",
+                               "Protocol control: the session ends without a valid target designation (3 s) "
+                               "or after Time_SNR - check the keep-alive option and the acknowledgements in the log",
                                "Check the RF cable and the FSW centre frequency",
                                "Check the PA supply current (drain current rises with RF on)",
                                "Check ADMV1013 enable and LO drive", "Check that the attenuator is not at 31.5 dB"],
@@ -738,13 +774,13 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
     elif a and "bits" in a:
         for b in a["bits"]:
             if b["state"] == "no effect (stuck / not driven)":
-                F.append(Finding("fail", f"ADRF5730 bit {b['bit']} ({b['nominal']:g} dB) has no effect",
+                F.append(Finding("fail", f"Attenuator {b['nominal']:g} dB step has no effect",
                                  f"Measured weight {b['measured']:.2f} dB.",
                                  {"ATT": 0.75, "FPGA": 0.25},
-                                 [f"Check the control line D{b['bit']} from the FPGA (or the SPI word)",
+                                 [f"Check the ADRF5730 control line(s) for the {b['nominal']:g} dB step from the FPGA",
                                   "Check the ADRF5730 soldering / replace"], "attenuator"))
             elif b["state"] == "weight error":
-                F.append(Finding("warn", f"ADRF5730 bit {b['bit']} weight {b['measured']:.2f} dB (nominal {b['nominal']:g})",
+                F.append(Finding("warn", f"Attenuator {b['nominal']:g} dB step measures {b['measured']:.2f} dB",
                                  f"Error {b['error']:+.2f} dB.", {"ATT": 0.6, "OUT": 0.2, "PA": 0.2},
                                  ["Use a calibration table, or check for compression at low attenuation"], "attenuator"))
 
@@ -808,7 +844,7 @@ FAULTS = [  # key, label, default magnitude, unit
     ("pn", "Excess phase noise", 6.0, "deg"),
     ("comp", "PA compression (backoff)", 0.5, "dB"),
     ("gain_low", "Low PA gain", 6.0, "dB"),
-    ("att_bit", "ADRF5730 bit stuck", 3, "bit"),
+    ("att_bit", "Attenuator bit stuck (Atten_EIRP)", 3, "bit"),
     ("no_rf", "No RF output", 1, ""),
     ("wrong_mod", "Wrong modulation (QPSK sent)", 1, ""),
     ("spur", "Synthesizer spur", -32.0, "dBc"),
@@ -828,18 +864,74 @@ class BosSimulator:
         self.faults: dict = {}
         self.rng = np.random.default_rng()
         self.t0 = 0.0
+        self.freq = None                  # carrier set by the last session command (protocol mode)
+        self.angle_t = None               # last target designation (protocol mode)
+        self.sr_t = 0.0
+        self.time_snr = 30
+        self.protocol = False             # True once driven by protocol commands (designation required)
 
     def att_db(self):
-        code = self.att_code
+        code = min(ATT_MAX, self.att_code)
         if "att_bit" in self.faults:
             code &= ~(1 << int(self.faults["att_bit"]))
         return sum(w for b, w in enumerate(ATT_BITS) if code >> b & 1)
 
+    # ---- protocol (bos_protocol): the simulated unit executes the real command frames
+    def handle(self, code, data, mapping):
+        """Execute a command; returns True (КВ+) / False (КВ-)."""
+        import bos_protocol as bp
+        if code not in bp.COMMANDS:
+            return False
+        if code == 0x01:
+            self.mode = "off"
+        elif code == 0x04:
+            self.time_snr = data[0]
+        elif code == 0x0C:
+            self.angle_t = time.monotonic()
+        elif code in bp.SR_COMMANDS:
+            p = bp.parse_session(data)
+            self.att_code = p["atten_db"]
+            self.freq = bp.freq_hz(p["freq_n"])
+            self.sr_t = time.monotonic()
+            self.protocol = True
+            self.mode = "cw" if code == 0xA0 else mapping.get(code, "OQPSK")
+        return True
+
+    def _session_alive(self):
+        """The real BOS ends the session without valid target designation (3 s) or after Time_SNR."""
+        if self.mode == "off" or not self.protocol:
+            return True
+        now = time.monotonic()
+        if self.angle_t is None or now - self.angle_t > 3.0 or (self.time_snr and now - self.sr_t > self.time_snr):
+            self.mode = "off"
+            return False
+        return True
+
+    def config(self):
+        """136-byte КОНФИГ as the simulated unit would report it (with CRC)."""
+        import bos_protocol as bp
+        c = bytearray(136)
+        c[2] = 0x80 | 0x40 | 0x20                     # user config, external 10 MHz, randomisation
+        c[3] = 0xE0
+        c[4] = self.time_snr or 30
+        c[5], c[6] = 0x4B, 0x04
+        c[7:9] = (0x0300).to_bytes(2, "little")
+        c[9:13] = (0xC6DFA688).to_bytes(4, "little")
+        c[13:17] = (1).to_bytes(4, "little")
+        c[17:21] = (0x8805).to_bytes(4, "little")
+        c[49:53] = c[53:57] = (1).to_bytes(4, "little")
+        c[57:61], c[61:65] = (0x800043).to_bytes(4, "little"), (0x400004).to_bytes(4, "little")
+        c[121], c[122], c[123], c[124] = 1, 1, 1, 0
+        c[125] = c[126] = c[127] = 70
+        c[134:136] = bp.crc16(bytes(c[:134])).to_bytes(2, "little")
+        return bytes(c)
+
     def power_dbm(self):
+        self._session_alive()
         if self.mode == "off" or "no_rf" in self.faults:
             return -200.0
         att = self.att_db()
-        p = self.cfg.get("power_nom", 10.0) + 0.5 * self.cfg.get("att_code", 0) - att
+        p = self.cfg.get("power_nom", 10.0) + self.cfg.get("att_code", 0) - att
         p -= self.faults.get("gain_low", 0.0)
         return p - self.cfg.get("loss_db", 0.0)
 
@@ -853,7 +945,8 @@ class BosSimulator:
         if p < -150:
             return noise
         ppm = self.faults.get("ref_ppm", 0.0) + self.rng.normal(0, 0.02)
-        cfe = cfg["carrier"] * ppm * 1e-6 + self.faults.get("lo_hz", 0.0) + (cfg["carrier"] - center)
+        f_set = self.freq or cfg["carrier"]
+        cfe = f_set * ppm * 1e-6 + self.faults.get("lo_hz", 0.0) + (f_set - center)
         if "lo_unlock" in self.faults:
             cfe += rng.uniform(-3e5, 3e5)
         clk = ppm + self.faults.get("clk_ppm", 0.0)
@@ -882,7 +975,7 @@ class BosSimulator:
             s = s + 10 ** (self.faults["leak"] / 20) * math.sqrt(np.mean(np.abs(s) ** 2))
         if "comp" in self.faults:                           # Rapp PA model, smoothness 2
             a = np.abs(s)
-            backoff = self.faults["comp"] + self.att_db() - 0.5 * self.cfg.get("att_code", 0)   # ATT is before the PA
+            backoff = self.faults["comp"] + self.att_db() - self.cfg.get("att_code", 0)   # ATT is before the PA
             sat = 10 ** (backoff / 20) * math.sqrt(np.mean(a ** 2))
             s = s / (1 + (a / sat) ** 4) ** 0.25
         t = np.arange(n) / fs

@@ -203,9 +203,17 @@ Each finding lists suspect blocks with weights and concrete next steps. The rule
 are not proof. Click a block in the diagram to see only its findings.
 
 ### How is the unit switched between modes?
-*Unit control*: pick a command from the CAN library (CAN tab) for RF off, carrier, BPSK and OQPSK. The attenuator
-can use a CAN template (ID + data with `XX` = code). Anything not mapped is asked from the operator in a dialog
-(semi-automatic test). *Settle time* is waited after every change.
+By default the station talks the BOS protocol itself (*Unit control* → *BOS protocol*): standby `MODE_D` (0x01),
+carrier `Send_Carrier` (0xA0) and the session commands 0xA1…0xA4 with frequency code N, Atten_EIRP (1 dB, 0…20 dB),
+rate and polynomials; every command asks for an acknowledgement and a КВ- or a missing acknowledgement stops the
+test with the reason. Choose which session command produces BPSK and which OQPSK, and the frequency code N
+(37650 + 0.125·N MHz; the carrier on *Unit / signal* follows it). Before a plan the station runs *Control link &
+BOS setup*: NOP, standby, SET_Time_SNR (default 255 s), telemetry periods (ИОК_ДОП is off by default!) and reads
+ИОК_КОНФИГ (CRC-16 checked). While transmitting it sends a target designation (0°, 0°) every 0.5 s — the BOS only
+transmits with a valid designation (valid 3 s) — and re-starts the session before captures so Time_SNR never ends
+it. At the end the unit is put back into standby.
+If the BOS answers КВ-, the sender address may not be allowed for that command: try ВМ 1 (0x20) instead of
+КПА ИВУ (0x18). The alternatives *CAN library* and *Ask the operator* remain for special set-ups.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
