@@ -263,6 +263,7 @@ def decode_ur(sym, scid=None) -> dict:
         fr = {"pos": int(p), "rs": corr, "rs_ok": not bad, "asm_err": int(np.sum(
             bits[p:p + 32] != bytes_to_bits(ASM_UR.to_bytes(4, "big"))))}
         fr.update(parse_tf(tf))
+        fr["tf"] = tf
         if not bad:                                        # channel BER: received vs re-encoded
             ref = bytes_to_bits(code_block(tf))
             e = int(np.sum(ref != bits[p + 32:p + nb]))

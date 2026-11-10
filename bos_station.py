@@ -575,6 +575,7 @@ class BosStation(QtWidgets.QWidget):
         self.tabs.addTab(self._build_results(), "Measurements")
         self.tabs.addTab(self._build_signal_view(), "Signal")
         self.tabs.addTab(self._build_att_view(), "Attenuator")
+        self.tabs.addTab(self._build_frames_view(), "Frames")
         self.tabs.addTab(self._build_tlm_view(), "BOS telemetry")
         self.tabs.addTab(self._build_corr_view(), "Corrections")
         self.tabs.addTab(self._build_history(), "History")
@@ -1002,6 +1003,125 @@ class BosStation(QtWidgets.QWidget):
         b.clicked.connect(self._copy_corr)
         v.addWidget(b, 0, QtCore.Qt.AlignLeft)
         return w
+
+    def _build_frames_view(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(2, 2, 2, 2)
+        h = QtWidgets.QHBoxLayout()
+        self.fr_info = QtWidgets.QLabel("No decoded frames yet - run a BPSK / ШР test or analyze an I/Q file.")
+        h.addWidget(self.fr_info, 1)
+        self.fr_hide_idle = QtWidgets.QCheckBox("Hide idle frames")
+        self.fr_hide_idle.toggled.connect(lambda *_: self._fill_frames())
+        h.addWidget(self.fr_hide_idle)
+        for txt, fn in (("Save selected (.bin)", self._save_frames_bin), ("Save list (.csv)", self._save_frames_csv)):
+            b = QtWidgets.QPushButton(txt)
+            b.clicked.connect(fn)
+            h.addWidget(b)
+        v.addLayout(h)
+        sp = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.fr_table = QtWidgets.QTableWidget(0, 11)
+        self.fr_table.setHorizontalHeaderLabels(["#", "Source", "SCID", "VC", "MC cnt", "VC cnt", "Type", "RS corr.",
+                                                 "CRC", "Bit err.", "Content"])
+        self.fr_table.verticalHeader().hide()
+        self.fr_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.fr_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.fr_table.horizontalHeader().setStretchLastSection(True)
+        self.fr_table.currentCellChanged.connect(lambda r, *_: self._show_frame(r))
+        sp.addWidget(self.fr_table)
+        self.fr_hex = QtWidgets.QPlainTextEdit()
+        self.fr_hex.setReadOnly(True)
+        self.fr_hex.setFont(_mono())
+        self.fr_hex.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        sp.addWidget(self.fr_hex)
+        sp.setSizes([300, 400])
+        v.addWidget(sp, 1)
+        self._frames = []
+        return w
+
+    def _collect_frames(self):
+        out = []
+        for label, r in self.res.get("_caps", []):
+            d = (r.get("decode") if isinstance(r, dict) else None) or (r.get("shr") if isinstance(r, dict) else None)
+            for f in (d or {}).get("frames", []):
+                if f.get("tf"):
+                    out.append((label, f))
+        seen = {id(f) for _, f in out}
+        for key, label in (("shr", "ШР"), ("ber", "BER test")):
+            for f in (self.res.get(key) or {}).get("frames", []):
+                if f.get("tf") and id(f) not in seen:
+                    out.append((label, f))
+        return out
+
+    def _fill_frames(self):
+        allf = self._collect_frames()
+        fr = [x for x in allf if not (self.fr_hide_idle.isChecked() and x[1].get("idle"))]
+        self._frames = fr
+        tb = self.fr_table
+        tb.setRowCount(len(fr))
+        for i, (src, f) in enumerate(fr):
+            rs = f.get("rs")
+            rs_txt = "fail" if f.get("rs_ok") is False else (str(sum(n for n in rs if n > 0)) if rs else "turbo")
+            cont = {True: "ok", False: "DIFFERS"}.get(f.get("idle_content_ok"), "—" if f.get("idle") else "data")
+            vals = (i + 1, src, f.get("scid"), f.get("vcid"), f.get("mcfc"), f.get("vcfc"),
+                    "idle" if f.get("idle") else "data", rs_txt, "ok" if f.get("crc_ok") else "BAD",
+                    f.get("raw_bit_err", "—"), cont)
+            for c, v in enumerate(vals):
+                it = QtWidgets.QTableWidgetItem(str(v))
+                if (c == 8 and not f.get("crc_ok")) or (c == 7 and rs_txt == "fail") or (c == 10 and cont == "DIFFERS"):
+                    it.setForeground(QtGui.QColor(C_FAIL))
+                tb.setItem(i, c, it)
+        tb.resizeColumnsToContents()
+        n_idle = sum(1 for _, f in allf if f.get("idle"))
+        self.fr_info.setText(f"{len(allf)} frame(s) decoded ({n_idle} idle, {len(allf) - n_idle} data). "
+                             "Select a frame to see its 1115 bytes." if allf else
+                             "No decoded frames yet - run a BPSK / ШР test or analyze an I/Q file.")
+        if fr:
+            tb.selectRow(0)
+            self._show_frame(0)
+        else:
+            self.fr_hex.clear()
+
+    def _show_frame(self, row):
+        if not 0 <= row < len(self._frames):
+            return
+        src, f = self._frames[row]
+        tf = f["tf"]
+        hdr = (f"{src}   SCID {f.get('scid')}  VCID {f.get('vcid')}  OCF {f.get('ocf')}  MC count {f.get('mcfc')}  "
+               f"VC count {f.get('vcfc')}  first header pointer 0x{f.get('fhp', 0):03X}"
+               f" ({'idle frame' if f.get('idle') else 'data'})   CRC {'ok' if f.get('crc_ok') else 'BAD'}\n"
+               f"bytes 0-5 primary header, 6-17 secondary / CLCW, 18-1112 data field, 1113-1114 CRC\n\n")
+        lines = []
+        for o in range(0, len(tf), 16):
+            chunk = tf[o:o + 16]
+            hx = " ".join(f"{b:02X}" for b in chunk)
+            asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            lines.append(f"{o:04d}  {hx:<47}  {asc}")
+        self.fr_hex.setPlainText(hdr + "\n".join(lines))
+
+    def _save_frames_bin(self):
+        rows = sorted({i.row() for i in self.fr_table.selectedIndexes()}) or range(len(self._frames))
+        if not self._frames:
+            return
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save frames", "bos_frames.bin", "Binary (*.bin)")
+        if p:
+            with open(p, "wb") as fh:
+                for r in rows:
+                    fh.write(self._frames[r][1]["tf"])
+            self.log(f"BOS station: {len(rows)} frame(s) × 1115 bytes saved to {p}")
+
+    def _save_frames_csv(self):
+        if not self._frames:
+            return
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save frame list", "bos_frames.csv", "CSV (*.csv)")
+        if p:
+            with open(p, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(["n", "source", "scid", "vcid", "mcfc", "vcfc", "idle", "crc_ok", "rs", "bit_err", "hex"])
+                for i, (src, f) in enumerate(self._frames):
+                    w.writerow([i + 1, src, f.get("scid"), f.get("vcid"), f.get("mcfc"), f.get("vcfc"), f.get("idle"),
+                                f.get("crc_ok"), f.get("rs"), f.get("raw_bit_err"), f["tf"].hex()])
+            self.log(f"BOS station: frame list saved to {p}")
 
     def _build_history(self):
         w = QtWidgets.QWidget()
@@ -2399,6 +2519,8 @@ class BosStation(QtWidgets.QWidget):
         self.diagram.set_scores(ba.suspicion(self.findings))
         self._filter_findings(self.diagram.selected)
         self._show_corrections()
+        if hasattr(self, "fr_table"):
+            self._fill_frames()
 
     def _filter_findings(self, block):
         self.find_list.clear()

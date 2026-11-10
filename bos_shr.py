@@ -462,6 +462,7 @@ def decode_shr(chips, rate_kbps, preamble=PREAMBLE, max_cbd=4, turbo_iters=8) ->
         tf = bd.bits_to_bytes(info)
         fr = {"asm_err": asm_err}
         fr.update(bd.parse_tf(tf))
+        fr["tf"] = tf
         ref = turbo_encode(info)
         e = int(np.sum(ref != (code_soft < 0)))
         fr["raw_bit_err"] = e
