@@ -113,9 +113,9 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 * Telemetry layouts still missing (user will send tables): **BOS IOK CONFIG (0xFA) and IOK ARCHIVE
   (0xF9)**, **AFAR IOK CONFIG (0xFA) and IOK FV (0xFB)**. Questions left open earlier: AFAR page
   numbers, BOS DOP length (table says 16 B, unit sends 28 → 32), BOS OSN bytes 65–72.
-* BOS protocol (bos_protocol.py, from ПИЛВ 0102-004): confirm on the unit which session command gives BPSK and
-  which OQPSK (defaults 0xA1 УР and 0xA4 ШР КБД), the allowed sender address (default КПА ИВУ 0x18), the symbol
-  rate per Rate / coding, and the bit order of the 11-bit N field (byte 3 bits 7-5 = low bits assumed, like Freq).
+* BOS protocol (bos_protocol.py, from ПИЛВ 0102-004). Confirmed by the user: УР = BPSK (symbol rate
+  2 × data rate), ШР = OQPSK (always 131.072 Msym/s). Still to confirm on the unit: the allowed sender address
+  (default КПА ИВУ 0x18), the FSW I/Q bandwidth for 131 Msym/s (~180 MHz needed at 4 samples/symbol), and the bit order of the 11-bit N field (byte 3 bits 7-5 = low bits assumed, like Freq).
   Confirm the DAC38J82 QMC register scaling
   (gain / phase / offset LSB factors on the Unit / signal page) against the datasheet; set real limits.
 * BOS station on the real FSW: verify capture levels (auto level) and the cable loss; validate the diagnosis
