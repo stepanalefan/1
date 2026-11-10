@@ -935,8 +935,9 @@ class BosSimulator:
         p -= self.faults.get("gain_low", 0.0)
         return p - self.cfg.get("loss_db", 0.0)
 
-    def capture(self, center, fs, n):
+    def capture(self, center, fs, n, sr=None):
         cfg = self.cfg
+        sr = sr or cfg.get("symbol_rate") or cfg.get("sr_oqpsk", 1e6)
         rng = self.rng
         noise_dbm = -95.0 + 10 * math.log10(fs / 1e6)          # FSW noise in the capture bandwidth
         nv = math.sqrt(10 ** (noise_dbm / 10) * 1e-3 * iq_demod.R_LOAD / 2)
@@ -956,9 +957,8 @@ class BosSimulator:
             s = np.ones(n, complex)
         else:
             mod = "QPSK" if "wrong_mod" in self.faults else self.mode
-            sps_true = fs / cfg["symbol_rate"]
-            sps = int(round(sps_true))
-            s = iq_demod.simulate(mod, cfg["symbol_rate"], sps, n // sps + 1, snr_db=80, cfo=0.0,
+            sps = int(round(fs / sr))
+            s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0,
                                   alpha=cfg["alpha"], clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
             if len(s) < n:
                 s = np.r_[s, np.zeros(n - len(s))]
@@ -986,7 +986,7 @@ class BosSimulator:
         walk = walk / (np.std(walk) or 1) * math.radians(pn_deg)
         s = s * np.exp(1j * (ph + walk + rng.random() * 6.28))
         if "spur" in self.faults:
-            s = s + 10 ** (self.faults["spur"] / 20) * np.exp(2j * np.pi * (cfe + 1.37 * cfg["symbol_rate"]) * t)
+            s = s + 10 ** (self.faults["spur"] / 20) * np.exp(2j * np.pi * (cfe + 1.37 * sr) * t)
         s = s / math.sqrt(np.mean(np.abs(s) ** 2)) * math.sqrt(10 ** (p / 10) * 1e-3 * iq_demod.R_LOAD)
         return s + noise
 

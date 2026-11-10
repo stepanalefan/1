@@ -215,6 +215,13 @@ it. At the end the unit is put back into standby.
 If the BOS answers КВ-, the sender address may not be allowed for that command: try ВМ 1 (0x20) instead of
 КПА ИВУ (0x18). The alternatives *CAN library* and *Ask the operator* remain for special set-ups.
 
+### Which symbol rates are used?
+BPSK is the narrowband mode (УР): symbol rate = 2 × data rate (32 kbit/s → 64 ksym/s, 128 kbit/s → 256 ksym/s).
+OQPSK is the wideband mode (ШР): always 131.072 Msym/s, whatever the data rate. With protocol control both follow
+the УР / ШР rates on *Unit control*. The OQPSK capture uses 4 samples/symbol = 524.288 MS/s, so the FSW needs an
+I/Q bandwidth of about 180 MHz or more (bandwidth extension option); with less, set 2 samples/symbol (ACLR is then
+not measurable and shown as n/a).
+
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
 **cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply

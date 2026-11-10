@@ -67,9 +67,13 @@ SEV_ICON = {"fail": "✖", "warn": "▲", "info": "ℹ", "ok": "✔"}
 CFG_FIELDS = [
     ("carrier", "Carrier frequency", "f", 37.75e9, "GHz", "RF output frequency of the BOS "
      "(with protocol control: 37650 + 0.125·N MHz from the frequency code on the Unit control page)"),
-    ("symbol_rate", "Symbol rate", "f", 10e6, "Msym/s", "Symbol rate of BPSK / OQPSK"),
+    ("sr_bpsk", "Symbol rate BPSK (УР)", "f", 64e3, "kHz", "УР: 2 × data rate (e.g. 32 kbit/s -> 64 ksym/s). "
+     "With protocol control it follows the УР rate on the Unit control page"),
+    ("sr_oqpsk", "Symbol rate OQPSK (ШР)", "f", 131.072e6, "Msym/s", "ШР: always 131.072 Msym/s, for every data rate"),
     ("alpha", "RRC roll-off", "f", 0.35, "", "Roll-off of the pulse shaping filter in the FPGA"),
-    ("sps", "Capture samples / symbol", "i", 8, "", "FSW I/Q sample rate = symbol rate × this (4…16)"),
+    ("sps_bpsk", "Samples / symbol BPSK", "i", 8, "", "FSW I/Q sample rate = symbol rate × this (2…16)"),
+    ("sps_oqpsk", "Samples / symbol OQPSK", "i", 4, "", "131.072 Msym/s × 4 = 524.288 MS/s: the FSW needs an I/Q "
+     "bandwidth of at least ~180 MHz (B320 / B512 option). 2 = 262 MS/s, no ACLR"),
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
     ("power_nom", "Nominal output power", "f", 10.0, "dBm", "Expected power at the BOS output with the nominal attenuator code"),
@@ -90,6 +94,7 @@ CFG_FIELDS = [
     ("dac_offset_lsb_per_rms", "QMC offset LSB per RMS", "f", 8192, "", "DAC codes per RMS symbol amplitude"),
 ]
 UNITS = {"GHz": 1e9, "MHz": 1e6, "Msym/s": 1e6, "kHz": 1e3}
+SHR_SYMBOL_RATE = 131.072e6       # ШР (OQPSK): fixed for every data rate; УР (BPSK): 2 × data rate
 
 LIM_FIELDS = [  # key, label, default, unit
     ("mer_min", "MER min", 20.0, "dB"),
@@ -319,7 +324,7 @@ class BosStation(QtWidgets.QWidget):
         self.host = host
         self.data = {"cfg": {k: d for k, _, _, d, _, _ in CFG_FIELDS},
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
-                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS", "freq_n": 800, "rate": 0,
+                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS", "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
                              "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
                              "tm_enable": True,
                              "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS",
@@ -555,12 +560,13 @@ class BosStation(QtWidgets.QWidget):
                     cb.addItem(f"0x{code:02X}  {name}", code)
             cb.setCurrentIndex(max(0, cb.findData(self.ctl.get(key))))
             cb.setToolTip("Session command whose signal has this modulation")
-        self.p_rate = QtWidgets.QComboBox()
-        for k, kb in bp.RATES.items():
-            self.p_rate.addItem(f"{kb} kbit/s", k)
-        self.p_rate.setCurrentIndex(max(0, self.p_rate.findData(self.ctl.get("rate", 0))))
-        self.p_rate.setToolTip("Channel data rate of the session commands (Rate field). The symbol rate on the\n"
-                               "'Unit / signal' page must match the rate, coding and modulation.")
+        self.p_rate_ur, self.p_rate_shr = QtWidgets.QComboBox(), QtWidgets.QComboBox()
+        for cb, key, rates in ((self.p_rate_ur, "rate_ur", range(0, 6)), (self.p_rate_shr, "rate_shr", range(1, 8))):
+            for k in rates:
+                cb.addItem(f"{bp.RATES[k]} kbit/s", k)
+            cb.setCurrentIndex(max(0, cb.findData(self.ctl.get(key, 2))))
+        self.p_rate_ur.setToolTip("УР (BPSK) data rate; symbol rate = 2 × data rate (set automatically)")
+        self.p_rate_shr.setToolTip("ШР (OQPSK) data rate; the symbol rate stays 131.072 Msym/s")
         self.p_tsnr = QtWidgets.QSpinBox()
         self.p_tsnr.setRange(0, 255)
         self.p_tsnr.setSuffix(" s")
@@ -574,7 +580,7 @@ class BosStation(QtWidgets.QWidget):
                                "(Angle_ErdStation_BKU, valid for 3 s)")
         self.p_tm = QtWidgets.QCheckBox("Enable ИОК_ДОП / ОСН / СОСТОЯНИЕ and read ИОК_КОНФИГ")
         self.p_tm.setChecked(bool(self.ctl.get("tm_enable", True)))
-        for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate):
+        for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate_ur, self.p_rate_shr):
             wd.currentIndexChanged.connect(lambda *_: self._collect())
         for wd in (self.p_freq, self.p_tsnr):
             wd.valueChanged.connect(lambda *_: self._collect())
@@ -587,7 +593,8 @@ class BosStation(QtWidgets.QWidget):
         f.addRow("", self.p_freq_lbl)
         f.addRow("BPSK signal from", self.p_bpsk)
         f.addRow("OQPSK signal from", self.p_oqpsk)
-        f.addRow("Data rate", self.p_rate)
+        f.addRow("УР (BPSK) rate", self.p_rate_ur)
+        f.addRow("ШР (OQPSK) rate", self.p_rate_shr)
         f.addRow("Session limit", self.p_tsnr)
         f.addRow(self.p_keep)
         f.addRow(self.p_tm)
@@ -668,12 +675,22 @@ class BosStation(QtWidgets.QWidget):
         n = int(self.ctl.get("freq_n", 800))
         if hasattr(self, "p_freq_lbl"):
             self.p_freq_lbl.setText(f"= {bp.freq_hz(n) / 1e9:.6f} GHz")
-        if self.ctl.get("method") == "protocol" and "carrier" in getattr(self, "cfg_w", {}):
+        proto = self.ctl.get("method") == "protocol"
+        if proto and "carrier" in getattr(self, "cfg_w", {}):
             self.cfg["carrier"] = bp.freq_hz(n)
-            wdg, _, sc = self.cfg_w["carrier"]
-            wdg.blockSignals(True)
-            wdg.setValue(self.cfg["carrier"] / sc)
-            wdg.blockSignals(False)
+            # BPSK = УР: 2 × data rate; OQPSK = ШР: 131.072 Msym/s
+            ur = self.ctl.get("bpsk_cmd", 0xA1) == 0xA1
+            if ur:
+                self.cfg["sr_bpsk"] = 2e3 * bp.RATES[int(self.ctl.get("rate_ur", 2))]
+            self.cfg["sr_oqpsk"] = SHR_SYMBOL_RATE
+            for key in ("carrier", "sr_bpsk", "sr_oqpsk"):
+                wdg, _, sc = self.cfg_w[key]
+                wdg.blockSignals(True)
+                wdg.setValue(self.cfg[key] / sc)
+                wdg.blockSignals(False)
+        for key in ("sr_bpsk", "sr_oqpsk"):
+            if key in getattr(self, "cfg_w", {}):
+                self.cfg_w[key][0].setEnabled(not proto)
 
     def _build_sim(self):
         w = QtWidgets.QWidget()
@@ -940,7 +957,8 @@ class BosStation(QtWidgets.QWidget):
             self.ctl.update(method=self.method.currentData(), sender=self.p_sender.currentData(),
                             line=self.p_line.text().strip() or "BOS", freq_n=self.p_freq.value(),
                             bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
-                            rate=self.p_rate.currentData(), time_snr=self.p_tsnr.value(),
+                            rate_ur=self.p_rate_ur.currentData(), rate_shr=self.p_rate_shr.currentData(),
+                            time_snr=self.p_tsnr.value(),
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
             self._sync_carrier()
         if hasattr(self, "supply_cb"):
@@ -1395,7 +1413,8 @@ class BosStation(QtWidgets.QWidget):
             return
         code = {"cw": 0xA0, "bpsk": self.ctl.get("bpsk_cmd", 0xA1), "oqpsk": self.ctl.get("oqpsk_cmd", 0xA4)}[self.cur_mode]
         data = bp.p_session(code, int(self.ctl.get("freq_n", 800)), min(bp.ATTEN_MAX_DB, self.cur_att),
-                            coding=0, continuous=True, rate=int(self.ctl.get("rate", 0)), count=2047,
+                            coding=0, continuous=True, count=2047,
+                            rate=int(self.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2)),
                             reg=5 if code == 0xA1 else 1)
         self._keepalive()                                   # valid target designation before the session
         yield from self._proto(code, data, f"{bp.COMMANDS[code][0]} (N={self.ctl.get('freq_n')}, "
@@ -1496,7 +1515,7 @@ class BosStation(QtWidgets.QWidget):
                 return
         yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000)
 
-    def _capture(self, what, center, fs, n, analyze, label):
+    def _capture(self, what, center, fs, n, analyze, label, sr=None):
         """Submit capture + analysis to the FSW worker; returns the analysis dict."""
         cfg = dict(self.cfg)
         sim = self.sim
@@ -1508,7 +1527,7 @@ class BosStation(QtWidgets.QWidget):
                 raise RuntimeError("FSW not connected")
             if demo:
                 time.sleep(0.05)
-                x, fs_real, errs = sim.capture(center, fs, n), fs, []
+                x, fs_real, errs = sim.capture(center, fs, n, sr), fs, []
             else:
                 x, fs_real, errs = fsw_capture(dev, center, fs, n, cfg["autolevel"], cfg["ref_level"])
             r = analyze(x, fs_real)
@@ -1527,12 +1546,18 @@ class BosStation(QtWidgets.QWidget):
             self.log(f"BOS station: FSW: {e}", "warn")
         return r
 
+    def _mcfg(self, mod):
+        """Settings for one modulation: its symbol rate and samples per symbol."""
+        k = "bpsk" if mod == "BPSK" else "oqpsk"
+        return dict(self.cfg, symbol_rate=self.cfg[f"sr_{k}"], sps=self.cfg[f"sps_{k}"])
+
     def _mod_capture(self, mod, label=None):
-        c = self.cfg
+        c = self._mcfg(mod)
         fs = c["symbol_rate"] * c["sps"]
         n = int(c["nsym"] * c["sps"])
         r = yield from self._capture("mod", c["carrier"], fs, n,
-                                     lambda x, f: ba.analyze_modulated(x, f, c, mod), label or mod)
+                                     lambda x, f: ba.analyze_modulated(x, f, c, mod), label or mod,
+                                     sr=c["symbol_rate"])
         return r
 
     def _supply_current(self):
@@ -1650,10 +1675,11 @@ class BosStation(QtWidgets.QWidget):
         self._row(T, "MER after I/Q correction", r["mer_corr"], "dB", "", "INFO")
         self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"])
         sp = r["spectrum"]
-        self._lim_row(T, "ACLR (worst side)", sp["aclr"], "dB", L["aclr_min"], None, "{:.1f}")
+        self._lim_row(T, "ACLR (worst side)", sp["aclr"], "dB", L["aclr_min"], None, "{:.1f}",
+                      none_ok="n/a (capture narrower than 3 channels)")
         self._lim_row(T, "Occupied bandwidth 99 %", sp["obw"] / 1e6, "MHz",
-                      0.85 * self.cfg["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6,
-                      1.15 * self.cfg["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6, "{:.3f}")
+                      0.85 * self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6,
+                      1.15 * self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6, "{:.3f}")
         self._lim_row(T, "Spectrum asymmetry", sp["asym_db"], "dB", -L["asym_max_db"], L["asym_max_db"], "{:+.2f}")
         self._lim_row(T, "Largest spur", sp["spur_max_dbc"], "dBc", None, L["spur_max_dbc"], "{:.1f}", none_ok=True)
 
@@ -1820,7 +1846,8 @@ class BosStation(QtWidgets.QWidget):
         else:
             lt = f"≤ {spec.format(hi)}"
         if not _fin(value) and none_ok:
-            self._row(test, name, value, unit, lt, "PASS", spec, text="none found")
+            self._row(test, name, value, unit, lt, "PASS" if none_ok is True else "INFO", spec,
+                      text="none found" if none_ok is True else none_ok)
             return
         if not _fin(value):
             st = "FAIL"
@@ -2062,7 +2089,8 @@ class BosStation(QtWidgets.QWidget):
                 ("Date", _dt.datetime.fromtimestamp(ri["start"]).strftime("%Y-%m-%d %H:%M:%S")),
                 ("Duration", f"{time.time() - ri['start']:.0f} s"), ("Test plan", ri["plan"]),
                 ("Tests", ", ".join(TEST_NAME.get(t, t) for t in ri["tests"])),
-                ("Carrier / symbol rate", f"{self.cfg['carrier'] / 1e9:.6f} GHz / {self.cfg['symbol_rate'] / 1e6:g} Msym/s, "
+                ("Carrier / symbol rates", f"{self.cfg['carrier'] / 1e9:.6f} GHz / BPSK {self.cfg['sr_bpsk'] / 1e3:g} ksym/s, "
+                                           f"OQPSK {self.cfg['sr_oqpsk'] / 1e6:g} Msym/s, "
                                           f"RRC α {self.cfg['alpha']:g}"),
                 ("Nominal power / att. code / cable loss", f"{self.cfg['power_nom']:g} dBm / {self.cfg['att_code']} / "
                                                            f"{self.cfg['loss_db']:g} dB"),
