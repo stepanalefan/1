@@ -218,9 +218,17 @@ If the BOS answers КВ-, the sender address may not be allowed for that command
 ### Which symbol rates are used?
 BPSK is the narrowband mode (УР): symbol rate = 2 × data rate (32 kbit/s → 64 ksym/s, 128 kbit/s → 256 ksym/s).
 OQPSK is the wideband mode (ШР): always 131.072 Msym/s, whatever the data rate. With protocol control both follow
-the УР / ШР rates on *Unit control*. The OQPSK capture uses 4 samples/symbol = 524.288 MS/s, so the FSW needs an
-I/Q bandwidth of about 180 MHz or more (bandwidth extension option); with less, set 2 samples/symbol (ACLR is then
-not measurable and shown as n/a).
+the УР / ШР rates on *Unit control*.
+
+### FSW with 160 MHz or with a bandwidth extension?
+Both work. At the start of every plan the station reads the FSW options (`*OPT?`: B160, B320, B512, B1200 …)
+and sets *FSW I/Q bandwidth* and *OQPSK capture sample rate* (switch off *FSW bandwidth from options* to set
+them by hand). The OQPSK signal occupies about 177 MHz (131.072 MHz × 1.35):
+* **Bandwidth extension (≥ 320 MHz):** captured at 524.288 MS/s = 4 samples/symbol, the whole signal is analysed.
+* **160 MHz:** captured at 200 MS/s and resampled to 4 samples/symbol in the program. The outer edges of the
+  roll-off are cut: MER is still ~38 dB on a perfect signal (far above the limits), the occupied bandwidth is
+  judged against 160 MHz, ACLR is n/a, and PA compression cannot be seen on OQPSK (cutting the band regrows the
+  clipped peaks) — it is judged on BPSK, which uses the same PA, and the PA-linearity test runs on BPSK.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the

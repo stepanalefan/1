@@ -155,14 +155,59 @@ def papr(x, q=99.99):
     return _db(float(np.percentile(pw, q)) / m) if m > 0 else float("nan")
 
 
-def papr_reference(mod, sps, alpha):
-    """PAPR (99.99 %) of an ideal RRC signal with this modulation (cached)."""
-    key = (mod, int(sps), round(float(alpha), 3))
+def papr_reference(mod, sps, alpha, bw_frac=None):
+    """PAPR (99.99 %) of an ideal RRC signal with this modulation (cached), optionally limited to
+    bw_frac × symbol rate (the FSW I/Q bandwidth) like the measured capture."""
+    bl = None if bw_frac is None or bw_frac >= 1 + alpha else round(float(bw_frac), 3)
+    key = (mod, int(sps), round(float(alpha), 3), bl)
     if key not in _PAPR_REF:
         x = iq_demod.simulate(mod, 1e6, int(sps), 6000, snr_db=80, cfo=0, alpha=alpha, delay=0.0, phase=0.0,
                               rng=np.random.default_rng(7))
+        if bl:
+            x = band_limit(x, 1e6 * sps, bl * 1e6)
         _PAPR_REF[key] = papr(x)
     return _PAPR_REF[key]
+
+
+def band_limit(x, fs, bw):
+    """Ideal (brick-wall) low-pass to ±bw/2, like the FSW I/Q bandwidth."""
+    X = np.fft.fft(x)
+    f = np.fft.fftfreq(len(x), 1 / fs)
+    return np.fft.ifft(X * (np.abs(f) <= bw / 2))
+
+
+def resample(x, fs, fs_new):
+    """Band-limited (FFT) resampling to exactly fs_new: the record is shortened so that
+    len × fs_new / fs is an integer. Returns (y, fs_new)."""
+    from fractions import Fraction
+    q = Fraction(fs_new / fs).limit_denominator(1_000_000)
+    n = len(x) // q.denominator * q.denominator
+    if n == 0:
+        raise ValueError("capture too short for resampling")
+    m = n * q.numerator // q.denominator
+    X = np.fft.fft(np.asarray(x[:n], complex))
+    Y = np.zeros(m, complex)
+    h = min(n, m) // 2
+    Y[:h] = X[:h]
+    Y[-h:] = X[-h:]
+    return np.fft.ifft(Y) * (m / n), fs * q.numerator / q.denominator
+
+
+DEMOD_SPS = 4                     # the software demodulator needs ≥ 4 samples/symbol for OQPSK
+
+
+def fsw_bandwidth(options: str):
+    """Widest I/Q analysis bandwidth (Hz) from the FSW *OPT? answer (B28, B40, B80, B160, B320, B512,
+    B1200, B2001, B4001, B8001, also with an R suffix), or None if no bandwidth option is listed."""
+    import re
+    best = None
+    for o in str(options).upper().replace('"', "").split(","):
+        m = re.fullmatch(r"B(28|40|80|160|320|500|512|1200|2001|4001|6001|8001)R?", o.strip())
+        if m:
+            v = int(m.group(1))
+            v = v - 1 if v % 1000 == 1 else v
+            best = max(best or 0, v * 1e6)
+    return best
 
 
 def iq_impairments(z, d):
@@ -192,7 +237,6 @@ def iq_impairments(z, d):
 def analyze_modulated(x, fs, cfg, expected_mod):
     """Full analysis of one modulated capture. cfg: symbol_rate, alpha, carrier, loss_db."""
     sr, alpha = cfg["symbol_rate"], cfg["alpha"]
-    sps = int(round(fs / sr))
     out = {"kind": "mod", "expected": expected_mod, "fs": fs, "nsamp": len(x)}
     pw = float(np.mean(np.abs(x) ** 2)) / iq_demod.R_LOAD
     out["power_raw"] = _db(pw * 1e3)
@@ -205,11 +249,20 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     sd = float(np.mean(p[sig])) if np.any(sig) else 0.0
     out["snr_floor"] = _db(sd / nf) if nf > 0 and sd > 0 else float("nan")
     out["present"] = bool(out["snr_floor"] > 10) if _finite(out["snr_floor"]) else pw > 0
+    # the demodulator needs an integer number (≥ 4) of samples per symbol: resample if the FSW
+    # captured at another rate (e.g. 200 MS/s for 131.072 Msym/s with a 160 MHz I/Q bandwidth)
+    xd, fsd = x, fs
+    if abs(fs / sr - round(fs / sr)) > 1e-6 or round(fs / sr) < DEMOD_SPS:
+        xd, fsd = resample(x, fs, sr * DEMOD_SPS)
+        out["resampled"] = f"{fs / 1e6:g} MS/s -> {fsd / 1e6:g} MS/s ({DEMOD_SPS} samples/symbol)"
+    sps = int(round(fsd / sr))
+    bw = cfg.get("fsw_bw")
+    out["band_limited"] = bool(bw and bw < sr * (1 + alpha))
     # identification: try the candidate modulations
     tries = {}
     for m in ("BPSK", "QPSK", "OQPSK"):
         try:
-            tries[m] = iq_demod.demodulate(x, fs, sr, m, "RRC", alpha)
+            tries[m] = iq_demod.demodulate(xd, fsd, sr, m, "RRC", alpha)
         except Exception as e:
             tries[m] = {"error": str(e), "mer": float("nan")}
     out["mer_by_mod"] = {m: r.get("mer", float("nan")) for m, r in tries.items()}
@@ -256,10 +309,16 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     out["phase_slow_deg"] = float(np.degrees(np.sqrt(np.mean(slow[k:-k] ** 2)))) if len(slow) > 2 * k else float("nan")
     out["offset_i"], out["offset_q"] = imp["offset"].real, imp["offset"].imag
     out["offset_dbc"] = _db(abs(imp["offset"]) ** 2) if abs(imp["offset"]) > 0 else -120.0
-    pr = papr(x)
-    ref = papr_reference(expected_mod, sps, alpha)
+    pr = papr(xd)
+    ref = papr_reference(expected_mod, sps, alpha, (min(bw, fs) / sr) if bw else fs / sr)
     out["papr"], out["papr_ref"], out["compression_db"] = pr, ref, ref - pr
+    if out["band_limited"]:
+        # cutting the band regrows the peaks the PA clipped: PAPR no longer shows compression
+        out["compression_db"] = float("nan")
+        out["compression_note"] = "n/a: FSW bandwidth narrower than the signal (judged on BPSK)"
     out["spectrum"] = spectrum_metrics(x, fs, sr, alpha, r["cfe"])
+    if out["band_limited"]:                          # OBW can be at most the FSW I/Q bandwidth
+        out["spectrum"]["obw_ratio"] = out["spectrum"]["obw"] / bw
     return out
 
 
@@ -958,8 +1017,14 @@ class BosSimulator:
         else:
             mod = "QPSK" if "wrong_mod" in self.faults else self.mode
             sps = int(round(fs / sr))
-            s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0,
-                                  alpha=cfg["alpha"], clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
+            if abs(fs / sr - sps) > 1e-6 or sps < 2:      # FSW rate not a multiple: generate at 4 sps, resample
+                n4 = int(math.ceil(n * 4 * sr / fs)) + 64
+                s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"],
+                                       clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)
+                s = resample(s4, 4 * sr, fs)[0][:n]
+            else:
+                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"],
+                                      clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
             if len(s) < n:
                 s = np.r_[s, np.zeros(n - len(s))]
             if "jesd" in self.faults:                       # garbage samples: noise-like spectrum
@@ -988,6 +1053,9 @@ class BosSimulator:
         if "spur" in self.faults:
             s = s + 10 ** (self.faults["spur"] / 20) * np.exp(2j * np.pi * (cfe + 1.37 * sr) * t)
         s = s / math.sqrt(np.mean(np.abs(s) ** 2)) * math.sqrt(10 ** (p / 10) * 1e-3 * iq_demod.R_LOAD)
+        bw = cfg.get("fsw_bw")
+        if bw and bw < fs:                                 # the FSW I/Q bandwidth
+            s = band_limit(s, fs, bw)
         return s + noise
 
     def tone(self, f):

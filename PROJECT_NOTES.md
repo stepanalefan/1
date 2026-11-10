@@ -115,7 +115,8 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
   numbers, BOS DOP length (table says 16 B, unit sends 28 → 32), BOS OSN bytes 65–72.
 * BOS protocol (bos_protocol.py, from ПИЛВ 0102-004). Confirmed by the user: УР = BPSK (symbol rate
   2 × data rate), ШР = OQPSK (always 131.072 Msym/s). Still to confirm on the unit: the allowed sender address
-  (default КПА ИВУ 0x18), the FSW I/Q bandwidth for 131 Msym/s (~180 MHz needed at 4 samples/symbol), and the bit order of the 11-bit N field (byte 3 bits 7-5 = low bits assumed, like Freq).
+  (default КПА ИВУ 0x18), the OQPSK capture on both FSW variants (160 MHz: 200 MS/s resampled, edges cut; bandwidth extension:
+  524.288 MS/s), and the bit order of the 11-bit N field (byte 3 bits 7-5 = low bits assumed, like Freq).
   Confirm the DAC38J82 QMC register scaling
   (gain / phase / offset LSB factors on the Unit / signal page) against the datasheet; set real limits.
 * BOS station on the real FSW: verify capture levels (auto level) and the cable loss; validate the diagnosis

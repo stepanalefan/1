@@ -72,8 +72,13 @@ CFG_FIELDS = [
     ("sr_oqpsk", "Symbol rate OQPSK (ШР)", "f", 131.072e6, "Msym/s", "ШР: always 131.072 Msym/s, for every data rate"),
     ("alpha", "RRC roll-off", "f", 0.35, "", "Roll-off of the pulse shaping filter in the FPGA"),
     ("sps_bpsk", "Samples / symbol BPSK", "i", 8, "", "FSW I/Q sample rate = symbol rate × this (2…16)"),
-    ("sps_oqpsk", "Samples / symbol OQPSK", "i", 4, "", "131.072 Msym/s × 4 = 524.288 MS/s: the FSW needs an I/Q "
-     "bandwidth of at least ~180 MHz (B320 / B512 option). 2 = 262 MS/s, no ACLR"),
+    ("fs_oqpsk", "OQPSK capture sample rate", "f", 524.288e6, "MHz", "FSW I/Q sample rate for the 131.072 Msym/s "
+     "signal (524.288 = 4 samples/symbol). Any other rate is resampled to 4 samples/symbol for the demodulator"),
+    ("fsw_bw_auto", "FSW bandwidth from options", "b", True, "", "Set bandwidth and OQPSK sample rate from the FSW "
+     "options (*OPT?: B160, B320, B512, B1200 …) at the start of every plan"),
+    ("fsw_bw", "FSW I/Q bandwidth", "f", 512e6, "MHz", "Analysis bandwidth of the FSW (bandwidth-extension option). "
+     "The OQPSK signal occupies ~177 MHz; below that its edges are cut (OBW / PAPR then judged against this "
+     "bandwidth; PA compression is harder to see)"),
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
     ("power_nom", "Nominal output power", "f", 10.0, "dBm", "Expected power at the BOS output with the nominal attenuator code"),
@@ -1251,6 +1256,7 @@ class BosStation(QtWidgets.QWidget):
             return
         self._collect()
         self._wire_host()
+        self._auto_bandwidth()
         self.live_mode = tests == ["live"]
         if hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
             self.host.run_btn.setChecked(False)          # stop the live FSW view while testing
@@ -1278,6 +1284,32 @@ class BosStation(QtWidgets.QWidget):
         self.log(f"BOS station: plan '{name}' started ({', '.join(TEST_NAME.get(t, t) for t in tests)})", "info")
         self.gen = self._plan_gen(tests)
         self._advance(None)
+
+    def _auto_bandwidth(self):
+        """FSW I/Q bandwidth from *OPT?: 160 MHz -> capture OQPSK at 200 MS/s (edges cut, resampled);
+        bandwidth extension -> 524.288 MS/s = 4 samples/symbol."""
+        if not self.cfg.get("fsw_bw_auto", True):
+            return
+        dev = getattr(getattr(self.host, "worker", None), "dev", None)
+        bw = ba.fsw_bandwidth(getattr(dev, "options", "")) if dev is not None else None
+        if not bw:
+            self.log("BOS station: no bandwidth option in the FSW *OPT? answer - using the manual "
+                     "'FSW I/Q bandwidth' setting", "warn")
+            return
+        need = self.cfg["sr_oqpsk"] * (1 + self.cfg["alpha"])
+        fs = self.cfg["sr_oqpsk"] * ba.DEMOD_SPS if bw >= need else min(self.cfg["sr_oqpsk"] * ba.DEMOD_SPS, bw * 1.25)
+        changed = (bw, fs) != (self.cfg.get("fsw_bw"), self.cfg.get("fs_oqpsk"))
+        self.cfg["fsw_bw"], self.cfg["fs_oqpsk"] = bw, fs
+        for key in ("fsw_bw", "fs_oqpsk"):
+            wdg, _, sc = self.cfg_w[key]
+            wdg.blockSignals(True)
+            wdg.setValue(self.cfg[key] / sc)
+            wdg.blockSignals(False)
+        if changed:
+            self.save()
+        self.log(f"BOS station: FSW I/Q bandwidth {bw / 1e6:g} MHz -> OQPSK captured at {fs / 1e6:g} MS/s"
+                 + ("" if bw >= need else f" (signal ~{need / 1e6:.0f} MHz: edges cut, PA compression judged on BPSK)"),
+                 "info" if bw >= need else "warn")
 
     def abort(self, why):
         self.abort_flag = True
@@ -1548,13 +1580,25 @@ class BosStation(QtWidgets.QWidget):
 
     def _mcfg(self, mod):
         """Settings for one modulation: its symbol rate and samples per symbol."""
-        k = "bpsk" if mod == "BPSK" else "oqpsk"
-        return dict(self.cfg, symbol_rate=self.cfg[f"sr_{k}"], sps=self.cfg[f"sps_{k}"])
+        if mod == "BPSK":
+            sr = self.cfg["sr_bpsk"]
+            return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"])
+        sr = self.cfg["sr_oqpsk"]
+        return dict(self.cfg, symbol_rate=sr, fs=min(self.cfg["fs_oqpsk"], sr * 8))
+
+    def _obw_nom(self, mod):
+        """Expected occupied bandwidth: symbol rate × (1 + roll-off), at most the FSW I/Q bandwidth."""
+        nom = self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"])
+        return min(nom, self.cfg.get("fsw_bw") or nom)
 
     def _mod_capture(self, mod, label=None):
+        from fractions import Fraction
         c = self._mcfg(mod)
-        fs = c["symbol_rate"] * c["sps"]
-        n = int(c["nsym"] * c["sps"])
+        fs = c["fs"]
+        n = int(math.ceil(c["nsym"] * fs / c["symbol_rate"]))
+        if abs(fs / c["symbol_rate"] - round(fs / c["symbol_rate"])) > 1e-6:      # resampled: whole blocks
+            den = Fraction(c["symbol_rate"] * ba.DEMOD_SPS / fs).limit_denominator(1_000_000).denominator
+            n = int(math.ceil(n / den)) * den
         r = yield from self._capture("mod", c["carrier"], fs, n,
                                      lambda x, f: ba.analyze_modulated(x, f, c, mod), label or mod,
                                      sr=c["symbol_rate"])
@@ -1673,13 +1717,13 @@ class BosStation(QtWidgets.QWidget):
         self._lim_row(T, "Phase error RMS (after I/Q corr.)", r["phase_err_res_deg"], "°", None, L["phase_err_max"])
         self._row(T, "Magnitude error RMS", r["mag_err_pct"], "%", "", "INFO")
         self._row(T, "MER after I/Q correction", r["mer_corr"], "dB", "", "INFO")
-        self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"])
+        self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"],
+                      none_ok=r.get("compression_note", "n/a"))
         sp = r["spectrum"]
         self._lim_row(T, "ACLR (worst side)", sp["aclr"], "dB", L["aclr_min"], None, "{:.1f}",
                       none_ok="n/a (capture narrower than 3 channels)")
         self._lim_row(T, "Occupied bandwidth 99 %", sp["obw"] / 1e6, "MHz",
-                      0.85 * self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6,
-                      1.15 * self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"]) / 1e6, "{:.3f}")
+                      0.85 * self._obw_nom(mod) / 1e6, 1.15 * self._obw_nom(mod) / 1e6, "{:.3f}")
         self._lim_row(T, "Spectrum asymmetry", sp["asym_db"], "dB", -L["asym_max_db"], L["asym_max_db"], "{:+.2f}")
         self._lim_row(T, "Largest spur", sp["spur_max_dbc"], "dBc", None, L["spur_max_dbc"], "{:.1f}", none_ok=True)
 
@@ -1714,16 +1758,20 @@ class BosStation(QtWidgets.QWidget):
         self._row(T, "Max deviation from nominal", fit["max_err"], "dB", "", "INFO", spec="{:.2f}")
         self._draw_att(fit)
 
+    def _oqpsk_band_limited(self):
+        return self.cfg.get("fsw_bw", 0) < self.cfg["sr_oqpsk"] * (1 + self.cfg["alpha"])
+
     def _t_lin(self):
         T = TEST_NAME["lin"]
         c = self.cfg
-        yield from self._set_mode("oqpsk")
-        a = yield from self._mod_capture("OQPSK", "nominal attenuation")
+        mod = "BPSK" if self._oqpsk_band_limited() else "OQPSK"     # same PA; BPSK fits any FSW bandwidth
+        yield from self._set_mode(mod.lower())
+        a = yield from self._mod_capture(mod, "nominal attenuation")
         yield from self._set_att(c["att_code"] + c["lin_step"])
-        b = yield from self._mod_capture("OQPSK", f"+{c['lin_step'] * 0.5:g} dB attenuation")
+        b = yield from self._mod_capture(mod, f"+{c['lin_step']:g} dB attenuation")
         yield from self._set_att(c["att_code"])
         self.res["lin"] = {"a": a, "b": b}
-        for lbl, r in (("nominal", a), (f"+{c['lin_step'] * 0.5:g} dB", b)):
+        for lbl, r in (("nominal", a), (f"+{c['lin_step']:g} dB", b)):
             self._row(T, f"PAPR loss at {lbl}", r.get("compression_db"), "dB", "", "INFO")
             self._row(T, f"ACLR at {lbl}", r.get("spectrum", {}).get("aclr"), "dB", "", "INFO", spec="{:.1f}")
         da = a.get("compression_db", float("nan")) - b.get("compression_db", float("nan"))
@@ -1734,7 +1782,7 @@ class BosStation(QtWidgets.QWidget):
             if st == "FAIL":
                 self.res.setdefault("extra", []).append(ba.Finding(
                     "fail", "PA compression confirmed by the linearity test",
-                    f"With {c['lin_step'] * 0.5:g} dB more attenuation the PAPR loss drops by {da:.2f} dB: the PA "
+                    f"With {c['lin_step']:g} dB more attenuation the PAPR loss drops by {da:.2f} dB: the PA "
                     f"(CHA3397) is driven into compression at the nominal setting.",
                     {"PA": 0.8, "ATT": 0.2}, ["Check the PA bias / supply", "Reduce the drive (attenuator code)"], "linearity"))
             else:
