@@ -223,12 +223,20 @@ the УР / ШР rates on *Unit control*.
 ### FSW with 160 MHz or with a bandwidth extension?
 Both work. At the start of every plan the station reads the FSW options (`*OPT?`: B160, B320, B512, B1200 …)
 and sets *FSW I/Q bandwidth* and *OQPSK capture sample rate* (switch off *FSW bandwidth from options* to set
-them by hand). The OQPSK signal occupies about 177 MHz (131.072 MHz × 1.35):
-* **Bandwidth extension (≥ 320 MHz):** captured at 524.288 MS/s = 4 samples/symbol, the whole signal is analysed.
-* **160 MHz:** captured at 200 MS/s and resampled to 4 samples/symbol in the program. The outer edges of the
-  roll-off are cut: MER is still ~38 dB on a perfect signal (far above the limits), the occupied bandwidth is
-  judged against 160 MHz, ACLR is n/a, and PA compression cannot be seen on OQPSK (cutting the band regrows the
-  clipped peaks) — it is judged on BPSK, which uses the same PA, and the PA-linearity test runs on BPSK.
+them by hand). The OQPSK signal (RRC, roll-off 0.22) occupies 131.072 × 1.22 ≈ 160 MHz:
+* **Bandwidth extension (≥ 320 MHz):** captured at 524.288 MS/s = 4 samples/symbol; PA compression is also seen
+  in the OQPSK peak-to-average ratio and ACLR is measured.
+* **160 MHz:** the whole signal fits; captured at 200 MS/s and resampled to 4 samples/symbol in the program.
+  Spectral regrowth from PA compression falls outside 160 MHz, so compression is judged from the output power
+  (PA-linearity test: a 6 dB attenuation step must lower the power by 6 dB); ACLR is n/a.
+
+### 10 MHz reference
+On the bench the external 10 MHz comes from the TFG6806; the BOS also has an internal oscillator. The BOS reports
+the source in use (Sour_10MHz) and the validity of the external signal (Stat_10MHz) in ИОК_ОСН; the pre-check
+compares them with *External 10 MHz expected*. Only the RF is locked to the external reference — the digital part
+(symbol clock) always runs on the BOS's own oscillator. So: carrier and symbol-rate error with the same ppm → the
+internal oscillator; carrier error alone while locked to the external 10 MHz → the TFG6806 or the LMX2594 frequency
+plan (repeat on the internal source to tell which).
 
 ### Which limits come from the technical specification (TZ)?
 Defaults follow the TZ: carrier 37650 + 0.125·n MHz, frequency error ≤ 2·10⁻⁶ (75.5 kHz at 37.75 GHz), symbol-rate
@@ -237,7 +245,7 @@ technological connector −30…−10 dBm: set −20 ± 10), power range 20 dB, 
 ≤ 0.5 A in standby (at 14 V). BPSK (УР) is SP-L coded with ±90° modulation, i.e. constant envelope with
 rectangular pulses: occupied bandwidth, ACLR and PAPR compression are not judged on BPSK. PA compression is found
 by the PA-linearity test from the output power (a 6 dB attenuation step must lower the power by 6 dB) and, with
-a wide FSW, from the OQPSK PAPR. The OQPSK chip rate is 262.144 MHz (131.072 Msym/s per rail).
+a wide FSW, from the OQPSK PAPR. The OQPSK chip rate is 262.144 MHz (131.072 Msym/s per rail), RRC roll-off 0.22.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the

@@ -70,7 +70,7 @@ CFG_FIELDS = [
     ("sr_bpsk", "Symbol rate BPSK (УР)", "f", 64e3, "kHz", "УР: 2 × data rate (e.g. 32 kbit/s -> 64 ksym/s). "
      "With protocol control it follows the УР rate on the Unit control page"),
     ("sr_oqpsk", "Symbol rate OQPSK (ШР)", "f", 131.072e6, "Msym/s", "ШР: always 131.072 Msym/s, for every data rate"),
-    ("alpha", "OQPSK RRC roll-off", "f", 0.35, "", "Roll-off of the OQPSK pulse shaping filter in the FPGA"),
+    ("alpha", "OQPSK RRC roll-off", "f", 0.22, "", "Roll-off of the OQPSK pulse shaping filter in the FPGA"),
     ("bpsk_rect", "BPSK rectangular pulses (SP-L)", "b", True, "", "BPSK (УР) is SP-L coded with ±90° modulation: "
      "constant envelope, no pulse shaping. Then OBW / ACLR / PAPR compression are not judged on BPSK"),
     ("oqpsk_rrc", "OQPSK RRC filtered", "b", True, "", "Untick if the ШР signal is not pulse-shaped"),
@@ -89,7 +89,8 @@ CFG_FIELDS = [
     ("att_code", "Nominal Atten_EIRP", "i", 0, "dB", "EIRP attenuation (0…20 dB, 1 dB steps, sets the ADRF5730) "
      "at which the nominal power is specified"),
     ("loss_db", "Cable / fixture loss", "f", 0.0, "dB", "Added to every power reading (BOS output -> FSW input)"),
-    ("ext_ref", "External 10 MHz expected", "b", True, "", "Warn when the BOS reports no external reference"),
+    ("ext_ref", "External 10 MHz expected", "b", True, "", "External 10 MHz from the TFG6806. The BOS reports the "
+     "source (Sour_10MHz) and its validity (Stat_10MHz) in ИОК_ОСН"),
     ("autolevel", "FSW auto level per capture", "b", True, "", "ADJ:LEV before each capture (recommended)"),
     ("ref_level", "FSW ref level (no auto)", "f", 0.0, "dBm", "Used when auto level is off"),
     ("cw_fs", "CW capture bandwidth", "f", 2e6, "MHz", "Sample rate of the carrier capture"),
@@ -1302,7 +1303,7 @@ class BosStation(QtWidgets.QWidget):
                      "'FSW I/Q bandwidth' setting", "warn")
             return
         need = self.cfg["sr_oqpsk"] * (1 + self.cfg["alpha"])
-        fs = self.cfg["sr_oqpsk"] * ba.DEMOD_SPS if bw >= need else min(self.cfg["sr_oqpsk"] * ba.DEMOD_SPS, bw * 1.25)
+        fs = min(self.cfg["sr_oqpsk"] * ba.DEMOD_SPS, bw * 1.25)     # 160 MHz: 200 MS/s; extension: 524.288 MS/s
         changed = (bw, fs) != (self.cfg.get("fsw_bw"), self.cfg.get("fs_oqpsk"))
         self.cfg["fsw_bw"], self.cfg["fs_oqpsk"] = bw, fs
         for key in ("fsw_bw", "fs_oqpsk"):
@@ -1655,8 +1656,13 @@ class BosStation(QtWidgets.QWidget):
             if t.get(k) is not None:
                 self._lim_row(T, k.replace("Temp_DT", "Temperature "), t[k], "°C", None, self.lim["temp_max"], "{:.0f}")
         if t.get("Stat_10MHz") is not None and self.cfg.get("ext_ref"):
-            self._row(T, "External 10 MHz", None, "", "present", "PASS" if t["Stat_10MHz"] else "FAIL",
-                      text="present" if t["Stat_10MHz"] else "missing")
+            self._row(T, "External 10 MHz (Stat_10MHz)", None, "", "valid", "PASS" if t["Stat_10MHz"] else "FAIL",
+                      text="valid" if t["Stat_10MHz"] else "missing / invalid")
+        if t.get("Sour_10MHz") is not None:
+            want = 1 if self.cfg.get("ext_ref") else 0
+            name = {0: "internal", 1: "external"}
+            self._row(T, "10 MHz source in use (Sour_10MHz)", None, "", name[want],
+                      "PASS" if t["Sour_10MHz"] == want else "FAIL", text=name.get(t["Sour_10MHz"], "?"))
         if t.get("Err_Ref_LO") is not None:
             self._lim_row(T, "Err_Ref_LO", t["Err_Ref_LO"], "", -self.lim["err_ref_lo"], self.lim["err_ref_lo"], "{:.0f}")
 
@@ -1768,7 +1774,7 @@ class BosStation(QtWidgets.QWidget):
         self._draw_att(fit)
 
     def _oqpsk_band_limited(self):
-        return self.cfg.get("fsw_bw", 0) < self.cfg["sr_oqpsk"] * (1 + self.cfg["alpha"])
+        return self.cfg.get("fsw_bw", 0) < self.cfg["sr_oqpsk"] * (1 + self.cfg["alpha"]) * 1.2
 
     def _t_lin(self):
         T = TEST_NAME["lin"]

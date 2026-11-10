@@ -258,7 +258,8 @@ def analyze_modulated(x, fs, cfg, expected_mod):
         out["resampled"] = f"{fs / 1e6:g} MS/s -> {fsd / 1e6:g} MS/s ({DEMOD_SPS} samples/symbol)"
     sps = int(round(fsd / sr))
     bw = cfg.get("fsw_bw")
-    out["band_limited"] = bool(bw and bw < sr * (1 + alpha))
+    # compression products (spectral regrowth) reach ~20 % beyond the channel: a narrower FSW cuts them
+    out["band_limited"] = bool(bw and bw < sr * (1 + alpha) * 1.2)
     # identification: try the candidate modulations
     tries = {}
     for m in ("BPSK", "QPSK", "OQPSK"):
@@ -319,11 +320,11 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     elif out["band_limited"]:
         # cutting the band regrows the peaks the PA clipped: PAPR no longer shows compression
         out["compression_db"] = float("nan")
-        out["compression_note"] = "n/a: FSW bandwidth narrower than the signal (judged on BPSK)"
+        out["compression_note"] = "n/a: FSW bandwidth cuts the spectral regrowth (see PA-linearity gain compression)"
     out["spectrum"] = spectrum_metrics(x, fs, sr, alpha, r["cfe"])
     if filt == "NONE":                               # rectangular pulses: no channel bandwidth
         out["spectrum"]["aclr"] = out["spectrum"]["obw_ratio"] = float("nan")
-    if out["band_limited"]:                          # OBW can be at most the FSW I/Q bandwidth
+    if bw and bw < sr * (1 + alpha):                 # OBW can be at most the FSW I/Q bandwidth
         out["spectrum"]["obw_ratio"] = out["spectrum"]["obw"] / bw
     return out
 
@@ -567,8 +568,20 @@ def check_telemetry(tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                            ["Check heat sinking / thermal pad of the CHA3397", "Check the PA drain current"], "telemetry"))
     if tlm.get("Stat_10MHz") == 0 and cfg.get("ext_ref", False):
         out.append(Finding("fail", "External 10 MHz reference missing",
-                           "Stat_10MHz = no signal; the BOS falls back to its internal reference.",
-                           {"REF": 0.8, "OUT": 0.2}, ["Check the 10 MHz cable / level"], "telemetry"))
+                           "Stat_10MHz = no signal (count outside 10 000 000 ± 1000 per second); the BOS runs on its "
+                           "internal oscillator.",
+                           {"REF": 0.8, "OUT": 0.2}, ["Check the TFG6806: output on, 10 MHz, level, cable to the BOS",
+                                                      "Check the BOS 10 MHz input"], "telemetry"))
+    elif tlm.get("Sour_10MHz") == 0 and cfg.get("ext_ref", False):
+        out.append(Finding("warn", "BOS uses its internal 10 MHz oscillator",
+                           "Sour_10MHz = internal although the external 10 MHz (TFG6806) is expected and valid: the "
+                           "source is set to internal (КОНФИГ / SET_Sour_10MHz).", {"REF": 0.3},
+                           ["Send SET_Sour_10MHz = external (0x02, in standby) and save the КОНФИГ if needed"],
+                           "telemetry"))
+    elif tlm.get("Sour_10MHz") == 1 and not cfg.get("ext_ref", False):
+        out.append(Finding("info", "BOS is locked to the external 10 MHz",
+                           "The test expects the internal oscillator ('External 10 MHz expected' is off).", {}, [],
+                           "telemetry"))
     e = tlm.get("Err_Ref_LO")
     if _finite(e) and abs(e) > lim.get("err_ref_lo", 1000):
         out.append(Finding("warn", "Reference tuning code out of range",
@@ -650,11 +663,20 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
             if _finite(sr_ppm) and abs(ppm) > 1 and abs(sr_ppm - ppm) < max(0.7, 0.3 * abs(ppm)):
                 F.append(Finding("fail", "Reference frequency offset",
                                  f"Carrier error {cfe_r['cfe']:+.0f} Hz = {ppm:+.2f} ppm and symbol-rate error "
-                                 f"{sr_ppm:+.2f} ppm agree: everything is off by the same ratio → the common 10 MHz "
-                                 f"reference is off-frequency.",
-                                 {"REF": 0.85, "CLK": 0.1}, ["Measure the 10 MHz reference with a counter (on the bench it comes from the TFG6806)",
-                                                             "Trim / replace the TCXO, or use the external reference"],
+                                 f"{sr_ppm:+.2f} ppm agree: RF and symbol clock are off by the same ratio → the BOS's "
+                                 f"internal 10 MHz oscillator is off-frequency (TZ: ≤ 2·10⁻⁶ without external reference).",
+                                 {"REF": 0.85, "CLK": 0.1}, ["Measure the internal oscillator (Err_Ref_LO, counter)",
+                                                             "Trim / replace the oscillator, or run on the external 10 MHz"],
                                  "frequency"))
+            elif tlm and tlm.get("Sour_10MHz") == 1 and tlm.get("Stat_10MHz") != 0:
+                F.append(Finding("fail", "Carrier frequency error (external reference or LO)",
+                                 f"Carrier error {cfe_r['cfe']:+.0f} Hz ({ppm:+.3f} ppm). The RF is locked to the external "
+                                 f"10 MHz (TFG6806) while the digital part (symbol clock) runs on the BOS's own "
+                                 f"oscillator, so an external reference offset moves only the carrier.",
+                                 {"REF": 0.5, "LMX": 0.45, "FPGA": 0.05},
+                                 ["Check the TFG6806 frequency (10 MHz exactly; its own reference / warm-up)",
+                                  "Repeat with SET_Sour_10MHz = internal: if the error disappears, it is the external "
+                                  "reference; if it stays, it is the LMX2594 frequency plan"], "frequency"))
             else:
                 F.append(Finding("fail", "Carrier frequency error (LO)",
                                  f"Carrier error {cfe_r['cfe']:+.0f} Hz ({ppm:+.3f} ppm) while the symbol clock is "
@@ -915,7 +937,9 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
 #  Simulated BOS (demo mode, operator training and tests)                      #
 # --------------------------------------------------------------------------- #
 FAULTS = [  # key, label, default magnitude, unit
-    ("ref_ppm", "Reference oscillator offset", 3.0, "ppm"),
+    ("ref_ppm", "Internal 10 MHz oscillator offset", 3.0, "ppm"),
+    ("tfg_ppm", "External 10 MHz (TFG6806) offset", 3.0, "ppm"),
+    ("ref_lost", "External 10 MHz missing", 1, ""),
     ("lo_hz", "LMX2594 frequency error", 150e3, "Hz"),
     ("lo_unlock", "LMX2594 unlocked", 1, ""),
     ("clk_ppm", "DAC / FPGA clock error", 120.0, "ppm"),
@@ -1028,12 +1052,14 @@ class BosSimulator:
         p = self.power_dbm()
         if p < -150:
             return noise
-        ppm = self.faults.get("ref_ppm", 0.0) + self.rng.normal(0, 0.02)
+        ppm_int = self.faults.get("ref_ppm", 0.0) + self.rng.normal(0, 0.02)     # BOS oscillator (digital part)
+        ext = "ref_ppm" not in self.faults and "ref_lost" not in self.faults       # RF locked to the TFG6806
+        ppm = (self.faults.get("tfg_ppm", 0.0) + self.rng.normal(0, 0.005)) if ext else ppm_int
         f_set = self.freq or cfg["carrier"]
         cfe = f_set * ppm * 1e-6 + self.faults.get("lo_hz", 0.0) + (f_set - center)
         if "lo_unlock" in self.faults:
             cfe += rng.uniform(-3e5, 3e5)
-        clk = ppm + self.faults.get("clk_ppm", 0.0)
+        clk = ppm_int + self.faults.get("clk_ppm", 0.0)
         if abs(cfe) > fs / 2:
             return noise
         if self.mode == "cw":
@@ -1099,7 +1125,9 @@ class BosSimulator:
               "vdd_1v": 1.0 + self.rng.normal(0, 0.003), "vdd_1_8v": f.get("rail", 1.8) + self.rng.normal(0, 0.004),
               "vdd_2_5v": 2.5 + self.rng.normal(0, 0.005),
               "Temp_DT1": f.get("hot", 41.0) + self.rng.normal(0, 0.3), "Temp_DT2": 38.0, "Temp_DT3": 36.0,
-              "Stat_10MHz": 1, "Sour_10MHz": 1, "Err_Ref_LO": int(f.get("ref_ppm", 0) * 300) + 12,
+              "Stat_10MHz": 0 if "ref_lost" in f else 1,
+              "Sour_10MHz": 0 if ("ref_lost" in f or "ref_ppm" in f) else 1,
+              "Err_Ref_LO": int(f.get("ref_ppm", 0) * 300) + 12,
               "Mode": 0 if self.mode == "off" else 1, "Mode_SNR": 0x40 if self.mode == "cw" else 0xA4}
         return tl
 
