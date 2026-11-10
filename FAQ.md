@@ -256,7 +256,29 @@ exactly: received code bits vs. the re-encoded corrected block. Results appear i
 and in the *Data / BER (УР)* test, which collects *BER test: bits* (default 10⁶; proving the TZ's 10⁻⁷ needs about
 3·10⁷ error-free bits). Errors with a clean RF signal (good MER) point at the digital data path (FPGA, buffer,
 interface). Switch it off with *Decode УР data*.
-ШР (OQPSK with spreading, turbo code 1/2, randomizer) is not decoded yet.
+ШР (OQPSK with spreading), yes — document 0202 sections 4.3, 6 and appendix Д: the capture is turned into chips
+(262.144 Mchip/s, chip 2n on I, 2n+1 on Q), the preambles are despread with PRS 3 (0x00008805, restarted every bit),
+the preamble value and the end-of-preamble marker 0xDA2B1E5E are checked, then the КБД are despread with
+PRS 1 ⊕ PRS 2 (0x00800043 / 0x00400010), the synchromarker 0x034776C7272895B0 is checked, the code word is
+de-randomised (CCSDS) and turbo decoded (CCSDS r = 1/2, k = 8920), and the transport frames are checked like УР.
+The *ШР packet* test first checks the preambles (preamble-only session, works at every rate), and at ≥ 512 kbit/s
+(*ШР: decode КБД from rate*) captures a whole packet from the RF onset (FSW IF-power trigger, then the session
+command) and decodes two КБД. *Despreading efficiency* shows whether the BOS uses the expected spreading
+sequence: with a strong signal the bits decode even with a wrong sequence, but a ground station would lose the
+processing gain. Some details are not fixed by the document and are assumptions until checked on a real capture:
+the shift-register form (polynomial word bit k-1 = x^k, which gives the maximal period), the chip order on I/Q, the
+start of the КБД sequence (first КБД bit) and the turbo-code termination.
+
+### Can I analyse a recording made with the FSW?
+Yes: **📂 Analyze I/Q file…** on the BOS Test Station. Supported: R&S **.iq.tar** (FSW I/Q export: sample rate and
+centre frequency are read from the file), **.iqw** (float32, I/Q pairs or I block + Q block), **.csv** (I,Q
+columns), .npy/.npz and raw float32/int16 binaries (enter the sample rate). The program identifies the signal from
+the spectrum (carrier / УР BPSK / ШР OQPSK — or choose it), finds the УР rate (lowest rate that demodulates
+cleanly) or the ШР rate (preamble search), runs the same analysis and decoding as a live test and gives findings,
+measurements, plots and a report. BOS telemetry is not available offline, so the diagnosis uses the signal only.
+Power is right if the file is in volts (FSW export) and the cable loss is set. For a ШР decode the recording must
+contain the start of the packet (preambles). *Save every capture (.iq.tar)* keeps all station captures in
+`bos_reports/captures` for later re-analysis.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the

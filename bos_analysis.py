@@ -878,6 +878,47 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                                  ["Check the SCID stored in the BOS non-volatile memory"], "data"))
         break
 
+    # ---- ШР packet (despread / turbo decoded)
+    s = res.get("shr")
+    if s and "error" not in s:
+        oq_ok = oq is not None and _finite(oq.get("mer")) and oq["mer"] >= lim.get("mer_min", 20)
+        for key, what, prs in (("despread_eff", "preamble", "PRS 3 (preamble, 0x00008805)"),
+                               ("cbd_eff", "КБД", "PRS 1 ⊕ PRS 2 (КБД, 0x00800043 / 0x00400010)")):
+            eff = s.get(key)
+            if _finite(eff) and eff < 0.7:
+                F.append(Finding("fail", f"ШР: spreading sequence of the {what} does not match",
+                                 f"Despreading recovers only {100 * eff:.0f} % of the chip energy: the {prs} in the BOS "
+                                 f"differs from the expected one (polynomial, initial state, chip order or chip rate). "
+                                 f"With a strong signal the bits may still decode, but a ground station would lose "
+                                 f"{-20 * math.log10(max(eff, 1e-3)):.0f} dB of processing gain.",
+                                 {"FPGA": 0.75, "CLK": 0.1}, ["Check the PRS polynomial / register settings (ИОК_КОНФИГ "
+                                                             "Polyn / Registr) and the FPGA PRS generator"], "ШР"))
+        if not s.get("preamble_found"):
+            F.append(Finding("fail" if oq_ok else "warn", "ШР: preamble not found by despreading",
+                             "No preamble (PRS 3, 0x00008805) in the capture"
+                             + (" although the OQPSK signal itself is clean: wrong spreading sequence, preamble "
+                                "value, chip rate or rate setting in the FPGA (or the capture starts after the "
+                                "preambles)." if oq_ok else "."),
+                             {"FPGA": 0.7, "CLK": 0.1} if oq_ok else {"FPGA": 0.3},
+                             ["Check PRS polynomial / initial state and the preamble value (ИОК_КОНФИГ)",
+                              "Use the ШР test (it triggers on the RF onset) or the preamble-only mode"], "ШР"))
+        elif s.get("preamble_found") and s.get("marker") is False:
+            F.append(Finding("warn", "ШР: end-of-preamble marker 0xDA2B1E5E not found", "Preambles are present but "
+                             "no marker followed within the capture.", {"FPGA": 0.5},
+                             ["Make the capture longer / check the packet type"], "ШР"))
+        if s.get("frames"):
+            if s.get("crc_fail") or (_finite(s.get("ber")) and s["ber"] > 1e-4):
+                F.append(Finding("fail", "ШР: data errors after despreading / turbo decoding",
+                                 f"{s['crc_fail']} of {s['n_frames']} frame(s) with CRC errors, code-bit BER "
+                                 f"{s.get('ber', float('nan')):.2e}.",
+                                 {"FPGA": 0.6, "CLK": 0.2, "DAC": 0.2},
+                                 ["Check the turbo encoder / randomizer / PRS 1, 2 settings in the FPGA"], "ШР"))
+            if s.get("idle_bad"):
+                F.append(Finding("warn", "ШР: idle frame content differs from table 4.4", "", {"FPGA": 0.6}, [], "ШР"))
+        elif s.get("marker") and s.get("cbd_bits", 0) >= 64 + 17848:
+            F.append(Finding("fail", "ШР: КБД not decodable after the marker", "The marker was found but no КБД "
+                             "followed in the expected form.", {"FPGA": 0.6}, ["Check PRS 1/2 and the КБД format"], "ШР"))
+
     # ---- BPSK vs OQPSK: which rail is bad
     if bpsk and oq and _finite(bpsk.get("mer")) and _finite(oq.get("mer")):
         pn_oq = _finite(oq.get("phase_err_res_deg")) and oq["phase_err_res_deg"] > lim.get("phase_err_max", 3)
@@ -1002,6 +1043,7 @@ FAULTS = [  # key, label, default magnitude, unit
     ("q_dead", "Q rail dead (DAC ch B)", 1, ""),
     ("data_err", "Data path bit errors (FPGA / buffer)", 1e-3, "BER"),
     ("no_rs", "Reed-Solomon check symbols missing", 1, ""),
+    ("shr_prs", "ШР spreading sequence wrong (FPGA)", 1, ""),
 ]
 
 
@@ -1067,7 +1109,7 @@ class BosSimulator:
         c[4] = self.time_snr or 30
         c[5], c[6] = 0x4B, 0x04
         c[7:9] = (0x0300).to_bytes(2, "little")
-        c[9:13] = (0xC6DFA688).to_bytes(4, "little")
+        c[9:13] = (0xC6DFA611).to_bytes(4, "little")
         c[13:17] = (1).to_bytes(4, "little")
         c[17:21] = (0x8805).to_bytes(4, "little")
         c[49:53] = c[53:57] = (1).to_bytes(4, "little")
@@ -1188,6 +1230,58 @@ class BosSimulator:
         sym = bd.manchester_encode(bits)
         return np.roll(sym, -start)[:nsym]
 
+    def capture_shr(self, fs, n, rate_kbps, kind="kbd", pre=None, n_pre=5):
+        """ШР packet as the FSW would capture it: kind 'pre' = endless preambles (any phase),
+        'kbd' = preambles + marker + 2 КБД starting at the RF onset (trigger)."""
+        import bos_decode as bd
+        import bos_shr
+        sr = bos_shr.SYMBOL_RATE
+        p = self.power_dbm()
+        nv = math.sqrt(10 ** ((-95.0 + 10 * math.log10(fs / 1e6)) / 10) * 1e-3 * iq_demod.R_LOAD / 2)
+        noise = (nv * (self.rng.normal(size=n) + 1j * self.rng.normal(size=n))).astype(np.complex64)
+        if p < -150:
+            return noise
+        pre = pre or bos_shr.PREAMBLE
+        if "shr_prs" in self.faults:                      # wrong spreading polynomial in the FPGA
+            poly3 = bos_shr.POLY3
+            bos_shr.POLY3 = 0x0000B400
+        try:
+            if kind == "pre":
+                sfp = bos_shr.chips_per_bit(rate_kbps, True)
+                nb = int(n / (fs / sr / 2) / sfp / 32) + 2
+                chips = bos_shr.packet_chips(rate_kbps, nb, (), pre)[:-32 * sfp]   # no marker
+                skip = int(self.rng.integers(0, 32 * sfp))
+                chips = chips[skip:]
+            else:
+                self._vcfc = getattr(self, "_vcfc", 0)
+                tfs = [bd.idle_frame(self.cfg.get("scid", 0), (self._vcfc + k) & 0xFF) for k in range(2)]
+                chips = bos_shr.packet_chips(rate_kbps, n_pre, tfs, pre)
+        finally:
+            if "shr_prs" in self.faults:
+                bos_shr.POLY3 = poly3
+        if "data_err" in self.faults and kind != "pre":
+            sf = bos_shr.chips_per_bit(rate_kbps)
+            nbits = len(chips) // sf
+            flip = np.repeat(self.rng.random(nbits) < self.faults["data_err"] * 20, sf)
+            chips[:len(flip)][flip] *= -1
+        w = bos_shr.oqpsk_waveform(chips, 4, self.cfg.get("alpha", 0.25))
+        if abs(fs - 4 * sr) > 1:
+            w = resample(w, 4 * sr, fs)[0].astype(np.complex64)
+        if "q_dead" in self.faults:
+            w = w.real.astype(np.complex64)
+        lead = 2000 if kind == "kbd" else 0
+        s = np.zeros(n, np.complex64)
+        m = min(n - lead, len(w))
+        s[lead:lead + m] = w[:m]
+        ppm = self.faults.get("tfg_ppm", 0.0) + self.faults.get("ref_ppm", 0.0)
+        cfe = (self.freq or self.cfg["carrier"]) * ppm * 1e-6 + self.faults.get("lo_hz", 0.0) + 3e3
+        ph = (2 * np.pi * cfe / fs * np.arange(n) + self.rng.random() * 6.28).astype(np.float32)
+        s = s * np.exp(1j * ph).astype(np.complex64) * np.float32(math.sqrt(10 ** (p / 10) * 1e-3 * iq_demod.R_LOAD))
+        bw = self.cfg.get("fsw_bw")
+        if bw and bw < fs:
+            s = band_limit(s, fs, bw).astype(np.complex64)
+        return s + noise
+
     def telemetry(self):
         f = self.faults
         tl = {"pll_lmk": 1, "pll_jesd": 1, "pll_all": 1, "pll_lmx (DAC)": 1,
@@ -1206,3 +1300,113 @@ class BosSimulator:
         if self.mode != "off" and "no_rf" not in self.faults:
             i += 0.62
         return i + self.rng.normal(0, 0.005)
+
+
+# --------------------------------------------------------------------------- #
+#  Offline analysis of an I/Q recording                                        #
+# --------------------------------------------------------------------------- #
+UR_RATES_KBPS = (8, 16, 32, 64, 128, 256, 512)
+SHR_RATES_KBPS = (16, 32, 64, 128, 256, 512, 1024)
+
+
+def identify(x, fs) -> dict:
+    """Rough signal type from the spectrum: off / cw / narrow (УР BPSK) / wide (ШР OQPSK)."""
+    x = np.asarray(x, complex)
+    f, p = psd(x, fs, 4096 if len(x) >= 65536 else 1024)
+    tot = float(np.sum(p))
+    if tot <= 0:
+        return {"type": "off"}
+    pk = int(np.argmax(p))
+    tone = float(np.sum(p[max(0, pk - 3):pk + 4])) / tot
+    nf = float(np.median(p))
+    c = np.cumsum(p) / tot
+    obw = float(f[min(len(f) - 1, np.searchsorted(c, 0.995))] - f[np.searchsorted(c, 0.005)])
+    peak_db = 10 * math.log10(float(np.max(p)) / nf) if nf > 0 else 99
+    if peak_db < 10:
+        return {"type": "off", "obw": obw}
+    if tone > 0.7:
+        return {"type": "cw", "obw": obw, "tone_frac": tone}
+    return {"type": "wide" if obw > 20e6 else "narrow", "obw": obw, "tone_frac": tone}
+
+
+def rf_onset(x, frac=0.25) -> int:
+    """First sample where the (smoothed) power exceeds frac × its maximum (+ a short settling margin)."""
+    p = np.abs(np.asarray(x[:min(len(x), 4_000_000)])) ** 2
+    k = 256
+    sm = np.convolve(p, np.ones(k) / k, mode="same")
+    idx = np.where(sm > frac * sm.max())[0]
+    return int(min(len(x) - 1, idx[0] + 2 * k)) if len(idx) and idx[0] > k else 0
+
+
+def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, log=lambda s: None) -> dict:
+    """Analyse a recording like a station capture. Returns {"cw"| "mod_BPSK"| "mod_OQPSK"| "shr": …,
+    "_ident": …}. cfg: station settings (carrier, power_nom, sr_oqpsk, alpha, …)."""
+    res = {}
+    x = np.asarray(x, np.complex64)
+    idt = identify(x, fs)
+    res["_ident"] = idt
+    kind = mode if mode != "auto" else {"cw": "cw", "narrow": "bpsk", "wide": "oqpsk"}.get(idt["type"], "off")
+    off = (center - cfg["carrier"]) if center and cfg.get("carrier") else 0.0
+
+    def fix_cfe(r):
+        if r and _finite(r.get("cfe")) and off:
+            r["cfe_file"] = r["cfe"]
+            r["cfe"] = r["cfe"] + off                      # relative to the nominal carrier
+            r["cfe_ppm"] = r["cfe"] / cfg["carrier"] * 1e6
+        return r
+    if kind == "off":
+        res["cw"] = {"kind": "cw", "present": False, "power": float("nan")}
+        return res
+    if kind == "cw":
+        res["cw"] = fix_cfe(analyze_cw(x, fs, cfg, (cfg.get("pn_lo", 1e3), cfg.get("pn_hi", 100e3))))
+        return res
+    if kind == "bpsk":
+        rates = [ur_rate] if ur_rate else list(UR_RATES_KBPS)
+        tried = []
+        for rk in rates:
+            sr = 2e3 * rk
+            if fs < 2 * sr or len(x) < 200 * fs / sr:
+                continue
+            c = dict(cfg, symbol_rate=sr, filter="NONE", decode_ur=False)
+            n = min(len(x), int(4000 * fs / sr))
+            try:
+                r = analyze_modulated(x[:n], fs, c, "BPSK")
+            except Exception:
+                continue
+            log(f"BPSK {rk} kbit/s: MER {r.get('mer', float('nan')):.1f} dB")
+            if _finite(r.get("mer")):
+                tried.append((rk, r["mer"]))
+        if not tried:
+            raise ValueError("no УР rate fits this recording (sample rate too low or too short)")
+        # a BPSK signal also demodulates cleanly at 2×, 4× its symbol rate: take the lowest rate that fits
+        top = max(m for _, m in tried)
+        rk = min(r for r, m in tried if m >= top - 3)
+        c = dict(cfg, symbol_rate=2e3 * rk, filter="NONE", decode_ur=True)
+        r = fix_cfe(analyze_modulated(x, fs, c, "BPSK"))
+        r["ur_rate_kbps"] = rk
+        res["mod_BPSK"] = r
+        return res
+    # OQPSK (ШР): modulation quality on the first part, then the packet decoder
+    sr = cfg.get("sr_oqpsk", 131.072e6)
+    on = rf_onset(x)
+    n = min(len(x) - on, int(6000 * fs / sr))
+    c = dict(cfg, symbol_rate=sr, filter="RRC")
+    res["mod_OQPSK"] = fix_cfe(analyze_modulated(x[on:on + n], fs, c, "OQPSK"))
+    if on:
+        res["mod_OQPSK"]["rf_onset_s"] = on / fs
+    if len(x) > 200000:
+        import bos_shr
+        try:
+            chips, _ = bos_shr.chips_from_iq(x, fs, sr, cfg.get("alpha", 0.25))
+            tries = [shr_rate] if shr_rate else list(SHR_RATES_KBPS)[::-1]
+            for rk in tries:
+                d = bos_shr.decode_shr(chips, rk, cfg.get("preamble", bos_shr.PREAMBLE), max_cbd=4)
+                log(f"ШР {rk} kbit/s: preambles {d.get('preamble_found', 0)}, marker {d.get('marker')}")
+                if d.get("preamble_found"):
+                    res["shr"] = d
+                    break
+            else:
+                res["shr"] = {"preamble_found": 0, "marker": False, "frames": [], "searched": tries}
+        except Exception as e:
+            res["shr"] = {"error": f"{type(e).__name__}: {e}"}
+    return res

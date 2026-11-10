@@ -55,9 +55,13 @@ verdict, the findings and the report.
 | PA linearity | compression and ACLR at nominal and +6 dB Atten_EIRP | PA compression vs. digital clipping |
 | LO harmonics | lines at carrier × k/4 | ADMV1013 LO / multiplier leakage |
 | Stability | power, frequency, MER over time with temperature | thermal drift |
+| ШР packet | preambles despread (PRS 3), preamble value, despreading efficiency; ≥ 512 kbit/s: packet from the RF onset, КБД despread (PRS 1 ⊕ 2), de-randomised, turbo decoded, frames checked | wrong spreading sequence / preamble, ШР coding or framing faults |
 | Data / BER (УР) | decoded КБД: frame sync, RS(255,223)×5 corrections, transport-frame CRC, SCID, frame counter, idle content, channel BER | FPGA coding / framing / buffer faults, data errors with a clean RF signal |
 
-Default plans: *Full test*, *Quick check*, *Modulation only*, *Attenuator*, *Burn-in (stability)*.
+Default plans: *Full test*, *Quick check*, *Modulation only*, *Data decoding*, *Attenuator*, *Burn-in (stability)*.
+
+**📂 Analyze I/Q file…** loads an FSW recording (.iq.tar, .iqw, .csv, raw), identifies the signal and runs the same
+analysis, decoding and diagnosis offline (without telemetry).
 
 ### How the diagnosis reasons
 Measurements that point at different blocks are cross-checked: equal ppm on carrier and symbol rate → the
@@ -121,6 +125,8 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
 | `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
+| `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, chip receiver, despreading |
+| `bos_iqfile.py` | I/Q files: read .iq.tar / .iqw / .csv / raw, write .iq.tar |
 | `bos_protocol.py` | BOS CAN protocol: identifiers, command codes and parameters, acknowledgements, CRC-16, КОНФИГ decoding |
 | `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |

@@ -116,6 +116,13 @@ reference from the TFG6806 on the bench, 2 × DS18S20.
 
 ## 5. Open points / to do
 
+* ШР decoding (bos_shr.py) assumptions to verify with the first real capture (all are parameters in bos_shr):
+  LFSR form (word bit k-1 = x^k, Fibonacci, output bit 0 - maximal period for 0x8805), chip 2n on I, data bit 1 ->
+  symbol −1, КБД PRS starts at the first КБД bit, turbo termination (tails of a, b alternately). Roll-off 0.25
+  (document 0202 and the user). If decoding fails on a real capture, try these variants first.
+* FSW IF-power trigger for the ШР packet capture uses TRIG:SOUR IFP (already used) and TRIG:LEV:IFP (new; errors
+  are reported in the log).
+
 * Telemetry layouts still missing (user will send tables): **BOS IOK CONFIG (0xFA) and IOK ARCHIVE
   (0xF9)**, **AFAR IOK CONFIG (0xFA) and IOK FV (0xFB)**. Questions left open earlier: AFAR page
   numbers, BOS DOP length (table says 16 B, unit sends 28 → 32), BOS OSN bytes 65–72.

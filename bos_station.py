@@ -39,6 +39,7 @@ import pyqtgraph as pg
 
 import bos_analysis as ba
 import bos_protocol as bp
+import bos_iqfile
 
 try:
     import telemetry
@@ -70,7 +71,7 @@ CFG_FIELDS = [
     ("sr_bpsk", "Symbol rate BPSK (УР)", "f", 64e3, "kHz", "УР: 2 × data rate (e.g. 32 kbit/s -> 64 ksym/s). "
      "With protocol control it follows the УР rate on the Unit control page"),
     ("sr_oqpsk", "Symbol rate OQPSK (ШР)", "f", 131.072e6, "Msym/s", "ШР: always 131.072 Msym/s, for every data rate"),
-    ("alpha", "OQPSK RRC roll-off", "f", 0.22, "", "Roll-off of the OQPSK pulse shaping filter in the FPGA"),
+    ("alpha", "OQPSK RRC roll-off", "f", 0.25, "", "Roll-off of the OQPSK pulse shaping filter in the FPGA"),
     ("bpsk_rect", "BPSK rectangular pulses (SP-L)", "b", True, "", "BPSK (УР) is SP-L coded with ±90° modulation: "
      "constant envelope, no pulse shaping. Then OBW / ACLR / PAPR compression are not judged on BPSK"),
     ("oqpsk_rrc", "OQPSK RRC filtered", "b", True, "", "Untick if the ШР signal is not pulse-shaped"),
@@ -85,6 +86,10 @@ CFG_FIELDS = [
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
     ("decode_ur", "Decode УР data (BPSK)", "b", True, "", "Frame sync 0x1ACFFC1D, RS(255,223)×5, transport frame "
      "CRC, idle-frame content, channel BER. The BPSK capture is lengthened to ≥ 3 КБД (64 000 symbols)"),
+    ("shr_decode_min", "ШР: decode КБД from rate", "i", 512, "kbit/s", "КБД despreading + turbo decoding needs "
+     "the whole КБД in one capture: 17912 bits × 262144/R chips. Below this rate only the preambles are checked"),
+    ("save_iq", "Save every capture (.iq.tar)", "b", False, "", "Writes each FSW capture to bos_reports/captures "
+     "(R&S iq.tar) - for re-analysis with 'Analyze I/Q file…'"),
     ("scid", "Spacecraft ID (SCID)", "i", 0, "", "Expected spacecraft identifier in the transport frames (default 0)"),
     ("ber_bits", "BER test: bits", "i", 1000000, "", "Code bits to collect in the BER test (TZ BER ≤ 1·10⁻⁷ needs "
      "≥ 3·10⁷ error-free bits for a 95 % statement)"),
@@ -151,13 +156,17 @@ TESTS = [  # id, name, description
     ("lin", "PA linearity", "Compression and ACLR at nominal and higher attenuation"),
     ("harm", "LO harmonics", "Lines at carrier × k/4 (LO and multiplier products)"),
     ("drift", "Stability / drift", "Power, frequency and MER over time vs. temperature"),
+    ("shr", "ШР packet (despread + decode)", "Preambles despread (PRS 3), preamble value, despread SNR; at high "
+                                            "rates the КБД is captured from the RF onset, despread (PRS 1 ⊕ 2) and "
+                                            "turbo decoded"),
     ("ber", "Data / BER (УР)", "Decoded КБД collected until the bit count is reached: BER, RS corrections, CRC"),
 ]
 TEST_NAME = {t: n for t, n, _ in TESTS}
 DEFAULT_PLANS = {
-    "Full test": ["pre", "supply", "cw", "bpsk", "oqpsk", "att", "lin", "harm", "ber"],
+    "Full test": ["pre", "supply", "cw", "bpsk", "oqpsk", "shr", "att", "lin", "harm", "ber"],
     "Quick check": ["pre", "cw", "oqpsk"],
     "Modulation only": ["bpsk", "oqpsk"],
+    "Data decoding": ["bpsk", "shr", "ber"],
     "Attenuator": ["att"],
     "Burn-in (stability)": ["pre", "drift"],
 }
@@ -201,6 +210,37 @@ def fsw_capture(dev, center, fs, n, autolevel=True, ref_level=0.0):
                                                   container=np.array), dtype=np.float64)
     m = raw.size // 2 * 2
     return raw[0:m:2] + 1j * raw[1:m:2], fs_real, errs
+
+
+def fsw_arm(dev, center, fs, n, ref_level, trig_level):
+    """Arm a single I/Q capture triggered by the IF power (RF onset). Returns (fs, errors)."""
+    dev.select_app("iq")
+    dev.write(f"FREQ:CENT {center:.12g}")
+    dev.write(f"TRAC:IQ:SRAT {fs:.10g}")
+    dev.write(f"TRAC:IQ:RLEN {int(n)}")
+    dev.write(f"DISP:WIND:TRAC:Y:SCAL:RLEV {ref_level:.4g}")
+    dev.write("TRIG:SOUR IFP")
+    dev.write(f"TRIG:LEV:IFP {trig_level:.4g}")
+    dev.query("*OPC?")
+    errs = dev.errors()
+    fs_real = dev._qf("TRAC:IQ:SRAT?") or fs
+    dev.iq_fs = fs_real
+    dev.write("*CLS;:INIT:IMM;*OPC")
+    return fs_real, errs
+
+
+def fsw_fetch(dev):
+    try:
+        dev._wait_sweep(lambda: False)
+        raw = np.asarray(dev.inst.query_binary_values("TRAC:IQ:DATA:MEM?", datatype="f", is_big_endian=False,
+                                                      container=np.array), dtype=np.float64)
+    finally:
+        try:
+            dev.write("TRIG:SOUR IMM")
+        except Exception:
+            pass
+    m = raw.size // 2 * 2
+    return raw[0:m:2] + 1j * raw[1:m:2]
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +375,73 @@ class PlanDialog(QtWidgets.QDialog):
 # --------------------------------------------------------------------------- #
 #  Station                                                                     #
 # --------------------------------------------------------------------------- #
+class FileDialog(QtWidgets.QDialog):
+    """Sample rate / centre (from the file if present), signal type, rates."""
+
+    def __init__(self, parent, path, cfg):
+        super().__init__(parent)
+        self.setWindowTitle("Analyze I/Q file")
+        self.path = path
+        f = QtWidgets.QFormLayout(self)
+        f.addRow(QtWidgets.QLabel(f"<b>{os.path.basename(path)}</b>"))
+        self.dtype = QtWidgets.QComboBox()
+        self.dtype.addItems(["float32", "int16", "int32", "float64", "int8"])
+        self.order = QtWidgets.QComboBox()
+        self.order.addItem("I,Q pairs", "pairs")
+        self.order.addItem("I block, then Q block", "blocks")
+        raw = not path.lower().endswith((".tar", ".csv", ".txt", ".npy", ".npz"))
+        if raw:
+            f.addRow("Raw data type", self.dtype)
+            f.addRow("Sample order", self.order)
+        self.iq = None
+        try:
+            if not raw:
+                self.iq = bos_iqfile.load(path)
+        except Exception as e:
+            f.addRow(QtWidgets.QLabel(f"cannot read: {e}"))
+        self.fs = QtWidgets.QDoubleSpinBox()
+        self.fs.setRange(0, 1e5)
+        self.fs.setDecimals(6)
+        self.fs.setSuffix(" MS/s")
+        self.fs.setValue((self.iq.fs or 0) / 1e6 if self.iq else 0)
+        self.center = QtWidgets.QDoubleSpinBox()
+        self.center.setRange(0, 100)
+        self.center.setDecimals(9)
+        self.center.setSuffix(" GHz")
+        self.center.setValue(((self.iq.center if self.iq else None) or cfg["carrier"]) / 1e9)
+        f.addRow("Sample rate", self.fs)
+        f.addRow("Centre frequency", self.center)
+        if self.iq:
+            f.addRow("Samples", QtWidgets.QLabel(f"{len(self.iq.x):,}  ({self.iq.meta.get('format', '')})"))
+        self.mode = QtWidgets.QComboBox()
+        for k, txt in (("auto", "Auto (from the spectrum)"), ("cw", "Carrier (CW)"), ("bpsk", "УР - BPSK"),
+                       ("oqpsk", "ШР - OQPSK")):
+            self.mode.addItem(txt, k)
+        f.addRow("Signal", self.mode)
+        self.ur = QtWidgets.QComboBox()
+        self.ur.addItem("auto (best MER)", None)
+        for r in (8, 16, 32, 64, 128, 256, 512):
+            self.ur.addItem(f"{r} kbit/s", r)
+        self.shr = QtWidgets.QComboBox()
+        self.shr.addItem("auto (search)", None)
+        for r in (16, 32, 64, 128, 256, 512, 1024):
+            self.shr.addItem(f"{r} kbit/s", r)
+        f.addRow("УР rate", self.ur)
+        f.addRow("ШР rate", self.shr)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def result_data(self):
+        iq = self.iq or bos_iqfile.load(self.path, self.dtype.currentText(), self.order.currentData())
+        iq.fs = self.fs.value() * 1e6
+        iq.center = self.center.value() * 1e9 or None
+        if not iq.fs:
+            raise ValueError("enter the sample rate")
+        return iq, self.mode.currentData(), self.ur.currentData(), self.shr.currentData()
+
+
 class BosStation(QtWidgets.QWidget):
     def __init__(self, host):
         super().__init__()
@@ -430,6 +537,9 @@ class BosStation(QtWidgets.QWidget):
         self.live_mod = QtWidgets.QComboBox()
         self.live_mod.addItems(["OQPSK", "BPSK", "CW"])
         self.live_mod.setToolTip("What the unit is transmitting during live diagnose")
+        self.file_btn = QtWidgets.QPushButton("📂 Analyze I/Q file…")
+        self.file_btn.setToolTip("Load an FSW I/Q recording (.iq.tar, .iqw, .csv, raw) and diagnose it like a capture")
+        self.file_btn.clicked.connect(self.analyze_file)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setFixedWidth(150)
         self.progress.setTextVisible(True)
@@ -439,7 +549,7 @@ class BosStation(QtWidgets.QWidget):
         self.verdict_lbl.setMinimumWidth(150)
         self._show_verdict("")
         for w in (QtWidgets.QLabel("Unit"), self.serial, self.operator, QtWidgets.QLabel("Plan"), self.plan_cb,
-                  plan_menu, self.run_btn, self.live_btn, self.live_mod, self.progress):
+                  plan_menu, self.run_btn, self.live_btn, self.live_mod, self.file_btn, self.progress):
             bar.addWidget(w)
         bar.addStretch(1)
         bar.addWidget(self.verdict_lbl)
@@ -811,6 +921,7 @@ class BosStation(QtWidgets.QWidget):
         self.spec_curve = self.spec.plot([], [], pen=pg.mkPen("#58a6ff", width=1))
         self.phase = self._plot("Phase error per symbol", "symbol", "deg")
         self.phase_curve = self.phase.plot([], [], pen=pg.mkPen("#f0883e", width=1))
+        self.phase.getAxis("left").enableAutoSIPrefix(False)
         self.sig_info = QtWidgets.QTextBrowser()
         self.sig_info.setFont(_mono())
         self.sig_src = QtWidgets.QComboBox()
@@ -1256,9 +1367,10 @@ class BosStation(QtWidgets.QWidget):
                 done("ABORTED", "the station is busy")
             return
         tests = list(tests or self.data["plans"].get(name, []))
-        if self.ctl.get("method") == "protocol" and tests != ["live"] and "link" not in tests:
+        offline = tests == ["file"]
+        if self.ctl.get("method") == "protocol" and tests not in (["live"], ["file"]) and "link" not in tests:
             tests.insert(0, "link")
-        if not getattr(self.host, "connected", False):
+        if not offline and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
             self.step_lbl.setText(msg)
@@ -1268,7 +1380,8 @@ class BosStation(QtWidgets.QWidget):
             return
         self._collect()
         self._wire_host()
-        self._auto_bandwidth()
+        if not offline:
+            self._auto_bandwidth()
         self.live_mode = tests == ["live"]
         if hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
             self.host.run_btn.setChecked(False)          # stop the live FSW view while testing
@@ -1288,7 +1401,8 @@ class BosStation(QtWidgets.QWidget):
         self.cur_test = ""
         self.run_info = {"plan": name, "tests": tests, "serial": self.serial.text().strip(),
                          "operator": self.operator.text().strip(), "start": time.time(),
-                         "demo": self._is_demo(), "faults": dict(self.sim.faults) if self._is_demo() else {}}
+                         "demo": self._is_demo() and not offline,
+                         "faults": dict(self.sim.faults) if self._is_demo() and not offline else {}}
         self.run_btn.setText("■ Abort")
         self.progress.setRange(0, max(1, len(tests)))
         self.progress.setValue(0)
@@ -1455,9 +1569,11 @@ class BosStation(QtWidgets.QWidget):
         if self.cur_mode in (None, "rf_off"):
             yield from self._proto(0x01)
             return
-        code = {"cw": 0xA0, "bpsk": self.ctl.get("bpsk_cmd", 0xA1), "oqpsk": self.ctl.get("oqpsk_cmd", 0xA4)}[self.cur_mode]
+        code = {"cw": 0xA0, "bpsk": self.ctl.get("bpsk_cmd", 0xA1), "oqpsk": self.ctl.get("oqpsk_cmd", 0xA4),
+                "shr_pre": 0xA2, "shr_kbd": 0xA4}[self.cur_mode]
         data = bp.p_session(code, int(self.ctl.get("freq_n", 800)), min(bp.ATTEN_MAX_DB, self.cur_att),
-                            coding=0, continuous=True, count=2047,
+                            coding=1 if code == 0xA4 else 0, continuous=True,
+                            count=2 if self.cur_mode == "shr_kbd" else 2047,
                             rate=int(self.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2)),
                             reg=5 if code == 0xA1 else 1)
         self._keepalive()                                   # valid target designation before the session
@@ -1511,7 +1627,8 @@ class BosStation(QtWidgets.QWidget):
             yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000 if not self._is_demo() else 0.05)
             return
         if self._is_demo():
-            self.sim.mode = {"rf_off": "off", "cw": "cw", "bpsk": "BPSK", "oqpsk": "OQPSK"}[mode]
+            self.sim.mode = {"rf_off": "off", "cw": "cw", "bpsk": "BPSK", "oqpsk": "OQPSK", "shr_pre": "OQPSK",
+                             "shr_kbd": "OQPSK"}[mode]
             yield ("sleep", 0.05)
             return
         uid = self.ctl.get("cmd", {}).get(mode)
@@ -1574,6 +1691,14 @@ class BosStation(QtWidgets.QWidget):
                 x, fs_real, errs = sim.capture(center, fs, n, sr, filt), fs, []
             else:
                 x, fs_real, errs = fsw_capture(dev, center, fs, n, cfg["autolevel"], cfg["ref_level"])
+            if cfg.get("save_iq"):
+                try:
+                    os.makedirs(os.path.join(REPORT_DIR, "captures"), exist_ok=True)
+                    nm = "".join(ch if ch.isalnum() else "_" for ch in label)[:40]
+                    p = os.path.join(REPORT_DIR, "captures", f"{time.strftime('%Y%m%d_%H%M%S')}_{nm}.iq.tar")
+                    bos_iqfile.write_iq_tar(p, x, fs_real, center, f"BOS station capture: {label}")
+                except Exception:
+                    pass
             r = analyze(x, fs_real)
             r["fsw_errors"] = errs
             r["t"] = time.time()
@@ -1698,6 +1823,10 @@ class BosStation(QtWidgets.QWidget):
                                      lambda x, f: ba.analyze_cw(x, f, c, (c["pn_lo"], c["pn_hi"])), "carrier")
         self.res["cw"] = r
         self._add_capture("CW carrier", r)
+        self._cw_rows(T, r)
+
+    def _cw_rows(self, T, r):
+        c = self.cfg
         if not r.get("present"):
             self._row(T, "Carrier present", None, "", "yes", "FAIL", text="NO SIGNAL")
             return
@@ -1711,11 +1840,14 @@ class BosStation(QtWidgets.QWidget):
 
     def _mod_test(self, mod):
         T = TEST_NAME[mod.lower()]
-        L = self.lim
         yield from self._set_mode(mod.lower())
         r = yield from self._mod_capture(mod)
         self.res[f"mod_{mod}"] = r
         self._add_capture(mod, r)
+        self._mod_rows(T, mod, r)
+
+    def _mod_rows(self, T, mod, r):
+        L = self.lim
         if not r.get("present"):
             self._row(T, "Signal present", None, "", "yes", "FAIL", text="NO SIGNAL")
             return
@@ -1779,6 +1911,185 @@ class BosStation(QtWidgets.QWidget):
             self._row(T, "Spacecraft ID", d["scid"], "", f"{self.cfg.get('scid', 0)}", "PASS" if d["scid_ok"] else "FAIL",
                       spec="{:.0f}")
         self._row(T, "Frame counter gaps", d["vcfc_gaps"], "", "0", "PASS" if not d["vcfc_gaps"] else "FAIL", spec="{:.0f}")
+
+    def _shr_rate(self):
+        return bp.RATES[int(self.ctl.get("rate_shr", 4))]
+
+    def _shr_rows(self, T, d):
+        if "error" in d:
+            self._row(T, "ШР despreading", None, "", "", "ERROR", note=d["error"])
+            return
+        self._row(T, "Preambles found (PRS 3)", d.get("preamble_found", 0), "", "≥ 1",
+                  "PASS" if d.get("preamble_found") else "FAIL", spec="{:.0f}",
+                  note=f"{d.get('rate', '?')} kbit/s, preamble {d.get('preamble_value', '')}")
+        if d.get("despread_snr_db") is not None:
+            self._row(T, "Despread SNR per preamble bit", d["despread_snr_db"], "dB", "", "INFO", spec="{:.1f}")
+        if d.get("despread_eff") is not None:
+            self._lim_row(T, "Despreading efficiency (preamble PRS)", 100 * d["despread_eff"], "%", 70, None, "{:.0f}")
+        if d.get("marker") is not None and d.get("preamble_found"):
+            self._row(T, "End-of-preamble marker 0xDA2B1E5E", None, "", "found", "PASS" if d["marker"] else "INFO",
+                      text="found" if d["marker"] else "not in capture")
+        if d.get("frames") is not None and d.get("marker") and "n_frames" in d:
+            self._row(T, "КБД decoded (turbo 1/2)", d["n_frames"], "", "≥ 1", "PASS" if d["n_frames"] else "FAIL",
+                      spec="{:.0f}")
+            if d["n_frames"]:
+                self._row(T, "Despread SNR per КБД bit", d.get("cbd_snr_db"), "dB", "", "INFO", spec="{:.1f}")
+                self._lim_row(T, "Despreading efficiency (КБД PRS)", 100 * d.get("cbd_eff", float("nan")), "%", 70,
+                              None, "{:.0f}")
+                self._row(T, "Transport frame CRC errors", d["crc_fail"], "", "0", "PASS" if not d["crc_fail"] else "FAIL",
+                          spec="{:.0f}")
+                self._row(T, "Code-bit BER before turbo decoding", d["ber"], "", "", "INFO", spec="{:.2e}")
+                self._row(T, "Idle frame content", None, "", "as table 4.4", "PASS" if not d["idle_bad"] else "FAIL",
+                          text=f"{d['n_frames'] - d['idle_bad']}/{d['n_frames']} ok")
+                self._row(T, "Frame counter gaps", d["vcfc_gaps"], "", "0", "PASS" if not d["vcfc_gaps"] else "FAIL",
+                          spec="{:.0f}")
+        elif d.get("note"):
+            self._row(T, "КБД", None, "", "", "INFO", text=d["note"])
+
+    def _t_shr(self):
+        import bos_shr
+        T = TEST_NAME["shr"]
+        c = self._mcfg("OQPSK")
+        fs, sr, rate = c["fs"], c["symbol_rate"], self._shr_rate()
+        pre = (self.res.get("config") or {}).get("Preamb") or bos_shr.PREAMBLE
+        n_pre = (self.res.get("config") or {}).get("Numb_Preamb") or 5
+        spc = fs / sr / 2                                 # samples per chip
+        sfp, sf = bos_shr.chips_per_bit(rate, True), bos_shr.chips_per_bit(rate)
+        alpha = self.cfg.get("alpha", 0.25)
+
+        def analyze(x, f):
+            chips, _ = bos_shr.chips_from_iq(x, f, sr, alpha)
+            return {"kind": "shr", "shr": bos_shr.decode_shr(chips, rate, pre, max_cbd=2)}
+        # 1) preambles only (PRS 3 restarts every bit: any part of the stream can be despread)
+        self.cur_mode = "shr_pre"
+        if self.ctl.get("method") == "protocol":
+            yield from self._session()
+            yield ("sleep", 0.6 if not self._is_demo() else 0.02)
+        elif not self._is_demo():
+            ok = yield ("prompt", "Start a ШР session with <b>preambles only</b> (many preambles).")
+            if not ok:
+                return
+        n = int(72 * sfp * spc)                          # ≥ 2 whole preambles at any phase
+        if self._is_demo():
+            sim = self.sim
+
+            def job():
+                x = sim.capture_shr(fs, n, rate, "pre", pre=pre)
+                return analyze(x, fs)
+            st, r = yield ("fsw", job)
+        else:
+            r = yield from self._capture("shr", c["carrier"], fs, n, analyze, f"ШР preambles {rate} kbit/s")
+            st = "ok"
+        if st == "err":
+            raise _TestError(str(r))
+        d = r["shr"]
+        d["marker"] = None                               # preamble-only packet: no marker expected
+        self.res["shr"] = d
+        self._shr_rows(T + " · preambles", d)
+        if rate < self.cfg.get("shr_decode_min", 512) or not d.get("preamble_found"):
+            if rate < self.cfg.get("shr_decode_min", 512):
+                self._row(T, "КБД decoding", None, "", "", "INFO",
+                          text=f"skipped: {rate} kbit/s < {self.cfg.get('shr_decode_min', 512)} kbit/s "
+                               f"(КБД = {17912 * sf / 1e6:.1f} M chips)")
+            return
+        # 2) full packet from the RF onset: arm the FSW (IF power trigger), then start the session
+        self.cur_mode = "rf_off"
+        if self.ctl.get("method") == "protocol":
+            yield from self._session()
+        n = int(((n_pre + 1) * 32 * sfp + 2 * bos_shr.CBD_SR_BITS * sf) * spc * 1.03) + 20000
+        lvl = self.cfg["power_nom"] - self.cfg.get("loss_db", 0)
+        if self._is_demo():
+            sim = self.sim
+
+            def fetch():
+                x = sim.capture_shr(fs, n, rate, "kbd", pre=pre, n_pre=n_pre)
+                return analyze(x, fs)
+            self.cur_mode = "shr_kbd"
+            yield from self._session()
+            st, r = yield ("fsw", fetch)
+        else:
+            def arm():
+                return fsw_arm(self.host.worker.dev, c["carrier"], fs, n, lvl + 5, lvl - 20)
+            st, a = yield ("fsw", arm)
+            if st == "err":
+                raise _TestError(f"FSW trigger: {a}")
+            for e in a[1]:
+                self.log(f"BOS station: FSW: {e}", "warn")
+            self.cur_mode = "shr_kbd"
+            if self.ctl.get("method") == "protocol":
+                yield from self._session()
+            else:
+                ok = yield ("prompt", "The FSW waits for the RF. Start a ШР session with <b>КБД</b> now.")
+                if not ok:
+                    return
+
+            def fetch():
+                x = fsw_fetch(self.host.worker.dev)
+                return analyze(x, a[0])
+            self.step_lbl.setText(f"{T}: waiting for the RF onset (FSW IF power trigger) …")
+            st, r = yield ("fsw", fetch)
+        if st == "err":
+            raise _TestError(f"ШР capture: {r}")
+        self.res["shr"] = r["shr"]
+        self._shr_rows(T + " · КБД", r["shr"])
+
+    # ---- offline: I/Q file
+    def analyze_file(self):
+        if self.running:
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "I/Q recording", "", bos_iqfile.FILE_FILTER)
+        if not path:
+            return
+        dlg = FileDialog(self, path, self.cfg)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        try:
+            self._file = dlg.result_data()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "I/Q file", f"{type(e).__name__}: {e}")
+            return
+        self.start_plan(f"I/Q file: {os.path.basename(path)}", tests=["file"])
+
+    def _t_file(self):
+        iq, mode, ur, shr = self._file
+        T = f"File {iq.name}"
+        cfg = dict(self.cfg)
+        msgs = []
+        self.log(f"BOS station: analysing {iq.name}: {len(iq.x):,} samples, {iq.fs / 1e6:g} MS/s"
+                 + (f", centre {iq.center / 1e9:.6f} GHz" if iq.center else ""))
+
+        def job():
+            return ba.analyze_file(iq.x, iq.fs, iq.center, cfg, mode, ur, shr, msgs.append)
+        self.step_lbl.setText(f"Analysing {iq.name} …")
+        st, res = yield ("fsw", job)
+        for m in msgs:
+            self.log(f"BOS station: {m}")
+        if st == "err":
+            raise _TestError(str(res))
+        idt = res.pop("_ident", {})
+        self._row(T, "Signal type", None, "", "", "INFO",
+                  text={"cw": "carrier (CW)", "narrow": "narrowband (УР, BPSK)", "wide": "wideband (ШР, OQPSK)",
+                        "off": "no signal"}.get(idt.get("type"), "?") + (f", OBW {idt['obw'] / 1e6:.3f} MHz" if
+                                                                          _fin(idt.get("obw")) else ""))
+        if iq.center and abs(iq.center - self.cfg["carrier"]) > 1e3:
+            self._row(T, "File centre vs nominal carrier", (iq.center - self.cfg["carrier"]) / 1e3, "kHz", "", "INFO",
+                      spec="{:+.1f}")
+        self.res.update(res)
+        if "cw" in res:
+            self._add_capture("file: carrier", res["cw"])
+            self._cw_rows("Carrier (CW)", res["cw"])
+        for mod in ("BPSK", "OQPSK"):
+            r = res.get(f"mod_{mod}")
+            if r:
+                self._add_capture(f"file: {mod}", r)
+                if r.get("ur_rate_kbps"):
+                    self._row(TEST_NAME[mod.lower()], "УР data rate (detected)", r["ur_rate_kbps"], "kbit/s", "",
+                              "INFO", spec="{:.0f}")
+                self._mod_rows(TEST_NAME[mod.lower()], mod, r)
+                if r.get("decode"):
+                    self._decode_rows(TEST_NAME[mod.lower()], r["decode"])
+        if "shr" in res:
+            self._shr_rows(TEST_NAME["shr"], res["shr"])
 
     def _t_ber(self):
         T = TEST_NAME["ber"]
@@ -2059,7 +2370,11 @@ class BosStation(QtWidgets.QWidget):
 
     def _update_diagnosis(self):
         res = {k: v for k, v in self.res.items() if not k.startswith("_") and k != "extra"}
-        self.findings = ba.diagnose(res, self.tlm_snapshot(), self.cfg, self.lim) + list(self.res.get("extra", []))
+        offline = self.run_info.get("tests") == ["file"]
+        self.findings = ba.diagnose(res, {} if offline else self.tlm_snapshot(), self.cfg, self.lim) + \
+            list(self.res.get("extra", []))
+        if offline:
+            self.findings = [f for f in self.findings if f.source != "telemetry"]
         if any(f.title.startswith("PA gain compression") for f in self.findings):
             for f in self.findings:                          # small steps at low attenuation = PA compression
                 if f.source == "attenuator" and f.sev == "warn":
