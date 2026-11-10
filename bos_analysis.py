@@ -237,6 +237,7 @@ def iq_impairments(z, d):
 def analyze_modulated(x, fs, cfg, expected_mod):
     """Full analysis of one modulated capture. cfg: symbol_rate, alpha, carrier, loss_db."""
     sr, alpha = cfg["symbol_rate"], cfg["alpha"]
+    filt = cfg.get("filter", "RRC")
     out = {"kind": "mod", "expected": expected_mod, "fs": fs, "nsamp": len(x)}
     pw = float(np.mean(np.abs(x) ** 2)) / iq_demod.R_LOAD
     out["power_raw"] = _db(pw * 1e3)
@@ -262,7 +263,7 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     tries = {}
     for m in ("BPSK", "QPSK", "OQPSK"):
         try:
-            tries[m] = iq_demod.demodulate(xd, fsd, sr, m, "RRC", alpha)
+            tries[m] = iq_demod.demodulate(xd, fsd, sr, m, filt, alpha)
         except Exception as e:
             tries[m] = {"error": str(e), "mer": float("nan")}
     out["mer_by_mod"] = {m: r.get("mer", float("nan")) for m, r in tries.items()}
@@ -312,11 +313,16 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     pr = papr(xd)
     ref = papr_reference(expected_mod, sps, alpha, (min(bw, fs) / sr) if bw else fs / sr)
     out["papr"], out["papr_ref"], out["compression_db"] = pr, ref, ref - pr
-    if out["band_limited"]:
+    if filt == "NONE":
+        out["compression_db"] = float("nan")
+        out["compression_note"] = "n/a: constant envelope (gain compression: PA-linearity test)"
+    elif out["band_limited"]:
         # cutting the band regrows the peaks the PA clipped: PAPR no longer shows compression
         out["compression_db"] = float("nan")
         out["compression_note"] = "n/a: FSW bandwidth narrower than the signal (judged on BPSK)"
     out["spectrum"] = spectrum_metrics(x, fs, sr, alpha, r["cfe"])
+    if filt == "NONE":                               # rectangular pulses: no channel bandwidth
+        out["spectrum"]["aclr"] = out["spectrum"]["obw_ratio"] = float("nan")
     if out["band_limited"]:                          # OBW can be at most the FSW I/Q bandwidth
         out["spectrum"]["obw_ratio"] = out["spectrum"]["obw"] / bw
     return out
@@ -639,15 +645,14 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
     if cfe_r and _finite(cfe_r.get("cfe")) and cfg.get("carrier"):
         ppm = cfe_r["cfe"] / cfg["carrier"] * 1e6
         sr_ppm = sr_r.get("srerr") if sr_r else None
-        lim_hz = lim.get("cfe_max_hz", 5e3)
+        lim_hz = lim.get("cfe_max_hz", 75.5e3)
         if abs(cfe_r["cfe"]) > lim_hz:
-            if _finite(sr_ppm) and abs(sr_ppm) > lim.get("srerr_max_ppm", 5) / 2 and \
-                    abs(sr_ppm - ppm) < max(0.5, 0.3 * abs(ppm)):
+            if _finite(sr_ppm) and abs(ppm) > 1 and abs(sr_ppm - ppm) < max(0.7, 0.3 * abs(ppm)):
                 F.append(Finding("fail", "Reference frequency offset",
                                  f"Carrier error {cfe_r['cfe']:+.0f} Hz = {ppm:+.2f} ppm and symbol-rate error "
                                  f"{sr_ppm:+.2f} ppm agree: everything is off by the same ratio → the common 10 MHz "
                                  f"reference is off-frequency.",
-                                 {"REF": 0.85, "CLK": 0.1}, ["Measure the 10 MHz reference with a counter",
+                                 {"REF": 0.85, "CLK": 0.1}, ["Measure the 10 MHz reference with a counter (on the bench it comes from the TFG6806)",
                                                              "Trim / replace the TCXO, or use the external reference"],
                                  "frequency"))
             else:
@@ -792,9 +797,27 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                              ["Note the offset: if it moves with the carrier setting it is a synthesizer spur",
                               "Compare with the DC/DC switching frequency"], mod))
 
+    # ---- carrier (CW) purity
+    if cw:
+        if _finite(cw.get("spur_max_dbc")) and cw["spur_max_dbc"] > lim.get("spur_max_dbc", -40):
+            f0, lv = cw["spurs"][0]
+            F.append(Finding("warn", f"Carrier: spur {lv:.1f} dBc at {f0 / 1e3:+.1f} kHz",
+                             "Discrete line next to the unmodulated carrier: synthesizer (LMX2594 fractional / "
+                             "integer-boundary) spur, reference or clock coupling, or a switching regulator.",
+                             {"LMX": 0.45, "CLK": 0.2, "PWR": 0.2, "REF": 0.15},
+                             ["Note the offset: if it moves with the frequency code N it is a synthesizer spur",
+                              "Compare with the DC/DC switching frequency"], "CW"))
+        if _finite(cw.get("pn_deg")) and cw["pn_deg"] > lim.get("pn_max_deg", 1.5):
+            F.append(Finding("warn", f"Carrier: integrated phase noise {cw['pn_deg']:.2f}° RMS",
+                             f"Limit {lim.get('pn_max_deg', 1.5):g}°, band {cw['pn_band'][0] / 1e3:g}…"
+                             f"{cw['pn_band'][1] / 1e3:g} kHz: noisy LO.", {"LMX": 0.6, "REF": 0.25, "CLK": 0.15},
+                             ["Check the LMX2594 loop filter and VCO calibration", "Check the 10 MHz reference"], "CW"))
+
     # ---- BPSK vs OQPSK: which rail is bad
     if bpsk and oq and _finite(bpsk.get("mer")) and _finite(oq.get("mer")):
-        if bpsk["mer"] - oq["mer"] > 6 and bpsk["mer"] >= lim.get("mer_min", 20) and oq["mer"] < lim.get("mer_min", 20):
+        pn_oq = _finite(oq.get("phase_err_res_deg")) and oq["phase_err_res_deg"] > lim.get("phase_err_max", 3)
+        if bpsk["mer"] - oq["mer"] > 6 and bpsk["mer"] >= lim.get("mer_min", 20) and \
+                oq["mer"] < lim.get("mer_min", 20) and not pn_oq:
             F.append(Finding("fail", "Q path fault (BPSK good, OQPSK bad)",
                              f"BPSK (I rail only) {bpsk['mer']:.1f} dB but OQPSK {oq['mer']:.1f} dB → the Q rail "
                              f"(DAC channel B, its JESD lanes or the ADMV1013 Q input) is faulty.",
@@ -893,9 +916,9 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
 # --------------------------------------------------------------------------- #
 FAULTS = [  # key, label, default magnitude, unit
     ("ref_ppm", "Reference oscillator offset", 3.0, "ppm"),
-    ("lo_hz", "LMX2594 frequency error", 25e3, "Hz"),
+    ("lo_hz", "LMX2594 frequency error", 150e3, "Hz"),
     ("lo_unlock", "LMX2594 unlocked", 1, ""),
-    ("clk_ppm", "DAC / FPGA clock error", 40.0, "ppm"),
+    ("clk_ppm", "DAC / FPGA clock error", 120.0, "ppm"),
     ("jesd", "JESD204B link error", 1, ""),
     ("gain_imb", "Q path gain error", 2.0, "dB"),
     ("quad", "Quadrature error", 8.0, "deg"),
@@ -994,8 +1017,9 @@ class BosSimulator:
         p -= self.faults.get("gain_low", 0.0)
         return p - self.cfg.get("loss_db", 0.0)
 
-    def capture(self, center, fs, n, sr=None):
+    def capture(self, center, fs, n, sr=None, filt=None):
         cfg = self.cfg
+        filt = filt or "RRC"
         sr = sr or cfg.get("symbol_rate") or cfg.get("sr_oqpsk", 1e6)
         rng = self.rng
         noise_dbm = -95.0 + 10 * math.log10(fs / 1e6)          # FSW noise in the capture bandwidth
@@ -1019,11 +1043,11 @@ class BosSimulator:
             sps = int(round(fs / sr))
             if abs(fs / sr - sps) > 1e-6 or sps < 2:      # FSW rate not a multiple: generate at 4 sps, resample
                 n4 = int(math.ceil(n * 4 * sr / fs)) + 64
-                s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"],
+                s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
                                        clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)
                 s = resample(s4, 4 * sr, fs)[0][:n]
             else:
-                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"],
+                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
                                       clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
             if len(s) < n:
                 s = np.r_[s, np.zeros(n - len(s))]
@@ -1042,7 +1066,9 @@ class BosSimulator:
             a = np.abs(s)
             backoff = self.faults["comp"] + self.att_db() - self.cfg.get("att_code", 0)   # ATT is before the PA
             sat = 10 ** (backoff / 20) * math.sqrt(np.mean(a ** 2))
+            p0 = np.mean(np.abs(s) ** 2)
             s = s / (1 + (a / sat) ** 4) ** 0.25
+            p += 10 * math.log10(np.mean(np.abs(s) ** 2) / p0)          # gain compression
         t = np.arange(n) / fs
         ph = 2 * np.pi * cfe * t
         pn_deg = 0.3 + self.faults.get("pn", 0.0) + (40.0 if "lo_unlock" in self.faults else 0.0)
@@ -1078,7 +1104,7 @@ class BosSimulator:
         return tl
 
     def supply_current(self):
-        i = 1.20
+        i = 0.38
         if self.mode != "off" and "no_rf" not in self.faults:
-            i += 0.85
+            i += 0.62
         return i + self.rng.normal(0, 0.005)

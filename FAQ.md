@@ -230,6 +230,15 @@ them by hand). The OQPSK signal occupies about 177 MHz (131.072 MHz × 1.35):
   judged against 160 MHz, ACLR is n/a, and PA compression cannot be seen on OQPSK (cutting the band regrows the
   clipped peaks) — it is judged on BPSK, which uses the same PA, and the PA-linearity test runs on BPSK.
 
+### Which limits come from the technical specification (TZ)?
+Defaults follow the TZ: carrier 37650 + 0.125·n MHz, frequency error ≤ 2·10⁻⁶ (75.5 kHz at 37.75 GHz), symbol-rate
+error ≤ 5·10⁻⁵ (50 ppm), MER ≥ 20 dB, maximum output power −9…−2 dBm at the HF output (nominal −5.5 ± 3.5 dB; at the
+technological connector −30…−10 dBm: set −20 ± 10), power range 20 dB, supply current ≤ 1.3 A in session and
+≤ 0.5 A in standby (at 14 V). BPSK (УР) is SP-L coded with ±90° modulation, i.e. constant envelope with
+rectangular pulses: occupied bandwidth, ACLR and PAPR compression are not judged on BPSK. PA compression is found
+by the PA-linearity test from the output power (a 6 dB attenuation step must lower the power by 6 dB) and, with
+a wide FSW, from the OQPSK PAPR. The OQPSK chip rate is 262.144 MHz (131.072 Msym/s per rail).
+
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
 **cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply

@@ -70,7 +70,10 @@ CFG_FIELDS = [
     ("sr_bpsk", "Symbol rate BPSK (УР)", "f", 64e3, "kHz", "УР: 2 × data rate (e.g. 32 kbit/s -> 64 ksym/s). "
      "With protocol control it follows the УР rate on the Unit control page"),
     ("sr_oqpsk", "Symbol rate OQPSK (ШР)", "f", 131.072e6, "Msym/s", "ШР: always 131.072 Msym/s, for every data rate"),
-    ("alpha", "RRC roll-off", "f", 0.35, "", "Roll-off of the pulse shaping filter in the FPGA"),
+    ("alpha", "OQPSK RRC roll-off", "f", 0.35, "", "Roll-off of the OQPSK pulse shaping filter in the FPGA"),
+    ("bpsk_rect", "BPSK rectangular pulses (SP-L)", "b", True, "", "BPSK (УР) is SP-L coded with ±90° modulation: "
+     "constant envelope, no pulse shaping. Then OBW / ACLR / PAPR compression are not judged on BPSK"),
+    ("oqpsk_rrc", "OQPSK RRC filtered", "b", True, "", "Untick if the ШР signal is not pulse-shaped"),
     ("sps_bpsk", "Samples / symbol BPSK", "i", 8, "", "FSW I/Q sample rate = symbol rate × this (2…16)"),
     ("fs_oqpsk", "OQPSK capture sample rate", "f", 524.288e6, "MHz", "FSW I/Q sample rate for the 131.072 Msym/s "
      "signal (524.288 = 4 samples/symbol). Any other rate is resampled to 4 samples/symbol for the demodulator"),
@@ -81,7 +84,8 @@ CFG_FIELDS = [
      "bandwidth; PA compression is harder to see)"),
     ("nsym", "Symbols per capture", "i", 4000, "", "Longer = more accurate, slower"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
-    ("power_nom", "Nominal output power", "f", 10.0, "dBm", "Expected power at the BOS output with the nominal attenuator code"),
+    ("power_nom", "Nominal output power", "f", -5.5, "dBm", "TZ: maximum output power −9…−2 dBm at the HF output "
+     "(set −5.5 ± 3.5). At the technological connector: −30…−10 dBm (set −20 ± 10)"),
     ("att_code", "Nominal Atten_EIRP", "i", 0, "dB", "EIRP attenuation (0…20 dB, 1 dB steps, sets the ADRF5730) "
      "at which the nominal power is specified"),
     ("loss_db", "Cable / fixture loss", "f", 0.0, "dB", "Added to every power reading (BOS output -> FSW input)"),
@@ -104,9 +108,9 @@ SHR_SYMBOL_RATE = 131.072e6       # ШР (OQPSK): fixed for every data rate; У�
 LIM_FIELDS = [  # key, label, default, unit
     ("mer_min", "MER min", 20.0, "dB"),
     ("evm_max", "EVM max", 10.0, "%"),
-    ("cfe_max_hz", "Carrier frequency error max", 5000.0, "Hz"),
-    ("srerr_max_ppm", "Symbol rate error max", 5.0, "ppm"),
-    ("power_tol_db", "Output power tolerance ±", 1.5, "dB"),
+    ("cfe_max_hz", "Carrier frequency error max (TZ 2·10⁻⁶)", 75500.0, "Hz"),
+    ("srerr_max_ppm", "Symbol rate error max (TZ 5·10⁻⁵)", 50.0, "ppm"),
+    ("power_tol_db", "Output power tolerance ±", 3.5, "dB"),
     ("iq_offset_max_dbc", "Carrier leakage max", -30.0, "dBc"),
     ("gain_imb_max", "I/Q gain imbalance max", 0.5, "dB"),
     ("quad_err_max", "Quadrature error max", 3.0, "°"),
@@ -119,7 +123,8 @@ LIM_FIELDS = [  # key, label, default, unit
     ("att_step_max_db", "Attenuator bit error max", 0.25, "dB"),
     ("lo_harm_max_dbc", "LO-related lines max", -40.0, "dBc"),
     ("pa_delta_i_min", "PA current rise min (RF on)", 0.05, "A"),
-    ("i_max", "Supply current max", 5.0, "A"),
+    ("i_max", "Supply current max, session (TZ, 14 V)", 1.3, "A"),
+    ("i_standby_max", "Supply current max, standby (TZ, 14 V)", 0.5, "A"),
     ("rail_tol_pct", "FPGA rail tolerance ±", 3.0, "%"),
     ("temp_max", "Temperature max", 70.0, "°C"),
     ("err_ref_lo", "Err_Ref_LO max |code|", 1000.0, ""),
@@ -1547,7 +1552,7 @@ class BosStation(QtWidgets.QWidget):
                 return
         yield ("sleep", self.ctl.get("settle_ms", 1500) / 1000)
 
-    def _capture(self, what, center, fs, n, analyze, label, sr=None):
+    def _capture(self, what, center, fs, n, analyze, label, sr=None, filt=None):
         """Submit capture + analysis to the FSW worker; returns the analysis dict."""
         cfg = dict(self.cfg)
         sim = self.sim
@@ -1559,7 +1564,7 @@ class BosStation(QtWidgets.QWidget):
                 raise RuntimeError("FSW not connected")
             if demo:
                 time.sleep(0.05)
-                x, fs_real, errs = sim.capture(center, fs, n, sr), fs, []
+                x, fs_real, errs = sim.capture(center, fs, n, sr, filt), fs, []
             else:
                 x, fs_real, errs = fsw_capture(dev, center, fs, n, cfg["autolevel"], cfg["ref_level"])
             r = analyze(x, fs_real)
@@ -1582,9 +1587,11 @@ class BosStation(QtWidgets.QWidget):
         """Settings for one modulation: its symbol rate and samples per symbol."""
         if mod == "BPSK":
             sr = self.cfg["sr_bpsk"]
-            return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"])
+            return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"],
+                        filter="NONE" if self.cfg.get("bpsk_rect", True) else "RRC")
         sr = self.cfg["sr_oqpsk"]
-        return dict(self.cfg, symbol_rate=sr, fs=min(self.cfg["fs_oqpsk"], sr * 8))
+        return dict(self.cfg, symbol_rate=sr, fs=min(self.cfg["fs_oqpsk"], sr * 8),
+                    filter="RRC" if self.cfg.get("oqpsk_rrc", True) else "NONE")
 
     def _obw_nom(self, mod):
         """Expected occupied bandwidth: symbol rate × (1 + roll-off), at most the FSW I/Q bandwidth."""
@@ -1601,7 +1608,7 @@ class BosStation(QtWidgets.QWidget):
             n = int(math.ceil(n / den)) * den
         r = yield from self._capture("mod", c["carrier"], fs, n,
                                      lambda x, f: ba.analyze_modulated(x, f, c, mod), label or mod,
-                                     sr=c["symbol_rate"])
+                                     sr=c["symbol_rate"], filt=c["filter"])
         return r
 
     def _supply_current(self):
@@ -1665,7 +1672,7 @@ class BosStation(QtWidgets.QWidget):
         if i_off is None or i_on is None:
             raise _TestError("supply not connected / no current reading")
         self.res["supply"] = {"i_off": i_off, "i_on": i_on}
-        self._lim_row(T, "Current, RF off", i_off, "A", None, self.lim["i_max"], "{:.3f}")
+        self._lim_row(T, "Current, RF off (standby)", i_off, "A", None, self.lim["i_standby_max"], "{:.3f}")
         self._lim_row(T, "Current, RF on (CW)", i_on, "A", None, self.lim["i_max"], "{:.3f}")
         self._lim_row(T, "PA current rise", i_on - i_off, "A", self.lim["pa_delta_i_min"], None, "{:.3f}")
 
@@ -1720,10 +1727,12 @@ class BosStation(QtWidgets.QWidget):
         self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"],
                       none_ok=r.get("compression_note", "n/a"))
         sp = r["spectrum"]
-        self._lim_row(T, "ACLR (worst side)", sp["aclr"], "dB", L["aclr_min"], None, "{:.1f}",
-                      none_ok="n/a (capture narrower than 3 channels)")
-        self._lim_row(T, "Occupied bandwidth 99 %", sp["obw"] / 1e6, "MHz",
-                      0.85 * self._obw_nom(mod) / 1e6, 1.15 * self._obw_nom(mod) / 1e6, "{:.3f}")
+        rect = self._mcfg(mod)["filter"] == "NONE"
+        self._lim_row(T, "ACLR (worst side)", float("nan") if rect else sp["aclr"], "dB", L["aclr_min"], None, "{:.1f}",
+                      none_ok="n/a (rectangular pulses)" if rect else "n/a (capture narrower than 3 channels)")
+        self._lim_row(T, "Occupied bandwidth 99 %", float("nan") if rect else sp["obw"] / 1e6, "MHz",
+                      0.85 * self._obw_nom(mod) / 1e6, 1.15 * self._obw_nom(mod) / 1e6, "{:.3f}",
+                      none_ok="n/a (rectangular pulses)")
         self._lim_row(T, "Spectrum asymmetry", sp["asym_db"], "dB", -L["asym_max_db"], L["asym_max_db"], "{:+.2f}")
         self._lim_row(T, "Largest spur", sp["spur_max_dbc"], "dBc", None, L["spur_max_dbc"], "{:.1f}", none_ok=True)
 
@@ -1771,6 +1780,16 @@ class BosStation(QtWidgets.QWidget):
         b = yield from self._mod_capture(mod, f"+{c['lin_step']:g} dB attenuation")
         yield from self._set_att(c["att_code"])
         self.res["lin"] = {"a": a, "b": b}
+        if _fin(a.get("power")) and _fin(b.get("power")):
+            gc = c["lin_step"] - (a["power"] - b["power"])
+            self._lim_row(T, f"Gain compression (expected −{c['lin_step']:g} dB step)", gc, "dB", None,
+                          self.lim["compression_max_db"], "{:.2f}")
+            if gc > self.lim["compression_max_db"]:
+                self.res.setdefault("extra", []).append(ba.Finding(
+                    "fail", f"PA gain compression {gc:.2f} dB",
+                    f"Atten_EIRP +{c['lin_step']:g} dB lowered the output by only {a['power'] - b['power']:.2f} dB: "
+                    f"at the nominal setting the PA (CHA3397) is compressed. This works for constant-envelope BPSK too.",
+                    {"PA": 0.8, "ATT": 0.2}, ["Check the PA bias / supply", "Reduce the drive (Atten_EIRP)"], "linearity"))
         for lbl, r in (("nominal", a), (f"+{c['lin_step']:g} dB", b)):
             self._row(T, f"PAPR loss at {lbl}", r.get("compression_db"), "dB", "", "INFO")
             self._row(T, f"ACLR at {lbl}", r.get("spectrum", {}).get("aclr"), "dB", "", "INFO", spec="{:.1f}")
@@ -1963,6 +1982,11 @@ class BosStation(QtWidgets.QWidget):
     def _update_diagnosis(self):
         res = {k: v for k, v in self.res.items() if not k.startswith("_") and k != "extra"}
         self.findings = ba.diagnose(res, self.tlm_snapshot(), self.cfg, self.lim) + list(self.res.get("extra", []))
+        if any(f.title.startswith("PA gain compression") for f in self.findings):
+            for f in self.findings:                          # small steps at low attenuation = PA compression
+                if f.source == "attenuator" and f.sev == "warn":
+                    f.sev, f.suspects = "info", {"PA": 0.3}
+                    f.detail += " Explained by the PA gain compression (steps shrink where the PA compresses)."
         if any(f.sev in ("fail", "warn") for f in self.findings):
             self.findings = [f for f in self.findings if f.sev != "ok"]
         order = {"fail": 0, "warn": 1, "info": 2, "ok": 3}

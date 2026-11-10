@@ -108,6 +108,12 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 
 ---
 
+TZ (TZ_1.docx) used for the limits: 37650…37850 MHz, f = 37650 + 0.125·n MHz (n 8…1592), Δf ≤ 2·10⁻⁶, symbol rate
+error ≤ 5·10⁻⁵, BPSK SP-L ±90° (УР, 8…256 kbit/s), OQPSK NRZ-L with spreading (ШР, 16…1024 kbit/s, PSP clock 262.144
+MHz), RS(255,223)/turbo 1/2, max power −9…−2 dBm, 20 dB range in ≤ 3 dB steps, MER ≥ 20 dB, BER ≤ 10⁻⁷, test
+connector −30…−10 dBm, VSWR ≤ 1.8, supply 14…17.5 V (16 V), session ≤ 1.3 A / 18 W, standby ≤ 0.5 A / 6 W, 10 MHz
+reference from the TFG6806 on the bench, 2 × DS18S20.
+
 ## 5. Open points / to do
 
 * Telemetry layouts still missing (user will send tables): **BOS IOK CONFIG (0xFA) and IOK ARCHIVE
