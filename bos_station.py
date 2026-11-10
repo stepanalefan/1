@@ -90,7 +90,7 @@ CFG_FIELDS = [
      "the whole КБД in one capture: 17912 bits × 262144/R chips. Below this rate only the preambles are checked"),
     ("save_iq", "Save every capture (.iq.tar)", "b", False, "", "Writes each FSW capture to bos_reports/captures "
      "(R&S iq.tar) - for re-analysis with 'Analyze I/Q file…'"),
-    ("scid", "Spacecraft ID (SCID)", "i", 0, "", "Expected spacecraft identifier in the transport frames (default 0)"),
+    ("scid", "Spacecraft ID (SCID)", "i", 768, "", "Expected spacecraft identifier in the transport frames (default 0)"),
     ("ber_bits", "BER test: bits", "i", 1000000, "", "Code bits to collect in the BER test (TZ BER ≤ 1·10⁻⁷ needs "
      "≥ 3·10⁷ error-free bits for a 95 % statement)"),
     ("lo_mult", "ADMV1013 LO multiplier", "i", 4, "", "LMX2594 output × this = carrier"),
@@ -1868,6 +1868,10 @@ class BosStation(QtWidgets.QWidget):
             self._lim_row(T, "Quadrature error", r["quad_err"], "°", -L["quad_err_max"], L["quad_err_max"], "{:+.2f}")
         self._lim_row(T, "Phase error RMS (after I/Q corr.)", r["phase_err_res_deg"], "°", None, L["phase_err_max"])
         self._row(T, "Magnitude error RMS", r["mag_err_pct"], "%", "", "INFO")
+        fw = r.get("freq_wander")
+        if fw:
+            self._row(T, "Carrier frequency wander (10 ms windows)", fw["pp_hz"], "Hz p-p", "", "INFO", spec="{:.0f}",
+                      note=f"max {fw['max_rate_hz_s']:.0f} Hz/s over {fw['span_s']:.1f} s")
         self._row(T, "MER after I/Q correction", r["mer_corr"], "dB", "", "INFO")
         self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"],
                       none_ok=r.get("compression_note", "n/a"))
@@ -1903,10 +1907,10 @@ class BosStation(QtWidgets.QWidget):
             ok = d["ber"] <= 1e-7 or (d["ber"] == 0)
             self._row(T, "Channel BER (raw code bits)", d["ber"], "", "≤ 1e-7", "PASS" if ok else "FAIL", spec="{:.2e}",
                       note=f"{d['raw_bits']} bits" + (f", < {d['ber_upper']:.1e} (95 %)" if d["ber"] == 0 else ""))
-        idle = [f for f in d["frames"] if f.get("idle")]
-        if idle:
-            self._row(T, "Idle frame content", None, "", "as table 4.4", "PASS" if not d["idle_bad"] else "FAIL",
-                      text=f"{len(idle) - d['idle_bad']}/{len(idle)} ok")
+        nchk = d.get("idle_checked", sum(f.get("idle_content_ok") is not None for f in d["frames"]))
+        if nchk:
+            self._row(T, "Idle frame content (RS-decoded frames)", None, "", "as table 4.4",
+                      "PASS" if not d["idle_bad"] else "FAIL", text=f"{nchk - d['idle_bad']}/{nchk} ok")
         if d["scid"] is not None:
             self._row(T, "Spacecraft ID", d["scid"], "", f"{self.cfg.get('scid', 0)}", "PASS" if d["scid_ok"] else "FAIL",
                       spec="{:.0f}")
@@ -2052,6 +2056,7 @@ class BosStation(QtWidgets.QWidget):
 
     def _t_file(self):
         iq, mode, ur, shr = self._file
+        self._carrier_saved = self.cfg["carrier"]
         T = f"File {iq.name}"
         cfg = dict(self.cfg)
         msgs = []
@@ -2071,9 +2076,16 @@ class BosStation(QtWidgets.QWidget):
                   text={"cw": "carrier (CW)", "narrow": "narrowband (УР, BPSK)", "wide": "wideband (ШР, OQPSK)",
                         "off": "no signal"}.get(idt.get("type"), "?") + (f", OBW {idt['obw'] / 1e6:.3f} MHz" if
                                                                           _fin(idt.get("obw")) else ""))
-        if iq.center and abs(iq.center - self.cfg["carrier"]) > 1e3:
-            self._row(T, "File centre vs nominal carrier", (iq.center - self.cfg["carrier"]) / 1e3, "kHz", "", "INFO",
-                      spec="{:+.1f}")
+        if iq.center:
+            self._row(T, "File centre frequency", iq.center / 1e9, "GHz", "", "INFO", spec="{:.9f}")
+        nom = res.pop("_nominal", None)
+        if nom and abs(nom - self.cfg["carrier"]) > 1:
+            self.cfg["carrier"] = nom                      # diagnosis against the channel actually used
+        for r in res.values():
+            if isinstance(r, dict) and r.get("carrier_measured"):
+                self._row(T, "Carrier measured", r["carrier_measured"] / 1e9, "GHz", "", "INFO", spec="{:.9f}",
+                          note=f"nearest channel n = {r.get('freq_code_n')} = {nom / 1e9:.6f} GHz" if nom else "")
+                break
         self.res.update(res)
         if "cw" in res:
             self._add_capture("file: carrier", res["cw"])
@@ -2510,6 +2522,9 @@ class BosStation(QtWidgets.QWidget):
         else:
             self._show_verdict(self.verdict)
             self.step_lbl.setText(summary)
+        if getattr(self, "_carrier_saved", None):          # file analysis used the measured channel
+            self.cfg["carrier"] = self._carrier_saved
+            self._carrier_saved = None
         self.running = False
         done, self.on_done = self.on_done, None
         if done:

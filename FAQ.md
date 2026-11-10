@@ -280,7 +280,22 @@ Power is right if the file is in volts (FSW export) and the cable loss is set. F
 contain the start of the packet (preambles). *Save every capture (.iq.tar)* keeps all station captures in
 `bos_reports/captures` for later re-analysis.
 
-### What do I have to set first?
+### How should I record a BOS signal with the FSW for analysis?
+I/Q Analyzer, centre on the channel (37650 + 0.125·n MHz), **sample rate ≥ 16 × data rate for УР** (≥ 8 samples per
+symbol, e.g. 1.024 MS/s at 64 kbit/s), length ≥ 3 frames (УР 64 kbit/s: ≥ 0.5 s), export as .iq.tar. With only 2
+samples per symbol the FSW bandwidth cuts the Manchester pulses and even a perfect signal measures only ~28 dB MER
+(decoding still works). Lock the FSW to the same 10 MHz as the BOS (TFG6806 → FSW REF IN), otherwise the analyzer's
+own reference drift is mixed into the carrier-wander measurement. For ШР include the start of the packet.
+
+### What did the first real УР recording show?
+`bos_UR_5s_64spd_256fd.iq.tar` (64 kbit/s, 256 kS/s, 5 s): all 30 КБД decoded, RS without corrections, CRC ok, BER 0 in
+306 000 bits, idle frames exactly as table 4.4, frame counter continuous, SCID 768 (0x300), carrier on channel
+n = 799 with −33 kHz (−0.9 ppm, inside 2·10⁻⁶). Found: the carrier phase is not stable — about 1 kHz p-p frequency
+wander over 5 s (up to ~450 Hz/s) and ~10° RMS phase error left after tracking, which limits MER to ~16 dB; the
+spectrum null at the carrier is only 16 dB deep. Before blaming the BOS: repeat with the FSW locked to the BOS
+10 MHz and with ≥ 8 samples per symbol, and record a carrier (CW) for the integrated phase noise.
+
+
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
 **cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply
 output*: which HMP4040 / N6701C output powers the unit (for the supply-current test).

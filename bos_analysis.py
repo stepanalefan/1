@@ -210,6 +210,40 @@ def fsw_bandwidth(options: str):
     return best
 
 
+def track_phase(z, m=2, blk=16):
+    """Block-wise carrier phase (power m) tracking. Returns (corrected z, phase wander in deg RMS after
+    removing the mean and linear part)."""
+    z = np.asarray(z, complex)
+    nz = len(z) // blk
+    if nz < 4:
+        return z, float("nan")
+    ph = np.array([np.angle(np.mean(z[i * blk:(i + 1) * blk] ** m)) for i in range(nz)])
+    if m == 4:
+        ph = ph - np.pi                                   # QPSK points at 45°: z^4 = -1
+    ph = np.unwrap(ph) / m
+    zc = (np.arange(nz) + 0.5) * blk
+    zt = z * np.exp(-1j * np.interp(np.arange(len(z)), zc, ph))
+    zt = zt / (np.sqrt(np.mean(np.abs(zt) ** 2)) or 1.0)
+    return zt, ph, zc
+
+
+def freq_wander(ph, zc, sr, win_s=0.01) -> dict:
+    """Carrier frequency per window (from the tracked phase): p-p, RMS and the largest drift rate."""
+    t = np.asarray(zc) / sr
+    m = max(3, int(win_s / (t[1] - t[0]))) if len(t) > 1 else 0
+    if not m or len(t) < 3 * m:
+        return {}
+    tw, fw = [], []
+    for i in range(0, len(t) - m, m):
+        tw.append(t[i:i + m].mean())
+        fw.append(np.polyfit(t[i:i + m], ph[i:i + m], 1)[0] / (2 * np.pi))
+    tw, fw = np.array(tw), np.array(fw)
+    k = max(2, int(0.1 / win_s))                       # drift rate over 100 ms
+    rate = np.abs(np.diff(fw[::k])) / (k * win_s) if len(fw) > k else np.array([0.0])
+    return {"t": tw, "f": fw - fw.mean(), "pp_hz": float(np.ptp(fw)), "rms_hz": float(np.std(fw)),
+            "max_rate_hz_s": float(rate.max()) if rate.size else 0.0, "span_s": float(tw[-1] - tw[0])}
+
+
 def iq_impairments(z, d):
     """Fit [zr, zi] = M [dr, di] + c on decided symbols. Returns gain imbalance (dB), quadrature
     error (deg), offset (relative to RMS symbol amplitude, complex) and the image rejection (dB)."""
@@ -284,6 +318,20 @@ def analyze_modulated(x, fs, cfg, expected_mod):
         return out
     z = r["i"] + 1j * r["q"]
     pts = iq_demod.ideal_points(expected_mod)
+    if expected_mod == "BPSK" and len(z) > 2000:
+        # the demodulator removes one frequency for the whole capture; a real carrier wanders (close-in
+        # phase noise, FSW and BOS on different references): track the phase every 16 symbols
+        z, ph_t, zc_t = track_phase(z, 2, 16)
+        fwd = freq_wander(ph_t, zc_t, sr)
+        if fwd:
+            out["freq_wander"] = fwd
+        dd = pts[np.argmin(np.abs(z[:, None] - pts[None, :]), axis=1)]
+        e = z - dd
+        r = dict(r, mer=_db(float(np.mean(np.abs(dd) ** 2)) / max(float(np.mean(np.abs(e) ** 2)), 1e-30)),
+                 evm=100 * math.sqrt(float(np.mean(np.abs(e) ** 2)) / float(np.mean(np.abs(dd) ** 2))),
+                 i=z.real, q=z.imag)
+    if fs / sr < 4 and expected_mod == "BPSK":
+        out["low_sps"] = fs / sr
     d = pts[np.argmin(np.abs(z[:, None] - pts[None, :]), axis=1)]
     ph = np.angle(z / d)
     out.update(mer=r["mer"], evm=r["evm"], cfe=r["cfe"], srerr=r["srerr"], iqoff=r["iqoff"],
@@ -328,6 +376,9 @@ def analyze_modulated(x, fs, cfg, expected_mod):
             out["decode"] = bos_decode.decode_ur(out["i"], cfg.get("scid"))
         except Exception as e:
             out["decode"] = {"error": f"{type(e).__name__}: {e}"}
+    dec = out.get("decode") or {}
+    if expected_mod == "BPSK" and any(f.get("rs_ok") for f in dec.get("frames", [])):
+        out["detected"] = "BPSK"                         # decoded УР frames prove the format
     if filt == "NONE":                               # rectangular pulses: no channel bandwidth
         out["spectrum"]["aclr"] = out["spectrum"]["obw_ratio"] = float("nan")
     if bw and bw < sr * (1 + alpha):                 # OBW can be at most the FSW I/Q bandwidth
@@ -841,6 +892,26 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                              f"{cw['pn_band'][1] / 1e3:g} kHz: noisy LO.", {"LMX": 0.6, "REF": 0.25, "CLK": 0.15},
                              ["Check the LMX2594 loop filter and VCO calibration", "Check the 10 MHz reference"], "CW"))
 
+    for key, r in mods.items():
+        fw = r.get("freq_wander") or {}
+        if fw and (fw["pp_hz"] > lim.get("wander_pp_hz", 500) or fw["max_rate_hz_s"] > lim.get("wander_rate_hz_s", 100)):
+            F.append(Finding("warn", f"{r['expected']}: carrier frequency wanders {fw['pp_hz']:.0f} Hz p-p "
+                                     f"(up to {fw['max_rate_hz_s']:.0f} Hz/s)",
+                             f"Measured over {fw['span_s']:.1f} s in 10 ms windows (the receiver tracks it, so decoding "
+                             f"works). The protocol allows ≤ 100 Hz/s for the reference adjustment (dF, table 7.1). "
+                             f"Either the BOS reference / LO drifts (Err_Ref_LO tuning, temperature, LMX2594), or "
+                             f"the FSW runs on a different 10 MHz than the BOS.",
+                             {"REF": 0.5, "LMX": 0.3, "OUT": 0.2},
+                             ["Lock the FSW to the same 10 MHz as the BOS (TFG6806 -> FSW REF IN) and repeat",
+                              "If it stays: watch Err_Ref_LO / Sour_10MHz in the telemetry during the capture",
+                              "Then check the LMX2594 loop and the reference oscillator"], r["expected"]))
+        if _finite(r.get("low_sps")):
+            F.append(Finding("info", f"{r['expected']}: only {r['low_sps']:.1f} samples per symbol in the capture",
+                             "The FSW bandwidth (0.8 × sample rate) cuts the rectangular SP-L pulses: even a perfect "
+                             "signal then measures only ~28 dB MER (2 samples/symbol). Decoding is not affected. "
+                             "Capture with ≥ 8 samples per symbol (УР: sample rate ≥ 16 × data rate).", {}, [],
+                             r["expected"]))
+
     # ---- УР data path (decoded КБД)
     for key in ("ber", "mod_BPSK"):
         d = res.get(key) if key == "ber" else (res.get(key) or {}).get("decode")
@@ -1346,13 +1417,22 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
     idt = identify(x, fs)
     res["_ident"] = idt
     kind = mode if mode != "auto" else {"cw": "cw", "narrow": "bpsk", "wide": "oqpsk"}.get(idt["type"], "off")
-    off = (center - cfg["carrier"]) if center and cfg.get("carrier") else 0.0
+    res["_nominal"] = cfg.get("carrier")
 
     def fix_cfe(r):
-        if r and _finite(r.get("cfe")) and off:
+        if r and _finite(r.get("cfe")) and center:
+            f_meas = center + r["cfe"]
+            if cfg.get("snap_grid", True):                 # nominal = nearest channel 37650 + 0.125·n MHz
+                n = int(round((f_meas / 1e6 - 37650.0) / 0.125))
+                nom = (37650.0 + 0.125 * n) * 1e6
+                r["freq_code_n"] = n
+            else:
+                nom = cfg["carrier"]
+            res["_nominal"] = nom
+            r["carrier_measured"] = f_meas
             r["cfe_file"] = r["cfe"]
-            r["cfe"] = r["cfe"] + off                      # relative to the nominal carrier
-            r["cfe_ppm"] = r["cfe"] / cfg["carrier"] * 1e6
+            r["cfe"] = f_meas - nom
+            r["cfe_ppm"] = r["cfe"] / nom * 1e6
         return r
     if kind == "off":
         res["cw"] = {"kind": "cw", "present": False, "power": float("nan")}
@@ -1367,20 +1447,27 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
             sr = 2e3 * rk
             if fs < 2 * sr or len(x) < 200 * fs / sr:
                 continue
-            c = dict(cfg, symbol_rate=sr, filter="NONE", decode_ur=False)
-            n = min(len(x), int(4000 * fs / sr))
+            # the rate is the one at which КБД decode (synchromarker + RS); MER alone does not tell
+            # (a BPSK signal also demodulates at 2×, 4× its symbol rate, and phase tracking helps every rate)
+            c = dict(cfg, symbol_rate=sr, filter="NONE", decode_ur=True)
+            n = min(len(x), int(3.2 * 2 * 8 * 1279 * fs / sr))
             try:
                 r = analyze_modulated(x[:n], fs, c, "BPSK")
             except Exception:
                 continue
-            log(f"BPSK {rk} kbit/s: MER {r.get('mer', float('nan')):.1f} dB")
+            dd = r.get("decode") or {}
+            ok = sum(1 for f in dd.get("frames", []) if f.get("rs_ok"))
+            log(f"BPSK {rk} kbit/s: MER {r.get('mer', float('nan')):.1f} dB, frames {dd.get('n_frames', 0)} "
+                f"(RS ok {ok})")
             if _finite(r.get("mer")):
-                tried.append((rk, r["mer"]))
+                tried.append((rk, ok, dd.get("n_frames", 0), r["mer"]))
         if not tried:
             raise ValueError("no УР rate fits this recording (sample rate too low or too short)")
-        # a BPSK signal also demodulates cleanly at 2×, 4× its symbol rate: take the lowest rate that fits
-        top = max(m for _, m in tried)
-        rk = min(r for r, m in tried if m >= top - 3)
+        best = max(tried, key=lambda t: (t[1], t[2], -t[0]))
+        if best[2] == 0:                                   # nothing decodes: lowest rate that demodulates
+            top = max(t[3] for t in tried)
+            best = min((t for t in tried if t[3] >= top - 3), key=lambda t: t[0])
+        rk = best[0]
         c = dict(cfg, symbol_rate=2e3 * rk, filter="NONE", decode_ur=True)
         r = fix_cfe(analyze_modulated(x, fs, c, "BPSK"))
         r["ur_rate_kbps"] = rk

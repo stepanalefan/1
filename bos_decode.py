@@ -279,6 +279,7 @@ def decode_ur(sym, scid=None) -> dict:
     out["rs_corrected"] = sum(sum(n for n in f["rs"] if n > 0) for f in fs)
     out["crc_fail"] = sum(f["rs_ok"] and not f["crc_ok"] for f in fs)
     out["idle_bad"] = sum(f.get("idle_content_ok") is False for f in fs)
+    out["idle_checked"] = sum(f.get("idle_content_ok") is not None for f in fs)
     out["raw_bits"] = raw_tot
     out["ber"] = raw_err / raw_tot if raw_tot else float("nan")
     out["ber_upper"] = (3.0 / raw_tot) if raw_tot and raw_err == 0 else float("nan")   # 95 % with 0 errors
