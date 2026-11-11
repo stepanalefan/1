@@ -23,6 +23,7 @@ KINDS = {
     "can": ("→BOS", "→БОС", "#58a6ff", "command to the BOS over CAN", "команда в БОС по CAN"),
     "rx": ("BOS→", "БОС→", "#79c0ff", "answer / telemetry from the BOS", "ответ / телеметрия от БОС"),
     "fsw": ("FSW", "FSW", "#c792ea", "R&S FSW (SCPI)", "R&S FSW (SCPI)"),
+    "tfg": ("TFG", "TFG", "#56d4dd", "TFG6806 generator (SCPI)", "генератор TFG6806 (SCPI)"),
     "psu": ("PSU", "Пит.", "#f0b03e", "bench supply (HMP4040 / N6701C)", "источник питания (HMP4040 / N6701C)"),
     "op": ("Oper.", "Опер.", "#ff6b6b", "operator dialog", "окно для оператора"),
     "pc": ("PC", "ПК", "#4fd18b", "analysis on the PC", "обработка на ПК"),
@@ -96,6 +97,22 @@ def proto(st, code, data=b"", what=""):
     return [s]
 
 
+def ref_gate(st, what):
+    """Steps of BosStation._ref_gate (before every mode command)."""
+    if not st.cfg.get("ext_ref", True):
+        return []
+    tol, emax = st.lim.get("pulsnumb_tol", 5.0), st.lim.get("err_ref_lo", 3.0)
+    w = int(st.ctl.get("ref_wait_s", 30))
+    sub = [Step("rx", L("fresh ИОК_ОСН (≤ 2.5 s old); if none: REQ_TM ИОК_ОСН",
+                        "свежий ИОК_ОСН (не старше 2,5 с); если нет: REQ_TM ИОК_ОСН"),
+                [Step("info", can_frame(st, 0x11, bp.p_req_tm(0xFC), ack=False) + L("  (no КВ)", "  (без КВ)"))]
+                if st.ctl.get("method") == "protocol" else [])]
+    return [Step("rx", L(f"reference check before {what}: PulsNumb_10MHz = 10 000 000 ± {tol:g} and |Err_Ref_LO| ≤ "
+                         f"{emax:g}; waits up to {w} s, otherwise test error and no mode command",
+                         f"проверка опоры перед {what}: PulsNumb_10MHz = 10 000 000 ± {tol:g} и |Err_Ref_LO| ≤ "
+                         f"{emax:g}; ожидание до {w} с, иначе ошибка проверки и команда режима не отправляется"), sub)]
+
+
 def _session_code(st, mode):
     return {"cw": 0xA0, "bpsk": st.ctl.get("bpsk_cmd", 0xA1), "oqpsk": st.ctl.get("oqpsk_cmd", 0xA4),
             "shr_pre": 0xA2, "shr_kbd": 0xA4}[mode]
@@ -107,9 +124,10 @@ def session(st, mode, att):
         return proto(st, 0x01, what=L("MODE_D — standby, RF off", "MODE_D — дежурный режим, ВЧ выкл."))
     code = _session_code(st, mode)
     n = int(st.ctl.get("freq_n", 800))
+    gate = ref_gate(st, bp.COMMANDS[code][0])
     rate_k = int(st.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2))
     cnt = 2 if mode == "shr_kbd" else 2047
-    out = []
+    out = list(gate)
     if st.ctl.get("keepalive", True):
         out.append(Step("can", L("target designation Angle_ErdStation_BKU (0°, 0°) — before the session and "
                                  "every 0.5 s while RF is on (valid 3 s)",
@@ -148,6 +166,7 @@ def set_mode(st, mode, att, demo):
         return session(st, mode, att) + [Step("wait", L(f"{settle:g} s settling", f"{settle:g} с установление"))]
     if demo:
         return [Step("pc", L(f"simulator switched to {label}", f"имитатор переключён: {label}"))]
+    gate = ref_gate(st, label) if mode != "rf_off" else []
     uid = st.ctl.get("cmd", {}).get(mode)
     c = getattr(st.host, "can_win", None)
     cmd = c.store.by_uid(uid) if (c and uid) else None
@@ -157,7 +176,7 @@ def set_mode(st, mode, att, demo):
     else:
         s = Step("op", L(f"dialog: switch the BOS to {label}, press OK", f"окно: переключите БОС в режим "
                          f"{label}, нажмите OK"))
-    return [s, Step("wait", L(f"{settle:g} s settling", f"{settle:g} с установление"))]
+    return gate + [s, Step("wait", L(f"{settle:g} s settling", f"{settle:g} с установление"))]
 
 
 def set_att(st, code, mode, demo):
@@ -228,6 +247,63 @@ def analysis(text_en, text_ru):
 
 
 # ------------------------------------------------------------------------------------------- tests
+def t_ref(st, demo, state):
+    c = st.ctl
+    out = []
+    if c.get("tfg_setup", True):
+        src, feed = c.get("tfg_src", "EXT"), int(c.get("tfg_feed", 1))
+        scpi = []
+        if src in ("INT", "EXT"):
+            scpi.append(f"UTILity:CLOck:SOURce {'EXTernal' if src == 'EXT' else 'INTernal'}")
+        if feed == 0:
+            scpi.append("UTILity:INSide:CLOck ON  " + L("(internal 10 MHz on the rear port)",
+                                                        "(внутренние 10 МГц на заднем разъёме)"))
+        elif src == "EXT":
+            scpi.append("UTILity:INSide:CLOck OFF  " + L("(rear port = input)", "(задний разъём = вход)"))
+        scpi += ["UTILity:CLOck:SOURce?", "UTILity:INSide:CLOck?"]
+        if feed in (1, 2):
+            if c.get("tfg_ref_apply", True):
+                amp, offs = float(c.get("tfg_ref_amp", 2.0)), float(c.get("tfg_ref_offs", 2.0))
+                scpi += [f"SOURce{feed}:FUNCtion SINusoid", f"SOURce{feed}:FUNCtion:MODE CONTinuous",
+                         f"SOURce{feed}:FREQuency 10000000Hz", f"SOURce{feed}:VOLTage {amp:g}Vpp",
+                         f"SOURce{feed}:VOLTage:OFFSet {offs:g}V"]
+            scpi += [f"OUTPut{feed} ON", L("read back: waveform, frequency (10 MHz), amplitude, offset, output",
+                                           "контроль: форма, частота (10 МГц), амплитуда, смещение, выход")]
+        scpi.append("SYSTem:ERRor?")
+        what = {"EXT": L("external reference", "внешняя опора"), "INT": L("internal reference", "внутренняя опора"),
+                "": L("reference unchanged", "опора без изменений")}[src]
+        feed_txt = {1: L("10 MHz to the BOS from CH1", "10 МГц в БОС с CH1"),
+                    2: L("10 MHz to the BOS from CH2", "10 МГц в БОС с CH2"),
+                    0: L("10 MHz to the BOS from the rear port", "10 МГц в БОС с заднего разъёма"),
+                    -1: L("outputs not touched", "выходы не меняются")}[feed]
+        out.append(Step("tfg", L(f"TFG6806 first (before BOS power): {what}, {feed_txt}",
+                                 f"сначала TFG6806 (до питания БОС): {what}, {feed_txt}"),
+                        [Step("info", s) for s in scpi] +
+                        ([Step("info", L("the TFG uses the external clock only if it detects a qualified one "
+                                         "('Ext Ref On'); otherwise it runs on its internal clock - not readable "
+                                         "over SCPI", "TFG использует внешнюю опору, только если обнаружит "
+                                         "годный сигнал («Ext Ref On»); иначе работает от внутренней - по SCPI "
+                                         "это не читается"))] if src == "EXT" else [])))
+    pu = c.get("power_up", "prompt")
+    if pu == "prompt" and not demo:
+        out.append(Step("op", L("dialog: switch the BOS power on, press OK", "окно: включите питание БОС, "
+                                                                              "нажмите OK")))
+    elif pu == "supply":
+        name = _supply_name(st) if not demo else L("simulated supply", "имитация источника")
+        out.append(Step("psu", L(f"BOS power on: {name or 'no output selected → test error'} (voltage / current "
+                                 f"from its tab{', + master' if (name or '').startswith('HMP') else ''})",
+                                 f"питание БОС: {name or 'выход не выбран → ошибка'} (напряжение / ток с его "
+                                 f"вкладки{', + общий выход' if (name or '').startswith('HMP') else ''})")))
+    else:
+        out.append(Step("info", L("BOS assumed powered (check only)", "БОС считается включённым (только проверка)")))
+    if st.cfg.get("ext_ref", True):
+        out.append(Step("rx", L(f"ИОК_ОСН after power-up (≤ {max(10, int(c.get('ref_wait_s', 30)))} s; REQ_TM if "
+                                f"needed): PulsNumb_10MHz > 0 (10 MHz pulses present), Stat_10MHz",
+                                f"ИОК_ОСН после включения (≤ {max(10, int(c.get('ref_wait_s', 30)))} с; при "
+                                f"необходимости REQ_TM): PulsNumb_10MHz > 0 (импульсы 10 МГц есть), Stat_10MHz")))
+    return out
+
+
 def t_link(st, demo, state):
     out = proto(st, 0x00, what=L("NOP — link check", "NOP — проверка связи"))
     out += proto(st, 0x01, what=L("MODE_D — standby, RF off", "MODE_D — дежурный режим, ВЧ выкл."))
@@ -503,7 +579,7 @@ def t_ber(st, demo, state):
     return out
 
 
-TESTS = {"link": t_link, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
+TESTS = {"ref": t_ref, "link": t_link, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
          "oqpsk": t_mod("OQPSK"), "shr": t_shr, "att": t_att, "lin": t_lin, "harm": t_harm, "drift": t_drift,
          "ber": t_ber}
 
@@ -515,6 +591,8 @@ def describe(st, plan):
     method = st.ctl.get("method", "protocol")
     if method == "protocol" and "link" not in tests:
         tests.insert(0, "link")
+    if "ref" not in tests:
+        tests.insert(0, "ref")
     out = []
     prep = [Step("info", L("FSW must be connected (Spectrum Analyzer tab); its live view is stopped",
                            "FSW должен быть подключён (вкладка Анализатор спектра); его просмотр останавливается"))]

@@ -681,11 +681,24 @@ def check_telemetry(tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
         out.append(Finding("info", "BOS is locked to the external 10 MHz",
                            "The test expects the internal oscillator ('External 10 MHz expected' is off).", {}, [],
                            "telemetry"))
+    p = tlm.get("PulsNumb_10MHz")
+    tol = lim.get("pulsnumb_tol", 5.0)
+    if _finite(p) and cfg.get("ext_ref", False) and tlm.get("Stat_10MHz") != 0 and abs(p - 10_000_000) > tol:
+        out.append(Finding("fail", "10 MHz reference frequency off",
+                           f"PulsNumb_10MHz = {p:,.0f} pulses per second (required 10 000 000 ± {tol:g}, i.e. "
+                           f"±{tol / 10:g} ppm): the 10 MHz given to the BOS is {(p - 1e7) / 10:+.1f} ppm off. Mode "
+                           f"commands are not sent until it is inside.",
+                           {"REF": 0.9, "OUT": 0.1},
+                           ["Check the TFG6806: CH output frequency exactly 10 MHz, its own reference (Ext Ref On in "
+                            "the status bar)", "Check the 10 MHz cable / level at the BOS"], "telemetry"))
     e = tlm.get("Err_Ref_LO")
-    if _finite(e) and abs(e) > lim.get("err_ref_lo", 1000):
+    if _finite(e) and abs(e) > lim.get("err_ref_lo", 3):
         out.append(Finding("warn", "Reference tuning code out of range",
-                           f"Err_Ref_LO = {e:.0f} (normal ±{lim.get('err_ref_lo', 1000):g}).",
-                           {"REF": 0.7, "CLK": 0.3}, ["Check the reference oscillator frequency / tuning"], "telemetry"))
+                           f"Err_Ref_LO = {e:.0f} (required |Err_Ref_LO| ≤ {lim.get('err_ref_lo', 3):g} before a "
+                           f"mode command): the BOS internal oscillator has not settled on the 10 MHz reference.",
+                           {"REF": 0.7, "CLK": 0.3}, ["Wait longer after power-up (Reference wait, Unit control page)",
+                                                      "Check the reference oscillator frequency / tuning"],
+                           "telemetry"))
     return out
 
 
@@ -1404,7 +1417,9 @@ class BosSimulator:
               "Temp_DT1": f.get("hot", 41.0) + self.rng.normal(0, 0.3), "Temp_DT2": 38.0, "Temp_DT3": 36.0,
               "Stat_10MHz": 0 if "ref_lost" in f else 1,
               "Sour_10MHz": 0 if ("ref_lost" in f or "ref_ppm" in f) else 1,
-              "Err_Ref_LO": int(f.get("ref_ppm", 0) * 300) + 12,
+              "Err_Ref_LO": int(f.get("ref_ppm", 0) * 300) + int(self.rng.integers(-2, 3)),
+              "PulsNumb_10MHz": 0 if "ref_lost" in f else
+              int(round(1e7 * (1 + f.get("tfg_ppm", 0.0) * 1e-6))) + int(self.rng.integers(-1, 2)),
               "Mode": 0 if self.mode == "off" else 1, "Mode_SNR": 0x40 if self.mode == "cw" else 0xA4}
         return tl
 

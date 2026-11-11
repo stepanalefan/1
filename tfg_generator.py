@@ -25,6 +25,12 @@ there, with the channel number: SOURce1: / SOURce2:, OUTPut1 / OUTPut2.
               BURSt:TRIGger:SOURce/SLOPe/OUTPut
     Double    DOUBle:FIRSt:WIDTh, DOUBle:SECond:WIDTh, DOUBle:INTernal:TIMe, DOUBle:PULSe:STATe
     System    *IDN?, *RST, *CLS, *TRG, *SAV n, *RCL n, SYSTem:ERRor?, SYSTem:LOCAl, PHASe:ALIgn
+    Clock     UTILity:CLOck:SOURce {INTernal|EXTernal} / ?   (2.11.17-18: reference of the generator)
+              UTILity:INSide:CLOck {ON|OFF} / ?            (2.11.19-20: internal 10 MHz on the rear port)
+              Users' Guide 3.24: with 'external' the TFG switches over only when it detects a qualified clock
+              on the rear 10 MHz In/Out port (10 MHz ± 500 Hz, 100 mVpp-5 Vpp, 5.13) and shows 'Ext Ref On';
+              without it, or when it is removed ('External clock removal'), it runs on its internal clock.
+              There is no SCPI query for "external clock present" - the query returns the setting.
 Everything else (coupling, harmonics, waveform sequence, counter, ...) through the console.
 
 TFG6806 limits (Users' Guide, chapter 5): sine/square 1 uHz-65 MHz, pulse 25 MHz, ramp 3 MHz,
@@ -469,9 +475,30 @@ class DemoTfg:
     def errors(self):
         return []
 
+    clock_src = "INTernal"
+    inside_clock = "OFF"
+    _kv: dict = {}
+
     def raw(self, c):
         self.log.append(c)
-        return "Suin,TFG6806,DEMO,simulated" if c.strip().upper() == "*IDN?" else ("0,No error" if "?" in c else "")
+        u = c.strip().upper()
+        if u.startswith("UTIL") and "CLO" in u and "SOUR" in u:
+            if u.endswith("?"):
+                return self.clock_src
+            self.clock_src = "EXTernal" if u.split()[-1].startswith("EXT") else "INTernal"
+            return ""
+        if u.startswith("UTIL") and "INS" in u:
+            if u.endswith("?"):
+                return self.inside_clock
+            self.inside_clock = "ON" if u.split()[-1] in ("ON", "1") else "OFF"
+            return ""
+        if u.startswith(("COUP", "COUN", "UTIL")):
+            hdr = u.split()[0].rstrip("?")
+            if u.endswith("?"):
+                return self._kv.get(hdr, "192.168.1.60" if "IP" in hdr else "0")
+            self._kv[hdr] = u.split(None, 1)[1] if " " in u else ""
+            return ""
+        return "Suin,TFG6806,DEMO,simulated" if u == "*IDN?" else ("0,No error" if "?" in c else "")
 
     def write(self, c):
         self.log.append(c)
@@ -498,6 +525,7 @@ class TfgWorker(QtCore.QThread):
     connected = QtCore.pyqtSignal(bool, str)
     state = QtCore.pyqtSignal(int, object, bool)    # channel, {key: value}, partial
     console = QtCore.pyqtSignal(str, str)           # command, reply
+    refclock = QtCore.pyqtSignal(str, str)          # UTILity:CLOck:SOURce?, UTILity:INSide:CLOck?
 
     def __init__(self):
         super().__init__()
@@ -505,6 +533,7 @@ class TfgWorker(QtCore.QThread):
         self.dev = None
         self._quit = False
         self.last = {ch: {} for ch in CHANNELS}
+        self.after_connect = []                      # extra reads after connecting (settings forms)
 
     def submit(self, fn):
         self.jobs.put(fn)
@@ -555,6 +584,15 @@ class TfgWorker(QtCore.QThread):
         self.connected.emit(True, f"{self.dev.idn}  ({self.dev.addr})")
         for ch in CHANNELS:
             self.read(ch)
+        try:
+            self.read_ref()
+        except Exception as e:
+            self.log.emit(f"TFG6806: reference clock not read: {e}", "warn")
+        for cb in list(self.after_connect):
+            try:
+                cb()
+            except Exception as e:
+                self.log.emit(f"TFG6806: {e}", "warn")
 
     def disconnect_dev(self):
         if self.dev:
@@ -608,6 +646,24 @@ class TfgWorker(QtCore.QThread):
         self.read(ch)
         if errors:
             raise RuntimeError(f"{len(errors)} SCPI error(s): " + " | ".join(errors))
+
+    def read_ref(self):
+        """Reference clock setting (source, internal clock output on the rear port)."""
+        if self.dev is None:
+            return
+        src = self.command("UTILity:CLOck:SOURce?")
+        ins = self.command("UTILity:INSide:CLOck?")
+        self.refclock.emit(str(src).strip(), str(ins).strip())
+        return src, ins
+
+    def set_ref(self, src: str, inside: bool):
+        """src 'EXT' / 'INT'. The rear 10 MHz port is In/Out: with an external clock the internal output is off."""
+        ext = src == "EXT"
+        self.command(f"UTILity:CLOck:SOURce {'EXTernal' if ext else 'INTernal'}",
+                     f"clock source {'EXTernal' if ext else 'INTernal'}")
+        self.command(f"UTILity:INSide:CLOck {'ON' if inside and not ext else 'OFF'}",
+                     f"internal clock output {'ON' if inside and not ext else 'OFF'}")
+        return self.read_ref()
 
     def command(self, c: str, label=None):
         """System command or console line; returns the reply (queries) and reports SCPI errors."""
@@ -996,6 +1052,161 @@ class ChannelPanel(QtWidgets.QWidget):
         self.apply_req.emit(self.ch, s)
 
 
+# --------------------------------------------------------------------------- #
+#  Instrument-wide settings (Programmer's Guide 2.6 coupling, 2.10 counter, 2.11 utility)                 #
+# --------------------------------------------------------------------------- #
+# key, label, SCPI header (query = header + "?"), kind, extra
+#   kind: enum (extra = [(label, value)]), bool, num (extra = (unit sent, suffix shown, lo, hi, decimals)),
+#         ro (read only)
+COUPLING = [
+    ("cf", "Frequency coupling", "COUPle:FREQuency:STATe", "bool", None),
+    ("cfd", "Frequency difference", "COUPle:FREQuency:DIFF", "num", ("Hz", " Hz", -65e6, 65e6, 6)),
+    ("cfr", "Frequency ratio", "COUPle:FREQuency:RATio", "num", ("", "", 0.000001, 1e6, 6)),
+    ("ca", "Amplitude coupling", "COUPle:AMPLitude:STATe", "bool", None),
+    ("cad", "Amplitude difference", "COUPle:AMPLitude:DIFF", "num", ("Vpp", " Vpp", -20, 20, 4)),
+    ("cod", "Offset difference", "COUPle:OFFSet:DIFF", "num", ("V", " V", -20, 20, 4)),
+    ("cdir", "Direction", "COUPle:DIRection", "enum", [("CH1 → CH2", "CH1toCH2"), ("CH2 → CH1", "CH2toCH1")]),
+]
+COUNTER = [
+    ("ntype", "Measure", "COUNter:TYPE", "enum", [("Frequency", "FREQuency"), ("Period", "PERiod"),
+                                                 ("Pulse width", "PULwidth"), ("Duty ratio", "DUTYratio")]),
+    ("ngate", "Gate time", "COUNter:GATE:TIME", "num", ("s", " s", 0.001, 100, 3)),
+    ("nlev", "Trigger level", "COUNter:TRIGLevel", "num", ("V", " V", -10, 10, 3)),
+    ("ncpl", "Coupling", "COUNter:COUPle", "enum", [("AC", "AC"), ("DC", "DC")]),
+    ("nsens", "Sensitivity", "COUNter:SENsitive", "num", ("%", " %", 0, 100, 2)),
+    ("nlpf", "Low-pass filter", "COUNter:LOWPassfilter", "bool", None),
+]
+SYSTEM = [
+    ("pon", "Power-on state", "UTILity:TURNon:STATe", "enum", [("Last (restore the settings)", "LAST"),
+                                                               ("Default", "DEFault")]),
+    ("lang", "Front panel language", "UTILity:SET:LANGuage", "enum", [("English", "ENGLish"),
+                                                                       ("Russian", "RUSSian"),
+                                                                       ("Chinese", "CHINese")]),
+    ("bri", "Screen brightness", "UTILity:SCReen:BRIGhtness", "num", ("", "", 1, 10, 0)),
+    ("snd", "Key sound", "UTILity:BUTTon:SOUNd:STATe", "bool", None),
+    ("dhcp", "DHCP", "UTILity:NETWork:DHCP:STATe", "ro", None),
+    ("ip", "IP address", "UTILity:NETWork:IP:ADDRess", "ro", None),
+    ("mask", "Subnet mask", "UTILity:NETWork:SUBMask", "ro", None),
+    ("gw", "Gateway", "UTILity:NETWork:GATeway", "ro", None),
+]
+
+
+def _num_reply(r: str):
+    """Number from a reply such as '5s', '100mV', '25.34%', '1.000000e+00'."""
+    try:
+        return parse_si(str(r))
+    except ValueError:
+        m = _NUM.search(str(r))
+        return float(m.group(0)) if m else None
+
+
+class ScpiForm(QtWidgets.QWidget):
+    """Form for instrument-wide settings: Read queries every field, Set sends the editable ones and reads back."""
+    got = QtCore.pyqtSignal(object)
+
+    def __init__(self, tab, fields, note=""):
+        super().__init__()
+        self.tab, self.fields = tab, fields
+        f = QtWidgets.QFormLayout(self)
+        f.setContentsMargins(4, 4, 4, 4)
+        self.w = {}
+        for key, label, hdr, kind, extra in fields:
+            if kind == "enum":
+                w = QtWidgets.QComboBox()
+                for lbl, val in extra:
+                    w.addItem(lbl, val)
+            elif kind == "bool":
+                w = QtWidgets.QCheckBox()
+            elif kind == "num":
+                w = QtWidgets.QDoubleSpinBox()
+                w.setRange(extra[2], extra[3])
+                w.setDecimals(extra[4])
+                w.setSuffix(extra[1])
+                w.setKeyboardTracking(False)
+            else:
+                w = QtWidgets.QLabel("—")
+                w.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            w.setToolTip(hdr + ("" if kind == "ro" else " {value}") + "  /  " + hdr + "?")
+            self.w[key] = w
+            f.addRow(label, w)
+        row = QtWidgets.QHBoxLayout()
+        b_set = QtWidgets.QPushButton("Set")
+        b_set.clicked.connect(self.on_set)
+        b_read = QtWidgets.QPushButton("Read")
+        b_read.clicked.connect(self.on_read)
+        row.addWidget(b_set)
+        row.addWidget(b_read)
+        if all(k == "ro" for _, _, _, k, _ in fields):
+            b_set.hide()
+        f.addRow(row)
+        if note:
+            n = QtWidgets.QLabel(note)
+            n.setWordWrap(True)
+            n.setStyleSheet("color:#8a96a3;font-size:11px;")
+            f.addRow(n)
+        self.got.connect(self._put)
+
+    def value(self, key, kind, extra):
+        w = self.w[key]
+        if kind == "enum":
+            return w.currentData()
+        if kind == "bool":
+            return "ON" if w.isChecked() else "OFF"
+        v = w.value()
+        return f"{v:.{extra[4]}f}".rstrip("0").rstrip(".") + extra[0] if extra[4] else f"{int(round(v))}{extra[0]}"
+
+    def on_set(self):
+        cmds = [f"{hdr} {self.value(key, kind, extra)}" for key, _, hdr, kind, extra in self.fields if kind != "ro"]
+        w = self.tab.worker
+
+        def job():
+            errs = []
+            for c in cmds:
+                try:
+                    w.command(c)
+                except RuntimeError as e:
+                    errs.append(f"{c}: {e}")
+            w.log.emit("TFG6806 set: " + "; ".join(cmds), "warn" if errs else "ok")
+            self._read_job()
+        w.submit(job)
+
+    def on_read(self):
+        self.tab.worker.submit(self._read_job)
+
+    def _read_job(self):
+        w = self.tab.worker
+        out = {}
+        for key, _, hdr, kind, extra in self.fields:
+            try:
+                out[key] = w.command(hdr + "?")
+            except Exception as e:
+                out[key] = None
+                w.log.emit(f"TFG6806 {hdr}?: {e}", "warn")
+        self.got.emit(out)
+
+    def _put(self, out):
+        for key, _, hdr, kind, extra in self.fields:
+            r = out.get(key)
+            if r is None:
+                continue
+            r = str(r).strip()
+            w = self.w[key]
+            w.blockSignals(True)
+            if kind == "enum":
+                val = match_choice(r, extra)
+                if val is not None:
+                    w.setCurrentIndex(max(0, w.findData(val)))
+            elif kind == "bool":
+                w.setChecked(r.upper() in ("1", "ON"))
+            elif kind == "num":
+                v = _num_reply(r)
+                if v is not None:
+                    w.setValue(v)
+            else:
+                w.setText(r or "—")
+            w.blockSignals(False)
+
+
 class TfgTab(QtWidgets.QWidget):
     log = QtCore.pyqtSignal(str, str)
 
@@ -1008,8 +1219,10 @@ class TfgTab(QtWidgets.QWidget):
         self.worker.connected.connect(self._on_connected)
         self.worker.state.connect(self._on_state)
         self.worker.console.connect(self._on_console)
+        self.worker.refclock.connect(self._on_ref)
         self.worker.start()
         self._build()
+        self.worker.after_connect = [self.f_couple._read_job, self.f_count._read_job, self.f_sys._read_job]
         self._set_enabled(False)
         self._iface_changed()
 
@@ -1088,7 +1301,93 @@ class TfgTab(QtWidgets.QWidget):
         grid.addWidget(self.slot, 2, 1)
         grid.addWidget(sv, 3, 0)
         grid.addWidget(rc, 3, 1)
-        left.addWidget(g)
+
+        self.g_ref = g = QtWidgets.QGroupBox("Reference clock (rear 10 MHz In/Out)")
+        rf = QtWidgets.QFormLayout(g)
+        self.ref_src = QtWidgets.QComboBox()
+        self.ref_src.addItem("External", "EXT")
+        self.ref_src.addItem("Internal", "INT")
+        self.ref_src.setToolTip("UTILity:CLOck:SOURce {EXTernal|INTernal}")
+        self.ref_out = QtWidgets.QCheckBox("Internal 10 MHz out on the rear port")
+        self.ref_out.setToolTip("UTILity:INSide:CLOck ON - only with the internal clock (the port is In/Out)")
+        self.ref_src.currentIndexChanged.connect(
+            lambda *_: self.ref_out.setEnabled(self.ref_src.currentData() == "INT"))
+        bset = QtWidgets.QPushButton("Set")
+        bset.clicked.connect(self.on_set_ref)
+        bread = QtWidgets.QPushButton("Read")
+        bread.clicked.connect(lambda: self.worker.submit(self.worker.read_ref))
+        rrow = QtWidgets.QHBoxLayout()
+        rrow.addWidget(bset)
+        rrow.addWidget(bread)
+        self.ref_state = QtWidgets.QLabel("—")
+        self.ref_state.setWordWrap(True)
+        ref_note = QtWidgets.QLabel("External: the TFG uses a clock on the rear port only when it detects a "
+                                    "qualified 10 MHz (±500 Hz, 0.1-5 Vpp) and shows 'Ext Ref On'; without one, or "
+                                    "when it is removed, it runs on its internal clock. It cannot be asked whether "
+                                    "the external clock is present - the reply is the setting.")
+        ref_note.setWordWrap(True)
+        ref_note.setStyleSheet("color:#8a96a3;font-size:11px;")
+        rf.addRow("Source", self.ref_src)
+        rf.addRow(self.ref_out)
+        rf.addRow(rrow)
+        rf.addRow("Setting", self.ref_state)
+        rf.addRow(ref_note)
+        # BOS 10 MHz reference preset (sine, 10 MHz, continuous, output on)
+        gp = QtWidgets.QGroupBox("BOS 10 MHz preset")
+        pf = QtWidgets.QFormLayout(gp)
+        self.pre_ch = QtWidgets.QComboBox()
+        self.pre_ch.addItem("CH1", 1)
+        self.pre_ch.addItem("CH2", 2)
+        self.pre_amp = QtWidgets.QDoubleSpinBox()
+        self.pre_amp.setRange(0.1, 5.0)
+        self.pre_amp.setDecimals(2)
+        self.pre_amp.setSingleStep(0.1)
+        self.pre_amp.setSuffix(" Vpp")
+        self.pre_amp.setValue(2.0)
+        self.pre_amp.setToolTip("Standard for the BOS external reference input: 2 Vpp")
+        self.pre_offs = QtWidgets.QDoubleSpinBox()
+        self.pre_offs.setRange(-5.0, 5.0)
+        self.pre_offs.setDecimals(2)
+        self.pre_offs.setSingleStep(0.1)
+        self.pre_offs.setSuffix(" V")
+        self.pre_offs.setValue(2.0)
+        self.pre_offs.setToolTip("Standard for the BOS external reference input: 2 V")
+        self.pre_load = QtWidgets.QComboBox()
+        self.pre_load.addItem("keep the current setting", "")
+        self.pre_load.addItem("50 Ω", "50")
+        self.pre_load.addItem("High-Z", "HRES")
+        b_pre = QtWidgets.QPushButton("Apply: sine 10 MHz, output on")
+        b_pre.clicked.connect(self.on_bos_preset)
+        pf.addRow("Channel", self.pre_ch)
+        pf.addRow("Amplitude", self.pre_amp)
+        pf.addRow("Offset", self.pre_offs)
+        pf.addRow("Load", self.pre_load)
+        pf.addRow(b_pre)
+        ref_page = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(ref_page)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(self.g_ref)
+        rv.addWidget(gp)
+        rv.addStretch(1)
+        self.f_couple = ScpiForm(self, COUPLING, "CH1 / CH2 coupling (Programmer's Guide 2.6): with frequency "
+                                                 "coupling the second channel follows the first by the difference "
+                                                 "or ratio.")
+        self.f_count = ScpiForm(self, COUNTER, "Counter input on the rear panel (2.10). The measured value is "
+                                               "shown on the TFG screen - the guide has no command to read it.")
+        self.f_sys = ScpiForm(self, SYSTEM, "Power-on state 'Last' keeps the 10 MHz output settings after the "
+                                            "TFG is switched off and on. Network settings are read only here "
+                                            "(changing them over LAN would cut the connection).")
+        self.g_more = QtWidgets.QTabWidget()
+        for page, name in ((self.g_sys, "Instrument"), (ref_page, "Reference"), (self.f_couple, "Coupling"),
+                           (self.f_count, "Counter"), (self.f_sys, "System")):
+            sc = QtWidgets.QScrollArea()
+            sc.setWidget(page)
+            sc.setWidgetResizable(True)
+            sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+            sc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            self.g_more.addTab(sc, name)
+        self.g_more.setMinimumHeight(250)
+        left.addWidget(self.g_more, 3)
 
         self.g_con = g = QtWidgets.QGroupBox("SCPI console")
         cv = QtWidgets.QVBoxLayout(g)
@@ -1098,6 +1397,7 @@ class TfgTab(QtWidgets.QWidget):
         self.con_out = QtWidgets.QPlainTextEdit()
         self.con_out.setReadOnly(True)
         self.con_out.setMaximumBlockCount(500)
+        self.con_out.setMinimumHeight(60)
         send = QtWidgets.QPushButton("Send")
         send.clicked.connect(self.on_console)
         row = QtWidgets.QHBoxLayout()
@@ -1110,7 +1410,7 @@ class TfgTab(QtWidgets.QWidget):
         note.setWordWrap(True)
         note.setStyleSheet("color:#8a96a3;font-size:11px;")
         cv.addWidget(note)
-        left.addWidget(g, 1)
+        left.addWidget(g, 2)
         lw = QtWidgets.QWidget()
         lw.setLayout(left)
         lw.setMaximumWidth(380)
@@ -1132,7 +1432,7 @@ class TfgTab(QtWidgets.QWidget):
             root.addWidget(sc, 1)
 
     def _set_enabled(self, on):
-        for w in list(self.panels.values()) + [self.g_sys, self.g_con]:
+        for w in list(self.panels.values()) + [self.g_more, self.g_con]:
             w.setEnabled(on)
         for w in (self.iface, self.host, self.port, self.usb_w, self.demo):
             w.setEnabled(not on)
@@ -1236,6 +1536,27 @@ class TfgTab(QtWidgets.QWidget):
         if not c:
             return
         self.worker.submit(lambda: self.worker.command(c))
+
+    def on_bos_preset(self):
+        ch, amp, load = self.pre_ch.currentData(), self.pre_amp.value(), self.pre_load.currentData()
+        s = {"wave": "SINusoid", "mode": "CONTinuous", "freq": 10e6, "ampl": amp, "offs": self.pre_offs.value(),
+             "out": True}
+        if load:
+            s["load"] = load
+        self.worker.submit(lambda: self.worker.apply(ch, s, prev={}, label="BOS 10 MHz preset"))
+
+    def on_set_ref(self):
+        src, inside = self.ref_src.currentData(), self.ref_out.isChecked()
+        self.worker.submit(lambda: self.worker.set_ref(src, inside))
+
+    def _on_ref(self, src, inside):
+        ext = src.upper().startswith("EXT")
+        self.ref_src.blockSignals(True)
+        self.ref_src.setCurrentIndex(0 if ext else 1)
+        self.ref_src.blockSignals(False)
+        self.ref_out.setEnabled(not ext)
+        self.ref_out.setChecked(inside.upper() in ("ON", "1"))
+        self.ref_state.setText(f"source <b>{src or '?'}</b>, rear 10 MHz output <b>{inside or '?'}</b>")
 
     def _on_console(self, c, reply):
         self.con_out.appendPlainText(f"> {c}" + (f"\n{reply}" if reply else ""))

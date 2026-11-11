@@ -47,6 +47,7 @@ verdict, the findings and the report.
 
 | Test | Measurement | Typical faults found |
 |---|---|---|
+| Reference & BOS power-up | (added automatically, first) TFG6806 external reference and the standard BOS 10 MHz (sine, 2 Vpp, 2 V offset), output on → BOS power on → PulsNumb_10MHz pulses present; before every mode command PulsNumb_10MHz = 10 000 000 ± 5 and \|Err_Ref_LO\| ≤ 3 | TFG not on its reference, 10 MHz missing / off frequency, BOS not settled on the reference |
 | Control link & BOS setup | (protocol control, added automatically) NOP and MODE_D acknowledged, SET_Time_SNR, ИОК periods, ИОК_КОНФИГ read back and CRC-checked | no CAN link, КВ- (sender not allowed), corrupt / unexpected stored configuration |
 | Pre-check | BOS telemetry: PLLs (LMK, DAC clock, LMX2594, FPGA JESD, FPGA), JESD link, rails, temperatures, 10 MHz, Err_Ref_LO | unlocked PLL, JESD error, bad rail, overheating, missing reference |
 | Supply current | bench supply current RF off → RF on | PA not biased / not enabled, short |

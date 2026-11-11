@@ -138,13 +138,17 @@ LIM_FIELDS = [  # key, label, default, unit
     ("i_standby_max", "Supply current max, standby (TZ, 14 V)", 0.5, "A"),
     ("rail_tol_pct", "FPGA rail tolerance ±", 3.0, "%"),
     ("temp_max", "Temperature max", 70.0, "°C"),
-    ("err_ref_lo", "Err_Ref_LO max |code|", 1000.0, ""),
+    ("err_ref_lo", "Err_Ref_LO max |code| (before a mode command)", 3.0, ""),
+    ("pulsnumb_tol", "PulsNumb_10MHz: 10 000 000 ±", 5.0, ""),
     ("drift_power_db", "Power drift max", 1.0, "dB"),
     ("drift_cfe_hz", "Frequency drift max", 2000.0, "Hz"),
     ("tlm_stale_s", "Telemetry stale after", 10.0, "s"),
 ]
 
 TESTS = [  # id, name, description
+    ("ref", "Reference & BOS power-up", "TFG6806 to the configured reference (UTILity:CLOck:SOURce), its 10 MHz output to "
+                                       "the BOS on, then BOS power on, then 10 MHz pulses (PulsNumb_10MHz) present "
+                                       "(added automatically)"),
     ("link", "Control link & BOS setup", "NOP acknowledgement, standby, session limit, telemetry periods, "
                                          "stored КОНФИГ read back (protocol control only, added automatically)"),
     ("pre", "Pre-check (telemetry)", "BOS telemetry present, PLLs locked, JESD OK, rails, temperatures, reference"),
@@ -618,8 +622,8 @@ class PlanView(QtWidgets.QWidget):
             txt = e(s.text)
             if has:
                 txt = f"<a href='s:{q}' style='text-decoration:none;color:#c9d1d9'>{txt}</a>"
-            is_code = s.kind == "info" and (s.text.startswith(("0x", "ID ", "INST", "FREQ", "TRAC", "ADJ", "*",
-                                                               "SYST", "DISP", "TRIG")))
+            is_code = s.kind == "info" and s.text.startswith(("0x", "ID ", "INST", "FREQ", "TRAC", "ADJ", "*", "UTIL",
+                                                              "OUTP", "SOUR", "SYST", "DISP", "TRIG"))
             style = (mono + f"color:{C_DIM};") if is_code else (f"color:{C_DIM};" if s.kind == "info" else "")
             rows.append(f"<table width='100%' cellspacing='0' cellpadding='1'><tr>"
                         f"<td width='{14 * depth}'></td><td width='12'>{arrow}</td>"
@@ -821,6 +825,8 @@ class SegmentDialog(QtWidgets.QDialog):
 
 
 class BosStation(QtWidgets.QWidget):
+    job_done = QtCore.pyqtSignal(object)            # ("ok" | "err", result) of a job on another device's thread
+
     def __init__(self, host):
         super().__init__()
         self.host = host
@@ -830,7 +836,10 @@ class BosStation(QtWidgets.QWidget):
                              "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
                              "tm_enable": True,
                              "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS",
-                             "settle_ms": 1500, "prompt": True},
+                             "settle_ms": 1500, "prompt": True,
+                             "tfg_setup": True, "tfg_src": "EXT", "tfg_feed": 1, "power_up": "prompt",
+                             "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
+                             "ref_wait_s": 30},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
                      "unit": {"serial": "", "operator": ""}}
         try:
@@ -842,13 +851,20 @@ class BosStation(QtWidgets.QWidget):
                 self.data[k] = d.get(k, self.data[k])
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
+            if d.get("lim_ver", 1) < 2:                   # Err_Ref_LO limit: was ±1000, now ≤ 3 before a mode
+                if self.data["lim"].get("err_ref_lo") == 1000.0:
+                    self.data["lim"]["err_ref_lo"] = 3.0
         except FileNotFoundError:
             pass
         except Exception as e:
             msg = f"BOS station: cannot read {STORE_FILE}: {e}"
             QtCore.QTimer.singleShot(0, lambda: self.log(msg, "err"))
+        self.data["lim_ver"] = 2
         self.cfg, self.lim, self.ctl = self.data["cfg"], self.data["lim"], self.data["ctl"]
         self.sim = ba.BosSimulator(self.cfg)
+        self.job_done.connect(self._on_ext_job)
+        self._ref_failed = False
+        self._gate_rows = set()
         self.demo = False
         # telemetry
         self.rx = telemetry.Reassembler() if telemetry else None
@@ -1160,6 +1176,71 @@ class BosStation(QtWidgets.QWidget):
         f.addRow("CAN ID", self.att_id)
         f.addRow("Data", self.att_data)
         f.addRow("CAN line", self.att_line)
+        v.addWidget(g)
+        g = QtWidgets.QGroupBox("10 MHz reference (TFG6806) and BOS power-up")
+        f = QtWidgets.QFormLayout(g)
+        self.r_tfg = QtWidgets.QCheckBox("Set up the TFG6806 before the plan")
+        self.r_tfg.setChecked(bool(self.ctl.get("tfg_setup", True)))
+        self.r_tfg.setToolTip("First step of every plan, before the BOS gets power")
+        self.r_src = QtWidgets.QComboBox()
+        for k, txt in (("EXT", "External (UTILity:CLOck:SOURce EXTernal)"),
+                       ("INT", "Internal (UTILity:CLOck:SOURce INTernal)"), ("", "don't change")):
+            self.r_src.addItem(txt, k)
+        self.r_src.setCurrentIndex(max(0, self.r_src.findData(self.ctl.get("tfg_src", "EXT"))))
+        self.r_src.setToolTip("Reference of the TFG6806 itself (rear 10 MHz In/Out port). With 'External' the TFG\n"
+                              "switches to an external clock only when it finds a qualified one and falls back to\n"
+                              "its internal clock automatically when it is missing or removed (Users' Guide 3.24).")
+        self.r_feed = QtWidgets.QComboBox()
+        for k, txt in ((1, "TFG CH1 output"), (2, "TFG CH2 output"),
+                       (0, "TFG rear 10 MHz Out (internal clock)"), (-1, "don't touch the TFG outputs")):
+            self.r_feed.addItem(txt, k)
+        self.r_feed.setCurrentIndex(max(0, self.r_feed.findData(int(self.ctl.get("tfg_feed", 1)))))
+        self.r_feed.setToolTip("Where the BOS 10 MHz comes from: that output is switched on (its frequency must be\n"
+                               "10 MHz - waveform and amplitude are not changed). The rear port can only output\n"
+                               "the internal clock (UTILity:INSide:CLOck ON), so it needs clock source 'Internal'.")
+        self.r_std = QtWidgets.QCheckBox("Set the standard 10 MHz on that output (sine, 10 MHz)")
+        self.r_std.setChecked(bool(self.ctl.get("tfg_ref_apply", True)))
+        self.r_std.setToolTip("Before its output is switched on: waveform sine, continuous, 10 MHz,\n"
+                              "amplitude and offset below (standard for the BOS external reference input)")
+        self.r_amp = QtWidgets.QDoubleSpinBox()
+        self.r_amp.setRange(0.01, 10.0)
+        self.r_amp.setDecimals(2)
+        self.r_amp.setSuffix(" Vpp")
+        self.r_amp.setValue(float(self.ctl.get("tfg_ref_amp", 2.0)))
+        self.r_offs = QtWidgets.QDoubleSpinBox()
+        self.r_offs.setRange(-5.0, 5.0)
+        self.r_offs.setDecimals(2)
+        self.r_offs.setSuffix(" V")
+        self.r_offs.setValue(float(self.ctl.get("tfg_ref_offs", 2.0)))
+        self.r_pwr = QtWidgets.QComboBox()
+        for k, txt in (("prompt", "Ask the operator to switch it on"),
+                       ("supply", "Switch the selected supply output on"),
+                       ("none", "Already on (check only)")):
+            self.r_pwr.addItem(txt, k)
+        self.r_pwr.setCurrentIndex(max(0, self.r_pwr.findData(self.ctl.get("power_up", "prompt"))))
+        self.r_pwr.setToolTip("After the TFG: power the BOS. 'Supply' switches on the output chosen on the\n"
+                              "Unit / signal page with the voltage / current set on its tab (HMP4040: + master).")
+        self.r_wait = QtWidgets.QSpinBox()
+        self.r_wait.setRange(3, 600)
+        self.r_wait.setSuffix(" s")
+        self.r_wait.setValue(int(self.ctl.get("ref_wait_s", 30)))
+        self.r_wait.setToolTip("Before every mode command the station waits up to this long for\n"
+                               "PulsNumb_10MHz = 10 000 000 ± tol and |Err_Ref_LO| ≤ limit (Limits page)")
+        self.r_tfg.toggled.connect(lambda *_: self._collect())
+        self.r_std.toggled.connect(lambda *_: self._collect())
+        for wd in (self.r_amp, self.r_offs):
+            wd.valueChanged.connect(lambda *_: self._collect())
+        for wd in (self.r_src, self.r_feed, self.r_pwr):
+            wd.currentIndexChanged.connect(lambda *_: self._collect())
+        self.r_wait.valueChanged.connect(lambda *_: self._collect())
+        f.addRow(self.r_tfg)
+        f.addRow("TFG clock source", self.r_src)
+        f.addRow("BOS 10 MHz from", self.r_feed)
+        f.addRow(self.r_std)
+        f.addRow("Amplitude", self.r_amp)
+        f.addRow("Offset", self.r_offs)
+        f.addRow("BOS power", self.r_pwr)
+        f.addRow("Reference wait", self.r_wait)
         v.addWidget(g)
         g = QtWidgets.QGroupBox("Timing")
         f = QtWidgets.QFormLayout(g)
@@ -1700,6 +1781,11 @@ class BosStation(QtWidgets.QWidget):
                             time_snr=self.p_tsnr.value(),
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
             self._sync_carrier()
+        if hasattr(self, "r_wait"):
+            self.ctl.update(tfg_setup=self.r_tfg.isChecked(), tfg_src=self.r_src.currentData(),
+                            tfg_feed=self.r_feed.currentData(), power_up=self.r_pwr.currentData(),
+                            ref_wait_s=self.r_wait.value(), tfg_ref_apply=self.r_std.isChecked(),
+                            tfg_ref_amp=self.r_amp.value(), tfg_ref_offs=self.r_offs.value())
         if hasattr(self, "supply_cb"):
             self.data["supply"] = self.supply_cb.currentData()
         self.data["unit"] = {"serial": self.serial.text().strip(), "operator": self.operator.text().strip()} \
@@ -1983,6 +2069,10 @@ class BosStation(QtWidgets.QWidget):
         offline = tests == ["file"]
         if self.ctl.get("method") == "protocol" and tests not in (["live"], ["file"]) and "link" not in tests:
             tests.insert(0, "link")
+        if tests not in (["live"], ["file"], ["link"]) and "ref" not in tests:
+            tests.insert(0, "ref")                         # TFG reference + BOS power-up before anything else
+        self._ref_failed = False
+        self._gate_rows = set()
         if not offline and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
@@ -2092,6 +2182,17 @@ class BosStation(QtWidgets.QWidget):
         elif kind == "fsw":
             self.pending = "fsw"
             self.host.worker.submit("bos", req[1])
+        elif kind == "job":                                 # run fn on another device's worker thread
+            self.pending = "job"
+            submit, fn = req[1], req[2]
+
+            def run():
+                try:
+                    r = ("ok", fn())
+                except Exception as e:
+                    r = ("err", f"{type(e).__name__}: {e}")
+                self.job_done.emit(r)
+            submit(run)
         elif kind == "prompt":
             r = QtWidgets.QMessageBox.question(self, "BOS test station", req[1],
                                                QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel)
@@ -2101,6 +2202,10 @@ class BosStation(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, lambda: self._advance(r == QtWidgets.QMessageBox.Ok))
         else:
             QtCore.QTimer.singleShot(0, lambda: self._advance(None))
+
+    def _on_ext_job(self, r):
+        if self.pending == "job":
+            QtCore.QTimer.singleShot(0, lambda: self._advance(r))
 
     def _on_job_done(self, tag, result):
         if tag == "bos" and self.pending == "fsw":
@@ -2199,10 +2304,199 @@ class BosStation(QtWidgets.QWidget):
                             count=2 if self.cur_mode == "shr_kbd" else 2047,
                             rate=int(self.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2)),
                             reg=5 if code == 0xA1 else 1)
+        yield from self._ref_gate(bp.COMMANDS[code][0])      # 10 MHz reference ready before a mode command
         self._keepalive()                                   # valid target designation before the session
         yield from self._proto(code, data, f"{bp.COMMANDS[code][0]} (N={self.ctl.get('freq_n')}, "
                                            f"att {self.cur_att} dB)")
         self._sr_t = time.monotonic()
+
+    # ---- 10 MHz reference (TFG6806) and BOS power-up
+    def _fresh_osn(self, after=None, timeout=3.0):
+        """ИОК_ОСН telemetry received after `after` (time.time()), or not older than 2.5 s. In protocol mode
+        REQ_TM ИОК_ОСН is sent when none arrives. Returns the telemetry dict or None after `timeout`."""
+        if self._is_demo():
+            self._tick()
+            yield ("sleep", 0.05)
+            return dict(self.tlm)
+        t_end = time.monotonic() + timeout
+        t_req = 0.0
+        while True:
+            t_rx = self.tlm_t.get("osn")
+            if t_rx is not None and ((after is not None and t_rx > after) or
+                                     (after is None and time.time() - t_rx <= 2.5)):
+                return dict(self.tlm)
+            if time.monotonic() > t_end:
+                return None
+            if self.ctl.get("method") == "protocol" and time.monotonic() - t_req > 2.0:
+                self._frame(0x11, bp.p_req_tm(0xFC), ack=False)       # REQ_TM ИОК_ОСН, no КВ
+                t_req = time.monotonic()
+            yield ("sleep", 0.25)
+
+    def _ref_gate(self, what):
+        """Before a mode command: PulsNumb_10MHz = 10 000 000 ± tol and |Err_Ref_LO| ≤ limit (fresh ИОК_ОСН).
+        Waits up to 'Reference wait' for the BOS to settle on the reference, else the test stops with an error
+        and no mode command is sent."""
+        if not self.cfg.get("ext_ref", True):
+            return
+        tol, emax = self.lim.get("pulsnumb_tol", 5.0), self.lim.get("err_ref_lo", 3.0)
+        wait = 3.0 if self._ref_failed else float(self.ctl.get("ref_wait_s", 30))
+        t_end = time.monotonic() + wait
+        p = e = None
+        while True:
+            tl = yield from self._fresh_osn(None, 3.0)
+            if tl is not None:
+                p, e = tl.get("PulsNumb_10MHz"), tl.get("Err_Ref_LO")
+                if p is not None and e is not None and abs(p - 10_000_000) <= tol and abs(e) <= emax:
+                    if self.cur_test not in self._gate_rows:
+                        self._gate_rows.add(self.cur_test)
+                        self._row(TEST_NAME.get(self.cur_test, self.cur_test), "Reference before mode command",
+                                  None, "", f"10 000 000 ± {tol:g}, |Err| ≤ {emax:g}", "PASS",
+                                  text=f"PulsNumb {p:,}, Err_Ref_LO {e:+d}")
+                    self._ref_failed = False
+                    return
+            if time.monotonic() > t_end:
+                self._ref_failed = True
+                got = "no ИОК_ОСН telemetry" if tl is None else \
+                    f"PulsNumb_10MHz = {p if p is None else f'{p:,}'}, Err_Ref_LO = {e}"
+                raise _TestError(f"10 MHz reference not ready before {what} ({wait:g} s): {got}; required "
+                                 f"PulsNumb_10MHz 10 000 000 ± {tol:g} and |Err_Ref_LO| ≤ {emax:g}. "
+                                 f"Mode command not sent.")
+            self.step_lbl.setText(f"{TEST_NAME.get(self.cur_test, self.cur_test)}: waiting for the 10 MHz reference "
+                                  f"before {what} (PulsNumb {p}, Err_Ref_LO {e}) …")
+            yield ("sleep", 1.0 if not self._is_demo() else 0.05)
+
+    def _tfg(self):
+        tfg = getattr(self.host, "tfg", None)
+        return tfg if tfg is not None and tfg.is_connected else None
+
+    def _bos_power_on(self, T):
+        """Switch the selected supply output on with the voltage / current set on its tab."""
+        src = self.data.get("supply", "none")
+        if self._is_demo():
+            self.sim.mode = "off"
+            self._row(T, "BOS power on", None, "", "", "PASS", text="simulated supply")
+            yield ("sleep", 0.05)
+            return
+        if src == "none":
+            raise _TestError("BOS power-up by supply: no supply output selected (Unit / signal page)")
+        kind, ch = src.split(":")
+        ch = int(ch)
+        if kind == "hmp":
+            b = getattr(self.host, "bench", None)
+            if not b or not b._hmp_ok:
+                raise _TestError("HMP4040 not connected")
+            w, name = b.hmp, f"HMP4040 OUT{ch}"
+
+            def job():
+                v, i, _ = w.dev.read_channel(ch)
+                w.set_channel(ch, v, i, True)
+                w.set_master(True)
+                return v, i
+        else:
+            n = getattr(self.host, "n67", None)
+            if not n or not n.ok:
+                raise _TestError("N6701C not connected")
+            w, name = n.worker, f"N6701C output {ch}"
+
+            def job():
+                v, i = w.dev.read_channel(ch)[:2]
+                w.set_channel(ch, v, i, True)
+                return v, i
+        st, r = yield ("job", w.submit, job)
+        if st == "err":
+            raise _TestError(f"BOS power on ({name}): {r}")
+        self._row(T, "BOS power on", None, "", "", "PASS", text=f"{name}: {r[0]:.2f} V, limit {r[1]:.2f} A")
+
+    def _t_ref(self):
+        T = TEST_NAME["ref"]
+        c = self.ctl
+        demo = self._is_demo()
+        # 1) TFG6806 first: it must give the 10 MHz before the BOS gets power
+        if c.get("tfg_setup", True):
+            tfg = self._tfg()
+            if tfg is None:
+                raise _TestError("TFG6806 not connected (TFG6806 tab) - it must give the BOS its 10 MHz "
+                                 "before the BOS is powered")
+            src, feed = c.get("tfg_src", "EXT"), int(c.get("tfg_feed", 1))
+            std = bool(c.get("tfg_ref_apply", True))
+            amp, offs = float(c.get("tfg_ref_amp", 2.0)), float(c.get("tfg_ref_offs", 2.0))
+            w = tfg.worker
+
+            def job():
+                out = {}
+                if src in ("INT", "EXT"):
+                    w.command(f"UTILity:CLOck:SOURce {'EXTernal' if src == 'EXT' else 'INTernal'}",
+                              f"clock source {'external' if src == 'EXT' else 'internal'} (BOS station)")
+                if feed == 0:
+                    w.command("UTILity:INSide:CLOck ON", "internal 10 MHz on the rear port (BOS station)")
+                elif src == "EXT":
+                    w.command("UTILity:INSide:CLOck OFF")       # the rear 10 MHz port is the input now
+                out["src"] = w.command("UTILity:CLOck:SOURce?")
+                out["inside"] = w.command("UTILity:INSide:CLOck?")
+                if feed in (1, 2):
+                    s = {"out": True}
+                    if std:                                    # standard BOS 10 MHz, set before the output goes on
+                        s = {"wave": "SINusoid", "mode": "CONTinuous", "freq": 10e6, "ampl": amp, "offs": offs,
+                             "out": True}
+                    w.apply(feed, s, prev={}, label="10 MHz to the BOS")
+                    for k in ("wave", "freq", "ampl", "offs", "out"):
+                        out[k] = w.dev.get(feed, k)
+                return out
+            st, r = yield ("job", w.submit, job)
+            if st == "err":
+                raise _TestError(f"TFG6806: {r}")
+            ext = str(r.get("src", "")).strip().upper().startswith("EXT")
+            if src in ("INT", "EXT"):
+                self._row(T, "TFG6806 clock source (UTILity:CLOck:SOURce?)", None, "",
+                          "external" if src == "EXT" else "internal",
+                          "PASS" if ext == (src == "EXT") else "FAIL", text=str(r.get("src", "")).strip() or "?",
+                          note="setting only: the TFG has no query for 'external clock present'; without a "
+                               "qualified clock it runs on its internal one (status bar 'Ext Ref On')"
+                          if src == "EXT" else "")
+            if feed in (1, 2):
+                f = r.get("freq")
+                self._row(T, f"TFG6806 CH{feed} frequency (10 MHz to the BOS)", f / 1e6 if f else None, "MHz",
+                          "10", "PASS" if f and abs(f - 10e6) <= 1 else "FAIL", spec="{:.6f}")
+                if std:
+                    wv = str(r.get("wave") or "")
+                    self._row(T, f"TFG6806 CH{feed} waveform", None, "", "sine",
+                              "PASS" if wv.upper().startswith("SIN") else "FAIL", text=wv or "?")
+                    for k, nm, u, want in (("ampl", "amplitude", "Vpp", amp), ("offs", "offset", "V", offs)):
+                        v = r.get(k)
+                        self._row(T, f"TFG6806 CH{feed} {nm}", v, u, f"{want:g}",
+                                  "PASS" if v is not None and abs(v - want) <= 0.02 * max(1.0, abs(want)) else "FAIL",
+                                  spec="{:.3f}")
+                self._row(T, f"TFG6806 CH{feed} output", None, "", "on", "PASS" if r.get("out") else "FAIL",
+                          text="on" if r.get("out") else "OFF")
+            else:
+                self._row(T, "TFG6806 internal 10 MHz on the rear port (UTILity:INSide:CLOck?)", None, "",
+                          "on" if feed == 0 else "", "INFO", text=str(r.get("inside", "")).strip())
+        # 2) BOS power
+        pu = c.get("power_up", "prompt")
+        t_on = None
+        if pu == "prompt" and not demo:
+            ok = yield ("prompt", "The TFG6806 gives the 10 MHz now.<br><br>Switch the <b>BOS power on</b>, "
+                                  "then press OK.")
+            if not ok:
+                return
+            t_on = time.time()
+        elif pu == "supply":
+            yield from self._bos_power_on(T)
+            t_on = time.time()
+        # 3) 10 MHz pulses counted by the BOS (ИОК_ОСН after power-up)
+        if not self.cfg.get("ext_ref", True):
+            self._row(T, "10 MHz pulses (PulsNumb_10MHz)", None, "", "", "INFO", text="internal reference expected")
+            return
+        tl = yield from self._fresh_osn(t_on, max(10.0, float(c.get("ref_wait_s", 30))))
+        if tl is None:
+            self._row(T, "ИОК_ОСН after power-up", None, "", "received", "FAIL", text="not received",
+                      note="BOS not powered / booting, telemetry off, or wrong CAN line")
+            return
+        p = tl.get("PulsNumb_10MHz")
+        self._row(T, "10 MHz pulses present (PulsNumb_10MHz)", p, "", "> 0", "PASS" if p else "FAIL", spec="{:,.0f}")
+        if tl.get("Stat_10MHz") is not None:
+            self._row(T, "External 10 MHz valid (Stat_10MHz)", None, "", "norm",
+                      "PASS" if tl["Stat_10MHz"] else "FAIL", text="norm" if tl["Stat_10MHz"] else "no signal")
 
     def _t_link(self):
         T = TEST_NAME["link"]
@@ -2254,6 +2548,8 @@ class BosStation(QtWidgets.QWidget):
                              "shr_kbd": "OQPSK"}[mode]
             yield ("sleep", 0.05)
             return
+        if mode != "rf_off":
+            yield from self._ref_gate(dict(CTL_MODES)[mode])
         uid = self.ctl.get("cmd", {}).get(mode)
         c = getattr(self.host, "can_win", None)
         cmd = c.store.by_uid(uid) if (c and uid) else None
@@ -2425,6 +2721,9 @@ class BosStation(QtWidgets.QWidget):
             name = {0: "internal", 1: "external"}
             self._row(T, "10 MHz source in use (Sour_10MHz)", None, "", name[want],
                       "PASS" if t["Sour_10MHz"] == want else "FAIL", text=name.get(t["Sour_10MHz"], "?"))
+        if t.get("PulsNumb_10MHz") is not None and self.cfg.get("ext_ref"):
+            tol = self.lim.get("pulsnumb_tol", 5.0)
+            self._lim_row(T, "PulsNumb_10MHz", t["PulsNumb_10MHz"], "", 10_000_000 - tol, 10_000_000 + tol, "{:,.0f}")
         if t.get("Err_Ref_LO") is not None:
             self._lim_row(T, "Err_Ref_LO", t["Err_Ref_LO"], "", -self.lim["err_ref_lo"], self.lim["err_ref_lo"], "{:.0f}")
 

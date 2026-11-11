@@ -255,6 +255,41 @@ compares them with *External 10 MHz expected*. Only the RF is locked to the exte
 internal oscillator; carrier error alone while locked to the external 10 MHz → the TFG6806 or the LMX2594 frequency
 plan (repeat on the internal source to tell which).
 
+### Order at the start of every plan: TFG6806 → BOS power → 10 MHz check
+The first test of every plan, **Reference & BOS power-up**, is added automatically (Unit control page,
+*10 MHz reference (TFG6806) and BOS power-up*):
+1. **TFG6806 first** (it must give the 10 MHz before the BOS gets power): `UTILity:CLOck:SOURce EXTernal`
+   (TFG on an external reference), `UTILity:INSide:CLOck OFF` (the rear 10 MHz In/Out port is then an input), then
+   on the output feeding the BOS the standard 10 MHz - **sine, continuous, 10 MHz, 2 Vpp, offset 2 V** - and
+   `OUTPut1 ON`; everything is read back (source, waveform, frequency, amplitude, offset, output).
+2. **BOS power**: ask the operator, or switch on the selected supply output (voltage / current from its tab;
+   HMP4040 also the master), or "already on".
+3. **10 MHz pulses**: first ИОК_ОСН after power-up (REQ_TM ИОК_ОСН if none comes) - `PulsNumb_10MHz` > 0, Stat_10MHz.
+
+**Before every mode command** (carrier Send_Carrier, УР Send_UB_Data, ШР Send_Preamb / Send_KBD - also when a
+session is restarted for another attenuation, and with CAN-library / operator control) the station reads a fresh
+ИОК_ОСН and requires **PulsNumb_10MHz = 10 000 000 ± 5** and **|Err_Ref_LO| ≤ 3** (Limits page). It waits up to
+*Reference wait* (30 s) for the BOS to settle; otherwise the test ends with an error and **no mode command is
+sent**. The pre-check and the diagnosis report both values (PulsNumb off by n pulses = n / 10 ppm).
+
+### Does the TFG6806 know whether an external reference is present? Does it fall back to internal?
+From the TFG6800 manuals: `UTILity:CLOck:SOURce {INTernal|EXTernal}` / `UTILity:CLOck:SOURce?` (Programmer's Guide
+2.11.17-18), `UTILity:INSide:CLOck {ON|OFF}` outputs the internal 10 MHz on the rear port (2.11.19-20). With
+*External* the generator **detects the external clock itself** and switches to it only when it finds a qualified
+signal (10 MHz ± 500 Hz, 100 mVpp-5 Vpp, Users' Guide 5.13): message "External clock access", **"Ext Ref On" in the
+status bar**. Without it, or when it is removed ("External clock removal"), it **automatically runs on its internal
+clock** (Users' Guide 3.24). There is **no SCPI query** for "external clock present" - `UTILity:CLOck:SOURce?`
+returns the setting - so a missing external reference is visible only on the TFG screen; on the BOS side it shows
+as PulsNumb_10MHz off by the TFG's own crystal error.
+
+### What else is on the TFG6806 tab?
+Left, below the connection: **Instrument** (trigger, phase align, read all, reset, save / recall state),
+**Reference** (clock source, internal 10 MHz on the rear port, *BOS 10 MHz preset*: sine 10 MHz 2 Vpp offset 2 V,
+output on), **Coupling** (CH1 / CH2 frequency and amplitude coupling, difference / ratio, direction), **Counter**
+(type, gate time, trigger level, coupling, sensitivity, low-pass - the result is shown on the TFG screen, the guide
+has no command to read it), **System** (power-on state *Last* so the 10 MHz settings return after a power cycle,
+front panel language, brightness, key sound; network settings read only).
+
 ### Which limits come from the technical specification (TZ)?
 Defaults follow the TZ: carrier 37650 + 0.125·n MHz, frequency error ≤ 2·10⁻⁶ (75.5 kHz at 37.75 GHz), symbol-rate
 error ≤ 5·10⁻⁵ (50 ppm), MER ≥ 20 dB, maximum output power −9…−2 dBm at the HF output (nominal −5.5 ± 3.5 dB; at the

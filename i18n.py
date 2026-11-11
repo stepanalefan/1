@@ -196,6 +196,65 @@ Stability / drift|Stabilité / dérive|Stabilität / Drift|Stabilità / deriva|�
 Data / BER (УР)|Données / TEB (УР)|Daten / BER (УР)|Dati / BER (УР)|データ/BER (УР)|Данные / BER (УР)
 ШР packet (despread + decode)|Paquet ШР (désétalement + décodage)|ШР-Paket (Entspreizen + Dekodieren)|Pacchetto ШР (despreading + decodifica)|ШРパケット(逆拡散+復号)|Пакет ШР (сжатие + декодирование)
 Control link & BOS setup|Liaison de commande et réglage BOS|Steuerverbindung & BOS-Einstellung|Collegamento di controllo e impostazione BOS|制御リンクとBOS設定|Связь управления и настройка БОС
+Coupling|Couplage|Kopplung|Accoppiamento|カップリング|Связь каналов
+Counter|Compteur|Zähler|Contatore|カウンタ|Частотомер
+System|Système|System|Sistema|システム|Система
+Frequency coupling|Couplage en fréquence|Frequenzkopplung|Accoppiamento in frequenza|周波数カップリング|Связь по частоте
+Frequency difference|Écart de fréquence|Frequenzdifferenz|Differenza di frequenza|周波数差|Разность частот
+Frequency ratio|Rapport de fréquence|Frequenzverhältnis|Rapporto di frequenza|周波数比|Отношение частот
+Amplitude coupling|Couplage en amplitude|Amplitudenkopplung|Accoppiamento in ampiezza|振幅カップリング|Связь по амплитуде
+Amplitude difference|Écart d'amplitude|Amplitudendifferenz|Differenza di ampiezza|振幅差|Разность амплитуд
+Offset difference|Écart de décalage|Offsetdifferenz|Differenza di offset|オフセット差|Разность смещений
+Direction|Direction|Richtung|Direzione|方向|Направление
+Measure|Mesure|Messen|Misura|測定|Измерять
+Period|Période|Periode|Periodo|周期|Период
+Pulse width|Largeur d'impulsion|Pulsbreite|Larghezza impulso|パルス幅|Длительность импульса
+Duty ratio|Rapport cyclique|Tastverhältnis|Duty cycle|デューティ比|Коэффициент заполнения
+Gate time|Temps de porte|Torzeit|Tempo di gate|ゲート時間|Время счёта
+Trigger level|Niveau de déclenchement|Triggerpegel|Livello di trigger|トリガレベル|Уровень запуска
+Sensitivity|Sensibilité|Empfindlichkeit|Sensibilità|感度|Чувствительность
+Low-pass filter|Filtre passe-bas|Tiefpassfilter|Filtro passa-basso|ローパスフィルタ|ФНЧ
+Power-on state|État à la mise sous tension|Einschaltzustand|Stato all'accensione|電源投入時の状態|Состояние при включении
+Last (restore the settings)|Dernier (rétablir les réglages)|Letzter (Einstellungen wiederherstellen)|Ultimo (ripristina le impostazioni)|前回 (設定を復元)|Последнее (восстановить настройки)
+Default|Par défaut|Standard|Predefinito|デフォルト|По умолчанию
+Front panel language|Langue du panneau avant|Sprache der Frontplatte|Lingua del pannello frontale|前面パネルの言語|Язык передней панели
+English|Anglais|Englisch|Inglese|英語|Английский
+Russian|Russe|Russisch|Russo|ロシア語|Русский
+Chinese|Chinois|Chinesisch|Cinese|中国語|Китайский
+Screen brightness|Luminosité de l'écran|Bildschirmhelligkeit|Luminosità dello schermo|画面の明るさ|Яркость экрана
+Key sound|Son des touches|Tastenton|Suono dei tasti|キー音|Звук клавиш
+Subnet mask|Masque de sous-réseau|Subnetzmaske|Maschera di sottorete|サブネットマスク|Маска подсети
+Gateway|Passerelle|Gateway|Gateway|ゲートウェイ|Шлюз
+Channel|Canal|Kanal|Canale|チャンネル|Канал
+Reference & BOS power-up|Référence et mise sous tension BOS|Referenz & BOS-Einschalten|Riferimento e accensione BOS|基準信号とBOS電源投入|Опора и включение БОС
+10 MHz reference (TFG6806) and BOS power-up|Référence 10 MHz (TFG6806) et mise sous tension BOS|10-MHz-Referenz (TFG6806) und BOS-Einschalten|Riferimento 10 MHz (TFG6806) e accensione BOS|10 MHz基準 (TFG6806) とBOS電源投入|Опора 10 МГц (TFG6806) и включение БОС
+Set up the TFG6806 before the plan|Configurer le TFG6806 avant le plan|TFG6806 vor dem Plan einstellen|Configura il TFG6806 prima del piano|プラン前にTFG6806を設定|Настроить TFG6806 перед планом
+TFG clock source|Source d'horloge TFG|TFG-Taktquelle|Sorgente di clock TFG|TFGクロック源|Источник опоры TFG
+External (UTILity:CLOck:SOURce EXTernal)|Externe (UTILity:CLOck:SOURce EXTernal)|Extern (UTILity:CLOck:SOURce EXTernal)|Esterna (UTILity:CLOck:SOURce EXTernal)|外部 (UTILity:CLOck:SOURce EXTernal)|Внешняя (UTILity:CLOck:SOURce EXTernal)
+Internal (UTILity:CLOck:SOURce INTernal)|Interne (UTILity:CLOck:SOURce INTernal)|Intern (UTILity:CLOck:SOURce INTernal)|Interna (UTILity:CLOck:SOURce INTernal)|内部 (UTILity:CLOck:SOURce INTernal)|Внутренняя (UTILity:CLOck:SOURce INTernal)
+don't change|ne pas modifier|nicht ändern|non modificare|変更しない|не менять
+BOS 10 MHz from|10 MHz du BOS depuis|BOS-10 MHz von|10 MHz del BOS da|BOSの10 MHz供給元|10 МГц для БОС с
+TFG CH1 output|Sortie CH1 du TFG|TFG-Ausgang CH1|Uscita CH1 del TFG|TFG CH1出力|Выход CH1 TFG
+TFG CH2 output|Sortie CH2 du TFG|TFG-Ausgang CH2|Uscita CH2 del TFG|TFG CH2出力|Выход CH2 TFG
+TFG rear 10 MHz Out (internal clock)|Sortie arrière 10 MHz du TFG (horloge interne)|TFG 10 MHz Out hinten (interner Takt)|Uscita posteriore 10 MHz del TFG (clock interno)|TFG背面10 MHz出力 (内部クロック)|Задний выход 10 МГц TFG (внутренняя опора)
+don't touch the TFG outputs|ne pas toucher aux sorties du TFG|TFG-Ausgänge nicht ändern|non toccare le uscite del TFG|TFG出力は変更しない|выходы TFG не трогать
+Set the standard 10 MHz on that output (sine, 10 MHz)|Régler le 10 MHz standard sur cette sortie (sinus, 10 MHz)|Standard-10 MHz an diesem Ausgang einstellen (Sinus, 10 MHz)|Imposta il 10 MHz standard su questa uscita (sinusoide, 10 MHz)|この出力に標準10 MHzを設定 (正弦波、10 MHz)|Установить на этом выходе стандартные 10 МГц (синус, 10 МГц)
+BOS 10 MHz preset|Préréglage 10 MHz BOS|BOS-10-MHz-Vorgabe|Preimpostazione 10 MHz BOS|BOS 10 MHzプリセット|Предустановка 10 МГц для БОС
+Apply: sine 10 MHz, output on|Appliquer : sinus 10 MHz, sortie active|Anwenden: Sinus 10 MHz, Ausgang an|Applica: sinusoide 10 MHz, uscita attiva|適用: 正弦波10 MHz、出力オン|Применить: синус 10 МГц, выход вкл.
+keep the current setting|conserver le réglage actuel|aktuelle Einstellung behalten|mantieni l'impostazione attuale|現在の設定を維持|оставить текущую настройку
+BOS power|Alimentation BOS|BOS-Versorgung|Alimentazione BOS|BOS電源|Питание БОС
+Ask the operator to switch it on|Demander à l'opérateur de l'allumer|Bediener zum Einschalten auffordern|Chiedi all'operatore di accenderlo|オペレータに投入を依頼|Попросить оператора включить
+Switch the selected supply output on|Activer la sortie d'alimentation choisie|Gewählten Versorgungsausgang einschalten|Attiva l'uscita di alimentazione scelta|選択した電源出力をオン|Включить выбранный выход источника
+Already on (check only)|Déjà allumé (contrôle seulement)|Bereits an (nur prüfen)|Già acceso (solo verifica)|既にオン (確認のみ)|Уже включено (только проверка)
+Reference wait|Attente de la référence|Referenz-Wartezeit|Attesa del riferimento|基準待ち時間|Ожидание опоры
+Err_Ref_LO max |code| (before a mode command)|Err_Ref_LO max |code| (avant une commande de mode)|Err_Ref_LO max. |Code| (vor einem Modusbefehl)|Err_Ref_LO max |codice| (prima di un comando di modo)|Err_Ref_LO最大 |コード| (モード指令前)|Err_Ref_LO макс. |код| (перед командой режима)
+PulsNumb_10MHz: 10 000 000 ±|PulsNumb_10MHz : 10 000 000 ±|PulsNumb_10MHz: 10 000 000 ±|PulsNumb_10MHz: 10 000 000 ±|PulsNumb_10MHz: 10 000 000 ±|PulsNumb_10MHz: 10 000 000 ±
+Reference clock (rear 10 MHz In/Out)|Horloge de référence (10 MHz In/Out arrière)|Referenztakt (10 MHz In/Out hinten)|Clock di riferimento (10 MHz In/Out posteriore)|基準クロック (背面10 MHz In/Out)|Опорный генератор (задний 10 MHz In/Out)
+Internal 10 MHz out on the rear port|10 MHz interne sur le port arrière|Interne 10 MHz am hinteren Anschluss|10 MHz interni sulla porta posteriore|背面ポートに内部10 MHz出力|Внутренние 10 МГц на заднем разъёме
+Source|Source|Quelle|Sorgente|ソース|Источник
+Setting|Réglage|Einstellung|Impostazione|設定|Настройка
+Set|Appliquer|Setzen|Imposta|設定|Установить
+Read|Lire|Lesen|Leggi|読込|Прочитать
 Output power|Puissance de sortie|Ausgangsleistung|Potenza di uscita|出力電力|Выходная мощность
 Detected modulation|Modulation détectée|Erkannte Modulation|Modulazione rilevata|検出された変調|Обнаруженная модуляция
 Carrier frequency error|Erreur de fréquence porteuse|Trägerfrequenzfehler|Errore di frequenza portante|搬送波周波数誤差|Ошибка частоты несущей
@@ -359,7 +418,7 @@ Show lines:|Afficher les lignes :|Leitungen anzeigen:|Mostra linee:|表示ライ
 Name|Nom|Name|Nome|名称|Имя
 Description|Description|Beschreibung|Descrizione|説明|Описание
 Key|Touche|Taste|Tasto|キー|Клавиша
-Load|Charger|Laden|Carica|読込|Загрузить
+Load|Charge|Last|Carico|負荷|Нагрузка
 Add CSV files…|Ajouter des fichiers CSV…|CSV-Dateien hinzufügen…|Aggiungi file CSV…|CSVファイル追加…|Добавить файлы CSV…
 Today's logs|Journaux du jour|Heutige Protokolle|Log di oggi|今日のログ|Журналы за сегодня
 Hide all|Tout masquer|Alle ausblenden|Nascondi tutto|すべて隠す|Скрыть все

@@ -365,6 +365,32 @@ valid|в норме
 {} fault(s), {} warning(s); look at {}|неисправностей: {}, замечаний: {}; проверьте: {}
 {} fault(s), {} warning(s)|неисправностей: {}, замечаний: {}
 Finished: {} — {}|Завершено: {} — {}
+10 MHz reference not ready before {} ({} s): {}; required PulsNumb_10MHz 10 000 000 ± {} and |Err_Ref_LO| ≤ {}. Mode command not sent.|=|Опора 10 МГц не готова перед {} ({} с): {}; требуется PulsNumb_10MHz 10 000 000 ± {} и |Err_Ref_LO| ≤ {}. Команда режима не отправлена.
+{}: waiting for the 10 MHz reference before {} (PulsNumb {}, Err_Ref_LO {}) …|{}: ожидание опоры 10 МГц перед {} (PulsNumb {}, Err_Ref_LO {}) …
+TFG6806 not connected (TFG6806 tab) - it must give the BOS its 10 MHz before the BOS is powered|TFG6806 не подключён (вкладка TFG6806) - он должен подать 10 МГц до включения питания БОС
+Reference before mode command|Опора перед командой режима
+TFG6806 clock source (UTILity:CLOck:SOURce?)|Источник опоры TFG6806 (UTILity:CLOck:SOURce?)
+TFG6806 CH{} frequency (10 MHz to the BOS)|Частота TFG6806 CH{} (10 МГц в БОС)
+TFG6806 CH{} output|Выход TFG6806 CH{}
+TFG6806 CH{} waveform|Форма сигнала TFG6806 CH{}
+TFG6806 CH{} amplitude|Амплитуда TFG6806 CH{}
+TFG6806 CH{} offset|Смещение TFG6806 CH{}
+TFG6806 internal 10 MHz on the rear port (UTILity:INSide:CLOck?)|Внутренние 10 МГц TFG6806 на заднем разъёме (UTILity:INSide:CLOck?)
+setting only: the TFG has no query for 'external clock present'; without a qualified clock it runs on its internal one (status bar 'Ext Ref On')|только настройка: у TFG нет запроса «внешняя опора есть»; без годного сигнала он работает от внутренней (строка состояния «Ext Ref On»)
+BOS power on|Питание БОС включено
+{}: {} V, limit {} A|{}: {} В, ограничение {} А
+10 MHz pulses present (PulsNumb_10MHz)|Импульсы 10 МГц есть (PulsNumb_10MHz)
+10 MHz pulses (PulsNumb_10MHz)|Импульсы 10 МГц (PulsNumb_10MHz)
+External 10 MHz valid (Stat_10MHz)|Внешние 10 МГц исправны (Stat_10MHz)
+ИОК_ОСН after power-up|ИОК_ОСН после включения
+BOS not powered / booting, telemetry off, or wrong CAN line|БОС не включён / загружается, телеметрия выключена или неверная линия CAN
+internal reference expected|ожидается внутренняя опора
+10 MHz reference frequency off|Частота опоры 10 МГц вне нормы
+PulsNumb_10MHz = {} pulses per second (required 10 000 000 ± {}, i.e. ±{} ppm): the 10 MHz given to the BOS is {} ppm off. Mode commands are not sent until it is inside.|PulsNumb_10MHz = {} импульсов в секунду (требуется 10 000 000 ± {}, т. е. ±{} ppm): опора 10 МГц для БОС смещена на {} ppm. Команды режима не отправляются, пока она вне нормы.
+Check the TFG6806: CH output frequency exactly 10 MHz, its own reference (Ext Ref On in the status bar)|Проверьте TFG6806: частота выхода CH ровно 10 МГц, его собственная опора («Ext Ref On» в строке состояния)
+Check the 10 MHz cable / level at the BOS|Проверьте кабель / уровень 10 МГц на входе БОС
+Err_Ref_LO = {} (required |Err_Ref_LO| ≤ {} before a mode command): the BOS internal oscillator has not settled on the 10 MHz reference.|=|Err_Ref_LO = {} (перед командой режима требуется |Err_Ref_LO| ≤ {}): внутренний генератор БОС не подстроился под опору 10 МГц.
+Wait longer after power-up (Reference wait, Unit control page)|Увеличьте ожидание после включения («Ожидание опоры», страница «Управление блоком»)
 Analysing {} …{}|Анализ {} …{}
 Analysing {} …|Анализ {} …
 <b>Findings</b> — {} fault(s), {} warning(s)|<b>Выводы</b> — неисправностей: {}, замечаний: {}
@@ -392,7 +418,10 @@ _ENTRIES = []
 for _ln in T.strip().split("\n"):
     if "|" not in _ln:
         continue
-    _en, _ru = _ln.split("|", 1) if _ln.count("|") == 1 else _ln.rsplit("|", 1)
+    if "|=|" in _ln:                                     # texts that contain "|" themselves
+        _en, _ru = _ln.split("|=|", 1)
+    else:
+        _en, _ru = _ln.split("|", 1) if _ln.count("|") == 1 else _ln.rsplit("|", 1)
     _rx = "^" + re.escape(_en).replace(r"\{\}", "(.*?)") + "$"
     _ENTRIES.append((re.compile(_rx, re.S), _ru, _en.count("{}")))
 # specific before generic: templates with a longer fixed beginning, then more fixed text, are tried first
