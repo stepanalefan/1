@@ -304,8 +304,11 @@ analysed; the report shows which part. For a ШР packet keep the preambles (sta
 ### How do I change the language?
 **Help** tab → *Language*: English, Français, Deutsch, Italiano, 日本語, Русский (the languages of the G8 countries).
 It applies at once and is remembered (`ui_language.txt` next to the program). Translated: tabs, buttons, labels,
-settings, limits, table headers, test and measurement names. Kept in English: technical identifiers (telemetry
-field names, SCPI, model names, units), log messages, findings text, HTML reports and these help pages.
+settings, limits, table headers, test and measurement names. With **Русский** the findings (titles, explanations,
+most likely location, what to do), the step / verdict line, the corrections and the HTML report (verdict, measurements,
+units, PASS → НОРМА / FAIL → НЕ НОРМА) are in Russian too; in the other languages they stay in English. Kept in English
+everywhere: technical identifiers (telemetry field names, SCPI, model names), log messages and these help pages.
+Reports already written keep the language they were written in.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the

@@ -1952,6 +1952,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.help.lang.setCurrentIndex(max(0, self.help.lang.findData(self.translator.lang)))
                 self.help.lang.currentIndexChanged.connect(
                     lambda *_: self.translator.set_language(self.help.lang.currentData()))
+            if self.bos:                                  # findings / corrections are drawn from data
+                self.translator.changed.connect(lambda *_: (self.bos._filter_findings(self.bos.diagram.selected),
+                                                            self.bos._show_corrections()))
             QtCore.QTimer.singleShot(0, self.translator.apply)
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([420, 1140])

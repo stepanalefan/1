@@ -511,6 +511,12 @@ def tr(text: str, lang: str) -> str:
     s = text.strip()
     if s != text and s in TABLE:
         return text.replace(s, TABLE[s].get(lang, s))
+    if lang == "ru":                                      # diagnosis texts with values (bos_ru templates)
+        try:
+            import bos_ru
+            return bos_ru.ru(text)
+        except Exception:
+            return text
     return text
 
 
@@ -574,7 +580,7 @@ class Translator(QtCore.QObject):
                             self._t(it, "h", it.text(), it.setText)
                     if w.rowCount() * w.columnCount() <= 3000 and w.columnCount() <= 12:
                         for r in range(w.rowCount()):
-                            for c in range(min(2, w.columnCount())):       # test / parameter names
+                            for c in range(min(6 if self.lang == "ru" else 2, w.columnCount())):
                                 it = w.item(r, c)
                                 if it:
                                     self._t(it, "c", it.text(), it.setText)

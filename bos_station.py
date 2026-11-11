@@ -173,6 +173,23 @@ DEFAULT_PLANS = {
 CTL_MODES = [("rf_off", "RF off"), ("cw", "Carrier (CW)"), ("bpsk", "BPSK"), ("oqpsk", "OQPSK")]
 
 
+def _ru_on():
+    try:
+        import i18n
+        return i18n.CURRENT == "ru"
+    except Exception:
+        return False
+
+
+def _ru(text):
+    """Russian via the interface dictionary (i18n) and the diagnosis templates (bos_ru)."""
+    try:
+        import i18n
+        return i18n.tr(text, "ru")
+    except Exception:
+        return text
+
+
 def _tr(text):
     try:
         import i18n
@@ -2754,7 +2771,7 @@ class BosStation(QtWidgets.QWidget):
         shown = [f for f in self.findings if not block or f.suspects.get(block, 0) > 0]
         self._shown = shown
         for f in shown:
-            it = QtWidgets.QListWidgetItem(f"{SEV_ICON[f.sev]}  {f.title}")
+            it = QtWidgets.QListWidgetItem(f"{SEV_ICON[f.sev]}  {_ru(f.title) if _ru_on() else f.title}")
             it.setForeground(QtGui.QColor(SEV_COLOR[f.sev]))
             self.find_list.addItem(it)
         nf = sum(f.sev == "fail" for f in self.findings)
@@ -2773,21 +2790,26 @@ class BosStation(QtWidgets.QWidget):
         self.find_detail.setHtml(self._finding_html(shown[row]))
 
     @staticmethod
-    def _finding_html(f):
+    def _finding_html(f, L=None, R=None):
+        if L is None:                                   # on screen: follow the interface language (Russian)
+            ruo = _ru_on()
+            L = (lambda x: _ru(x)) if ruo else (lambda x: x)
+            R = (lambda x: __import__("bos_ru").REPORT.get(x, x)) if ruo else (lambda x: x)
         sus = sorted(f.suspects.items(), key=lambda kv: -kv[1])
-        h = [f'<h3 style="color:{SEV_COLOR[f.sev]}">{SEV_ICON[f.sev]} {html.escape(f.title)}</h3>',
-             f"<p>{html.escape(f.detail)}</p>"]
+        h = [f'<h3 style="color:{SEV_COLOR[f.sev]}">{SEV_ICON[f.sev]} {html.escape(L(f.title))}</h3>',
+             f"<p>{html.escape(L(f.detail))}</p>"]
         if sus:
-            h.append("<p><b>Most likely location</b></p><table cellspacing=4>")
+            h.append(f"<p><b>{R('Most likely location')}</b></p><table cellspacing=4>")
             for b, w in sus:
                 bar = "█" * max(1, int(w * 20))
-                h.append(f"<tr><td>{html.escape(ba.BLOCK_NAME.get(b, b))}</td>"
+                h.append(f"<tr><td>{html.escape(L(ba.BLOCK_NAME.get(b, b)))}</td>"
                          f'<td style="color:{C_WARN}">{bar}</td><td>{w * 100:.0f} %</td></tr>')
             h.append("</table>")
         if f.actions:
-            h.append("<p><b>What to do</b></p><ol>" + "".join(f"<li>{html.escape(a)}</li>" for a in f.actions) + "</ol>")
+            h.append(f"<p><b>{R('What to do')}</b></p><ol>" + "".join(f"<li>{html.escape(L(a))}</li>" for a in f.actions)
+                     + "</ol>")
         if f.source:
-            h.append(f'<p style="color:{C_DIM}">source: {html.escape(f.source)}</p>')
+            h.append(f'<p style="color:{C_DIM}">{R("source")}: {html.escape(R(f.source) if _ru_on() else f.source)}</p>')
         return "".join(h)
 
     def _show_corrections(self):
@@ -2797,7 +2819,7 @@ class BosStation(QtWidgets.QWidget):
         self.corr.setRowCount(len(self.corr_rows))
         for r, row in enumerate(self.corr_rows):
             for c, t in enumerate(row):
-                self.corr.setItem(r, c, QtWidgets.QTableWidgetItem(t))
+                self.corr.setItem(r, c, QtWidgets.QTableWidgetItem(_ru(t) if _ru_on() else t))
 
     def _copy_corr(self):
         QtWidgets.QApplication.clipboard().setText(
@@ -2904,50 +2926,56 @@ class BosStation(QtWidgets.QWidget):
         sn = "".join(ch for ch in (ri["serial"] or "unit") if ch.isalnum() or ch in "-_") or "unit"
         path = os.path.join(REPORT_DIR, f"BOS_{sn}_{stamp}.html")
         e = html.escape
+        ruo = _ru_on()
+        L = (lambda x: _ru(x)) if ruo else (lambda x: x)          # report in Russian when the UI is Russian
+        R = (lambda x: __import__("bos_ru").REPORT.get(x, x)) if ruo else (lambda x: x)
+        U = (lambda x: __import__("bos_ru").UNITS.get(x, x)) if ruo else (lambda x: x)
         vc = self._vcolor(verdict)
-        h = ["<!doctype html><html><head><meta charset='utf-8'><title>BOS test report</title><style>"
+        h = ["<!doctype html><html><head><meta charset='utf-8'><title>" + R('BOS test report') + "</title><style>"
              "body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1f2328}"
              "table{border-collapse:collapse;margin:8px 0}td,th{border:1px solid #d0d7de;padding:3px 8px;font-size:13px}"
              "th{background:#f6f8fa;text-align:left}.PASS{color:#1a7f37;font-weight:600}.FAIL,.ERROR{color:#cf222e;font-weight:600}"
              ".INFO{color:#0969da}.SKIP{color:#6e7781}h2{border-bottom:1px solid #d0d7de;padding-bottom:4px}"
              "img{max-width:100%;border:1px solid #d0d7de;margin:4px 0}</style></head><body>",
-             "<h1>BOS modulator test report</h1>",
-             f"<p style='font-size:22px;font-weight:800;color:{vc}'>Verdict: {e(verdict)}</p><p>{e(summary)}</p>",
+             f"<h1>{R('BOS modulator test report')}</h1>",
+             f"<p style='font-size:22px;font-weight:800;color:{vc}'>{e(R('Verdict'))}: {e(L(verdict))}</p><p>{e(L(summary))}</p>",
              "<table>"]
         info = [("Unit serial", ri["serial"] or "—"), ("Operator", ri["operator"] or "—"),
                 ("Date", _dt.datetime.fromtimestamp(ri["start"]).strftime("%Y-%m-%d %H:%M:%S")),
-                ("Duration", f"{time.time() - ri['start']:.0f} s"), ("Test plan", ri["plan"]),
-                ("Tests", ", ".join(TEST_NAME.get(t, t) for t in ri["tests"])),
-                ("Carrier / symbol rates", f"{self.cfg['carrier'] / 1e9:.6f} GHz / BPSK {self.cfg['sr_bpsk'] / 1e3:g} ksym/s, "
-                                           f"OQPSK {self.cfg['sr_oqpsk'] / 1e6:g} Msym/s, "
+                ("Duration", f"{time.time() - ri['start']:.0f} {U('s')}"), ("Test plan", ri["plan"]),
+                ("Tests", ", ".join(L(TEST_NAME.get(t, t)) for t in ri["tests"])),
+                ("Carrier / symbol rates", f"{self.cfg['carrier'] / 1e9:.6f} {U('GHz')} / BPSK {self.cfg['sr_bpsk'] / 1e3:g} {U('ksym/s')}, "
+                                           f"OQPSK {self.cfg['sr_oqpsk'] / 1e6:g} {U('Msym/s')}, "
                                           f"RRC α {self.cfg['alpha']:g}"),
-                ("Nominal power / att. code / cable loss", f"{self.cfg['power_nom']:g} dBm / {self.cfg['att_code']} / "
-                                                           f"{self.cfg['loss_db']:g} dB"),
+                ("Nominal power / att. code / cable loss", f"{self.cfg['power_nom']:g} {U('dBm')} / {self.cfg['att_code']} / "
+                                                           f"{self.cfg['loss_db']:g} {U('dB')}"),
                 ("FSW", getattr(self.host, "idn_label", None).text().replace("\n", " · ")
                  if hasattr(self.host, "idn_label") else "—")]
         if ri.get("demo"):
             info.append(("Mode", "DEMO (simulated BOS) — injected faults: " +
                          (", ".join(ri["faults"]) if ri["faults"] else "none")))
-        h += [f"<tr><th>{e(k)}</th><td>{e(str(v))}</td></tr>" for k, v in info] + ["</table>"]
-        h.append("<h2>Diagnosis</h2>")
+        h += [f"<tr><th>{e(R(k))}</th><td>{e(str(v))}</td></tr>" for k, v in info] + ["</table>"]
+        h.append(f"<h2>{R('Diagnosis')}</h2>")
         h.append(f"<img src='data:image/png;base64,{self._img(self.diagram)}'>")
         for f in self.findings:
-            h.append(self._finding_html(f).replace(C_FAIL, "#cf222e").replace(C_WARN, "#9a6700")
+            h.append(self._finding_html(f, L, R).replace(C_FAIL, "#cf222e").replace(C_WARN, "#9a6700")
                      .replace(C_OK, "#1a7f37").replace(C_DIM, "#6e7781"))
-        h.append("<h2>Measurements</h2><table><tr><th>Test</th><th>Parameter</th><th>Value</th><th>Unit</th>"
-                 "<th>Limit</th><th>Result</th></tr>")
+        h.append(f"<h2>{R('Measurements')}</h2><table><tr><th>{R('Test')}</th><th>{R('Parameter')}</th>"
+                 f"<th>{R('Value')}</th><th>{R('Unit')}</th>"
+                 f"<th>{R('Limit')}</th><th>{R('Result')}</th></tr>")
         for r in self.rows:
-            h.append(f"<tr><td>{e(r['test'])}</td><td>{e(r['name'])}</td><td>{e(r['text'])}</td><td>{e(r['unit'])}</td>"
-                     f"<td>{e(str(r['limit']))}</td><td class='{r['status']}'>{e(r['status'])}"
-                     f"{(' - ' + e(r['note'])) if r['note'] else ''}</td></tr>")
+            h.append(f"<tr><td>{e(L(r['test']))}</td><td>{e(L(r['name']))}</td><td>{e(L(r['text']))}</td>"
+                     f"<td>{e(U(r['unit']))}</td><td>{e(str(r['limit']))}</td><td class='{r['status']}'>{e(R(r['status']))}"
+                     f"{(' - ' + e(L(r['note']))) if r['note'] else ''}</td></tr>")
         h.append("</table>")
         if getattr(self, "corr_rows", None):
-            h.append("<h2>Suggested corrections</h2><table><tr><th>Adjustment</th><th>Value</th><th>How</th></tr>")
-            h += [f"<tr><td>{e(a)}</td><td>{e(b)}</td><td>{e(c)}</td></tr>" for a, b, c in self.corr_rows]
+            h.append(f"<h2>{R('Suggested corrections')}</h2><table><tr><th>{R('Adjustment')}</th><th>{R('Value')}</th>"
+                     f"<th>{R('How')}</th></tr>")
+            h += [f"<tr><td>{e(L(a))}</td><td>{e(L(b))}</td><td>{e(L(c))}</td></tr>" for a, b, c in self.corr_rows]
             h.append("</table>")
         tl = self.tlm_snapshot()
         if tl.get("age_dop") is not None:
-            h.append("<h2>BOS telemetry at the end of the test</h2><table>")
+            h.append(f"<h2>{R('BOS telemetry at the end of the test')}</h2><table>")
             for k in ("pll_lmk", "pll_lmx (DAC)", "pll_lmx (mod)", "pll_jesd", "pll_all", "jesd_err", "vdd_1v",
                       "vdd_1_8v", "vdd_2_5v", "Temp_DT1", "Temp_DT2", "Temp_DT3", "Stat_10MHz", "Sour_10MHz",
                       "Err_Ref_LO", "Soft_MORE_Ver"):
@@ -2955,7 +2983,7 @@ class BosStation(QtWidgets.QWidget):
                     v = tl[k]
                     h.append(f"<tr><th>{e(k)}</th><td>{e(f'{v:.3f}' if isinstance(v, float) else str(v))}</td></tr>")
             h.append("</table>")
-        h.append("<h2>Signal</h2>")
+        h.append(f"<h2>{R('Signal')}</h2>")
         caps = self.res.get("_caps", [])
         keep = self.sig_src.currentIndex()
         for k, (label, r) in enumerate(caps[:8]):
@@ -2966,7 +2994,7 @@ class BosStation(QtWidgets.QWidget):
         if keep >= 0:
             self.sig_src.setCurrentIndex(keep)
         if "att" in self.res and "bits" in self.res["att"]:
-            h.append(f"<h2>Attenuator</h2><img src='data:image/png;base64,{self._img(self.att_plot)}' width=700>")
+            h.append(f"<h2>{R('Attenuator')}</h2><img src='data:image/png;base64,{self._img(self.att_plot)}' width=700>")
         h.append(f"<p style='color:#6e7781'>KTR TEST · BOS Test Station · {e(stamp)}</p></body></html>")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(h))
