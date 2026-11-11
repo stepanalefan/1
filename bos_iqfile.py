@@ -30,7 +30,7 @@ DTYPES = {"int8": np.int8, "int16": np.int16, "int32": np.int32, "float32": np.f
 
 class IQData:
     def __init__(self, x, fs=None, center=None, name="", meta=None):
-        self.x = np.asarray(x, np.complex64)
+        self.x = x if isinstance(x, np.ndarray) and x.dtype == np.complex64 else np.asarray(x, np.complex64)
         self.fs, self.center, self.name = fs, center, name
         self.meta = meta or {}
 
@@ -45,7 +45,33 @@ def _num(s):
         return None
 
 
-def read_iq_tar(path) -> IQData:
+def _to_complex64(raw, dtype, nch=1, scale=1.0, order="pairs", progress=None):
+    """Interleaved (or block) I/Q numbers -> complex64. float32 single-channel pairs without scaling is
+    returned as a zero-copy view (of a memory map: nothing is read until used); everything else is
+    converted in chunks, so a multi-GB file never needs more than its complex64 size in RAM."""
+    raw = raw[:raw.size // (2 * nch) * 2 * nch]
+    if order == "pairs" and nch == 1 and raw.dtype == np.float32 and scale == 1.0:
+        return raw.view(np.complex64)
+    n = raw.size // (2 * nch)
+    x = np.empty(n, np.complex64)
+    k = 1.0 / float(np.iinfo(raw.dtype).max) if np.issubdtype(raw.dtype, np.integer) else 1.0
+    k *= scale
+    step = 1 << 22
+    for s in range(0, n, step):
+        e = min(n, s + step)
+        if order == "blocks":
+            x.real[s:e] = raw[s:e] * k
+            x.imag[s:e] = raw[n + s:n + e] * k
+        else:
+            r = raw[s * 2 * nch:e * 2 * nch].reshape(-1, 2 * nch)
+            x.real[s:e] = r[:, 0] * k
+            x.imag[s:e] = r[:, 1] * k
+        if progress:
+            progress(e / n)
+    return x
+
+
+def read_iq_tar(path, progress=None) -> IQData:
     with tarfile.open(path) as tf:
         xml_m = next((m for m in tf.getmembers() if m.name.lower().endswith(".xml")), None)
         if xml_m is None:
@@ -65,13 +91,15 @@ def read_iq_tar(path) -> IQData:
         dname = txt.get("DataFilename")
         dm = next((m for m in tf.getmembers() if dname and m.name.endswith(dname)), None) or \
             next(m for m in tf.getmembers() if not m.name.lower().endswith(".xml") and m.isfile())
-        raw = np.frombuffer(tf.extractfile(dm).read(), DTYPES.get(dtype, np.float32))
-    if fmt != "complex":
-        raise ValueError(f"I/Q format '{fmt}' not supported (complex only)")
-    raw = raw.reshape(-1, 2 * nch)[:, :2].astype(np.float64)       # first channel
-    if dtype.startswith("int"):
-        raw = raw / float(np.iinfo(DTYPES[dtype]).max)
-    x = (raw[:, 0] + 1j * raw[:, 1]) * scale
+        if fmt != "complex":
+            raise ValueError(f"I/Q format '{fmt}' not supported (complex only)")
+        dt = np.dtype(DTYPES.get(dtype, np.float32))
+        if isinstance(tf.fileobj, (io.BufferedReader, io.FileIO)):
+            # uncompressed tar (as the FSW writes it): map the data member in place, no copy
+            raw = np.memmap(path, dt, "r", offset=dm.offset_data, shape=(dm.size // dt.itemsize,))
+        else:
+            raw = np.frombuffer(tf.extractfile(dm).read(), dt)
+    x = _to_complex64(raw, dt, nch, scale, progress=progress)
     return IQData(x, fs, center, os.path.basename(path), {"format": "R&S iq.tar", "datatype": dtype})
 
 
@@ -123,22 +151,18 @@ def read_csv(path) -> IQData:
     return IQData(a[:, 0] + 1j * a[:, 1], fs, center, os.path.basename(path), {"format": "CSV"})
 
 
-def read_raw(path, dtype="float32", order="pairs") -> IQData:
-    raw = np.fromfile(path, DTYPES[dtype]).astype(np.float64)
-    if dtype.startswith("int"):
-        raw /= float(np.iinfo(DTYPES[dtype]).max)
-    n = raw.size // 2
-    if order == "blocks":                                  # I block then Q block
-        x = raw[:n] + 1j * raw[n:2 * n]
-    else:
-        x = raw[0:2 * n:2] + 1j * raw[1:2 * n:2]
+def read_raw(path, dtype="float32", order="pairs", progress=None) -> IQData:
+    dt = np.dtype(DTYPES[dtype])
+    raw = np.memmap(path, dt, "r") if os.path.getsize(path) >= dt.itemsize * 2 else np.zeros(0, dt)
+    x = _to_complex64(raw, dt, order=order, progress=progress)
     return IQData(x, None, None, os.path.basename(path), {"format": f"raw {dtype} {order}"})
 
 
-def load(path, dtype="float32", order="pairs") -> IQData:
+def load(path, dtype="float32", order="pairs", progress=None) -> IQData:
+    """Large files are memory-mapped (float32) or converted in chunks to complex64."""
     p = path.lower()
     if p.endswith(".iq.tar") or p.endswith(".tar"):
-        return read_iq_tar(path)
+        return read_iq_tar(path, progress)
     if p.endswith(".csv") or p.endswith(".txt"):
         return read_csv(path)
     if p.endswith(".npy"):
@@ -148,8 +172,8 @@ def load(path, dtype="float32", order="pairs") -> IQData:
         return IQData(d["x"], float(d["fs"]) if "fs" in d else None, float(d["center"]) if "center" in d else None,
                       os.path.basename(path), {"format": "npz"})
     if p.endswith(".iqw"):
-        return read_raw(path, "float32", order)
-    return read_raw(path, dtype, order)
+        return read_raw(path, "float32", order, progress)
+    return read_raw(path, dtype, order, progress)
 
 
 FILE_FILTER = ("I/Q recordings (*.iq.tar *.tar *.iqw *.csv *.txt *.npy *.npz *.bin *.dat *.raw);;All files (*)")

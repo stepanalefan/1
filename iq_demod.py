@@ -101,9 +101,9 @@ def _coarse_cfo(x, fs, m):
 def _upsample(x, u):
     """Band-limited interpolation by FFT zero padding."""
     n = len(x)
-    X = np.fft.fft(x)
+    X = np.fft.fft(np.asarray(x, np.complex64))             # single precision: ~2× faster, ample for MER
     h = n // 2
-    Y = np.zeros(n * u, complex)
+    Y = np.zeros(n * u, np.complex64)
     Y[:h] = X[:h]
     Y[-(n - h):] = X[h:]
     return np.fft.ifft(Y) * u

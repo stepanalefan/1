@@ -287,6 +287,29 @@ samples per symbol the FSW bandwidth cuts the Manchester pulses and even a perfe
 (decoding still works). Lock the FSW to the same 10 MHz as the BOS (TFG6806 → FSW REF IN), otherwise the analyzer's
 own reference drift is mixed into the carrier-wander measurement. For ШР include the start of the packet.
 
+### Large recordings (ШР at 275 MS/s, several GB): how fast, and what are the limits?
+A 1.67 s ШР recording at 275 MS/s (about 3.6 GB, the most an FSW50 holds at that bandwidth) is handled in one go:
+* **Opening** is instant: .iq.tar / .iqw / raw float32 files are *memory-mapped* (read from disk only where
+  needed), other formats are converted in pieces with a progress bar. The window no longer freezes.
+* **Select the part to analyse** reads the recording once for the power overview (a few seconds, progress bar);
+  dragging the selection is instant.
+* **ШР analysis** streams through the file in blocks at its own sample rate (no resampling of the whole record),
+  with the FFT work spread over all processor cores (up to 8), and only from the start to the end of the
+  transmission. Reference: 1.13 s of packet at 275 MS/s, 64 kbit/s, 4 КБД → about 1 minute on a 4-core PC, about
+  2 GB of RAM besides the file itself. More cores → proportionally faster. The window stays usable; the status
+  line shows the progress.
+* **УР / carrier recordings at a high sample rate** are first shifted to the carrier and decimated to ~8 × the
+  occupied bandwidth, then analysed as usual.
+
+What one recording can contain: one ШР КБД takes 17 912 bits, so at 16 kbit/s it lasts 1.12 s (64 kbit/s: 0.28 s,
+1024 kbit/s: 17.5 ms). At 16 kbit/s a 1.67 s recording holds one КБД only if it starts at the beginning of the
+packet; otherwise the station reports the preambles / despreading and says how many bits of the КБД were missing.
+To catch the packet start, trigger the FSW on the RF burst (IF power trigger) with a short pre-trigger.
+
+**GPU (video card) acceleration** is not used: the work is limited by reading the file and by the parts that
+cannot be parallelised (turbo decoding), and a GPU would need an NVIDIA card with CUDA libraries on every station
+PC. Multi-core processing gives most of the possible gain without extra installation.
+
 ### What did the first real УР recording show?
 `bos_UR_5s_64spd_256fd.iq.tar` (64 kbit/s, 256 kS/s, 5 s): all 30 КБД decoded, RS without corrections, CRC ok, BER 0 in
 306 000 bits, idle frames exactly as table 4.4, frame counter continuous, SCID 768 (0x300), carrier on channel

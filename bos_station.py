@@ -401,6 +401,60 @@ class PlanDialog(QtWidgets.QDialog):
 # --------------------------------------------------------------------------- #
 #  Station                                                                     #
 # --------------------------------------------------------------------------- #
+def run_busy(parent, text, fn):
+    """Run fn(progress) in a background thread behind a modal progress dialog, so the window keeps
+    repainting (no "not responding" on multi-GB files). progress(f) takes 0…1. Returns fn's result or
+    re-raises its exception."""
+    import threading
+    box = {"p": 0.0}
+
+    def prog(f):
+        box["p"] = float(f)
+
+    def run():
+        try:
+            box["r"] = fn(prog)
+        except BaseException as e:                     # noqa: B902 - re-raised in the GUI thread
+            box["e"] = e
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    dlg = QtWidgets.QProgressDialog(_tr(text), None, 0, 1000, parent)
+    dlg.setWindowTitle("KTR TEST")
+    dlg.setWindowModality(QtCore.Qt.WindowModal)
+    dlg.setMinimumDuration(400)
+    dlg.setCancelButton(None)
+    t0 = time.time()
+    while th.is_alive():
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 40)
+        dlg.setValue(int(min(1.0, box["p"]) * 1000))
+        dlg.setLabelText(f"{_tr(text)}  ({time.time() - t0:.0f} s)")
+        th.join(0.03)
+    dlg.close()
+    if "e" in box:
+        raise box["e"]
+    return box.get("r")
+
+
+def envelope(x, nb, progress=None):
+    """Mean and peak power (|x|²) in nb equal bins over the whole record, read in pieces."""
+    n = len(x)
+    b = max(1, n // nb)
+    m = n // b * b
+    nbin = m // b
+    pmean = np.empty(nbin, np.float64)
+    pmax = np.empty(nbin, np.float64)
+    per = max(1, (1 << 23) // b)                      # bins per piece (~8 M samples)
+    for i in range(0, nbin, per):
+        e = min(nbin, i + per)
+        v = np.asarray(x[i * b:e * b], np.complex64)
+        p = (v.real ** 2 + v.imag ** 2).reshape(e - i, b)
+        pmean[i:e] = p.mean(axis=1)
+        pmax[i:e] = p.max(axis=1)
+        if progress:
+            progress(e / nbin)
+    return b, pmean, pmax
+
+
 class FileDialog(QtWidgets.QDialog):
     """Sample rate / centre (from the file if present), signal type, rates."""
 
@@ -422,7 +476,7 @@ class FileDialog(QtWidgets.QDialog):
         self.iq = None
         try:
             if not raw:
-                self.iq = bos_iqfile.load(path)
+                self.iq = run_busy(parent, "Loading I/Q file …", lambda pr: bos_iqfile.load(path, progress=pr))
         except Exception as e:
             f.addRow(QtWidgets.QLabel(f"cannot read: {e}"))
         self.fs = QtWidgets.QDoubleSpinBox()
@@ -460,7 +514,8 @@ class FileDialog(QtWidgets.QDialog):
         f.addRow(bb)
 
     def result_data(self):
-        iq = self.iq or bos_iqfile.load(self.path, self.dtype.currentText(), self.order.currentData())
+        iq = self.iq or run_busy(self, "Loading I/Q file …", lambda pr: bos_iqfile.load(
+            self.path, self.dtype.currentText(), self.order.currentData(), progress=pr))
         iq.fs = self.fs.value() * 1e6
         iq.center = self.center.value() * 1e9 or None
         if not iq.fs:
@@ -482,12 +537,11 @@ class SegmentDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         # envelope: mean and max power per bin (dBm), ≤ 4000 bins
         nb = min(4000, max(1, self.n // 16))
-        self.bin = max(1, self.n // nb)
-        m = self.n // self.bin * self.bin
-        p = (np.abs(np.asarray(iq.x[:m], np.complex64).reshape(-1, self.bin)) ** 2) / 50.0 * 1e3
-        self.t = (np.arange(p.shape[0]) + 0.5) * self.bin / self.fs
-        self.pmean = 10 * np.log10(p.mean(axis=1) + 1e-20)
-        pmax = 10 * np.log10(p.max(axis=1) + 1e-20)
+        self.bin, pm, px = run_busy(parent, "Reading the recording …", lambda pr: envelope(iq.x, nb, pr))
+        self.pw_bins = pm / 50.0 * 1e3                    # mW per bin, for the selection power
+        self.t = (np.arange(len(pm)) + 0.5) * self.bin / self.fs
+        self.pmean = 10 * np.log10(self.pw_bins + 1e-20)
+        pmax = 10 * np.log10(px / 50.0 * 1e3 + 1e-20)
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel("bottom", "time", units="s")
@@ -574,8 +628,10 @@ class SegmentDialog(QtWidgets.QDialog):
                 sb.blockSignals(True)
                 sb.setValue(val)
                 sb.blockSignals(False)
-        seg = np.asarray(self.iq.x[a:b])
-        pw = 10 * math.log10(float(np.mean(np.abs(seg) ** 2)) / 50.0 * 1e3 + 1e-20) if b > a else float("nan")
+        # mean power from the envelope bins (instant; the record may be GBs)
+        i0, i1 = a // self.bin, max(a // self.bin + 1, -(-b // self.bin))
+        sel = self.pw_bins[i0:i1]
+        pw = 10 * math.log10(float(np.mean(sel)) + 1e-20) if b > a and sel.size else float("nan")
         self.info.setText(f"{(b - a) / self.fs:.6f} s, {b - a:,} samples, mean {pw:.2f} dBm")
 
 
@@ -2423,10 +2479,26 @@ class BosStation(QtWidgets.QWidget):
         self.log(f"BOS station: analysing {iq.name}: {len(iq.x):,} samples, {iq.fs / 1e6:g} MS/s"
                  + (f", centre {iq.center / 1e9:.6f} GHz" if iq.center else ""))
 
+        prog = {"f": None, "t0": time.time()}
+
         def job():
-            return ba.analyze_file(iq.x, iq.fs, iq.center, cfg, mode, ur, shr, msgs.append)
+            return ba.analyze_file(iq.x, iq.fs, iq.center, cfg, mode, ur, shr, msgs.append,
+                                   progress=lambda f: prog.__setitem__("f", f))
         self.step_lbl.setText(f"Analysing {iq.name} …")
-        st, res = yield ("fsw", job)
+        tick = QtCore.QTimer(self)
+
+        def show():
+            el = time.time() - prog["t0"]
+            last = msgs[-1] if msgs else ""
+            pc = f" {prog['f'] * 100:.0f} %" if prog["f"] is not None else ""
+            self.step_lbl.setText(f"Analysing {iq.name} …{pc}  {el:.0f} s  {last}")
+        tick.timeout.connect(show)
+        tick.start(300)
+        try:
+            st, res = yield ("fsw", job)
+        finally:
+            tick.stop()
+            tick.deleteLater()
         for m in msgs:
             self.log(f"BOS station: {m}")
         if st == "err":

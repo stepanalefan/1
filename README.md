@@ -125,8 +125,8 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
 | `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
-| `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, chip receiver, despreading |
-| `bos_iqfile.py` | I/Q files: read .iq.tar / .iqw / .csv / raw, write .iq.tar |
+| `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, streamed multi-core chip receiver (any sample rate ≥ 1.25 × 131 Msym/s, e.g. 275 MS/s), despreading |
+| `bos_iqfile.py` | I/Q files: read .iq.tar / .iqw / .csv / raw (memory-mapped: multi-GB recordings open instantly), write .iq.tar |
 | `bos_protocol.py` | BOS CAN protocol: identifiers, command codes and parameters, acknowledgements, CRC-16, КОНФИГ decoding |
 | `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |

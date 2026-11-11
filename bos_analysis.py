@@ -176,6 +176,12 @@ def band_limit(x, fs, bw):
     return np.fft.ifft(X * (np.abs(f) <= bw / 2))
 
 
+def resample_block(fs, fs_new) -> int:
+    """resample() works on multiples of this many input samples (e.g. 34375 for 275 -> 524.288 MS/s)."""
+    from fractions import Fraction
+    return Fraction(fs_new / fs).limit_denominator(1_000_000).denominator
+
+
 def resample(x, fs, fs_new):
     """Band-limited (FFT) resampling to exactly fs_new: the record is shortened so that
     len × fs_new / fs is an integer. Returns (y, fs_new)."""
@@ -183,7 +189,8 @@ def resample(x, fs, fs_new):
     q = Fraction(fs_new / fs).limit_denominator(1_000_000)
     n = len(x) // q.denominator * q.denominator
     if n == 0:
-        raise ValueError("capture too short for resampling")
+        raise ValueError(f"capture too short for resampling {fs / 1e6:g} -> {fs_new / 1e6:g} MS/s: "
+                         f"{len(x)} samples, needs at least {q.denominator}")
     m = n * q.numerator // q.denominator
     X = np.fft.fft(np.asarray(x[:n], complex))
     Y = np.zeros(m, complex)
@@ -191,6 +198,41 @@ def resample(x, fs, fs_new):
     Y[:h] = X[:h]
     Y[-h:] = X[-h:]
     return np.fft.ifft(Y) * (m / n), fs * q.numerator / q.denominator
+
+
+def decimate(x, fs, f0, D, progress=None):
+    """Shift f0 to 0 Hz, low-pass and keep every D-th sample, streamed in FFT blocks (overlap-save):
+    a multi-GB narrowband record becomes a small one. Passband ±0.4·fs/D (gain 1), cosine roll-off to
+    ±0.5·fs/D. Returns (y complex64, fs / D)."""
+    n = len(x)
+    D = int(D)
+    Lo = 1 << 15
+    Mo = 1024
+    Vo = Lo - 2 * Mo
+    L, M = Lo * D, Mo * D
+    no = n // D
+    y = np.empty(no, np.complex64)
+    fo = np.fft.fftfreq(Lo, D / fs)
+    af = np.abs(fo) / (fs / D)
+    w = np.where(af <= 0.4, 1.0, np.where(af < 0.5, 0.5 * (1 + np.cos(np.pi * (af - 0.4) / 0.1)), 0.0))
+    sel = np.r_[0:Lo // 2, L - Lo // 2:L]
+    step = f0 / fs
+    for c in range(0, -(-no // Vo)):
+        a = c * Vo * D - M
+        seg = np.zeros(L, np.complex64)
+        s0, s1 = max(0, a), min(n, a + L)
+        if s1 > s0:
+            idx = np.arange(s0, s1, dtype=np.float64)
+            seg[s0 - a:s1 - a] = np.asarray(x[s0:s1], np.complex64) * \
+                np.exp(-2j * np.pi * ((step * idx) % 1.0)).astype(np.complex64)
+        S = np.fft.fft(seg)[sel] * w
+        yo = np.fft.ifft(S) * (Lo / L)
+        o0 = c * Vo
+        m = min(Vo, no - o0)
+        y[o0:o0 + m] = yo[Mo:Mo + m]
+        if progress:
+            progress(min(1.0, (o0 + m) / max(no, 1)))
+    return y, fs / D
 
 
 DEMOD_SPS = 4                     # the software demodulator needs ≥ 4 samples/symbol for OQPSK
@@ -296,7 +338,7 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     out["band_limited"] = bool(bw and bw < sr * (1 + alpha) * 1.2)
     # identification: try the candidate modulations
     tries = {}
-    for m in ("BPSK", "QPSK", "OQPSK"):
+    for m in cfg.get("try_mods", ("BPSK", "QPSK", "OQPSK")):
         try:
             tries[m] = iq_demod.demodulate(xd, fsd, sr, m, filt, alpha)
         except Exception as e:
@@ -1380,40 +1422,98 @@ UR_RATES_KBPS = (8, 16, 32, 64, 128, 256, 512)
 SHR_RATES_KBPS = (16, 32, 64, 128, 256, 512, 1024)
 
 
+def sample_blocks(x, n_blocks=64, blk=65536):
+    """Up to n_blocks blocks of blk samples spread over x (complex64), for statistics of long records
+    without touching (or copying) all of it."""
+    n = len(x)
+    if n <= n_blocks * blk:
+        return np.asarray(x, np.complex64)
+    starts = np.linspace(0, n - blk, n_blocks).astype(np.int64)
+    return np.concatenate([np.asarray(x[s:s + blk], np.complex64) for s in starts])
+
+
 def identify(x, fs) -> dict:
-    """Rough signal type from the spectrum: off / cw / narrow (УР BPSK) / wide (ШР OQPSK)."""
-    x = np.asarray(x, complex)
-    f, p = psd(x, fs, 4096 if len(x) >= 65536 else 1024)
+    """Rough signal type from the spectrum: off / cw / narrow (УР BPSK) / wide (ШР OQPSK).
+    Long records: spectrum of blocks spread over the record (no full copy)."""
+    xs = sample_blocks(x)
+    pw = np.abs(xs) ** 2
+    if len(xs) > 4096:                                   # only where the transmitter is on
+        k = 1024
+        m = len(xs) // k * k
+        bp = pw[:m].reshape(-1, k).mean(axis=1)
+        on = np.repeat(bp > 0.25 * bp.max(), k)
+        if on.sum() >= 4096:
+            xs = xs[:m][on]
+    f, p = psd(xs, fs, 4096 if len(xs) >= 65536 else 1024)
     tot = float(np.sum(p))
     if tot <= 0:
         return {"type": "off"}
     pk = int(np.argmax(p))
     tone = float(np.sum(p[max(0, pk - 3):pk + 4])) / tot
-    nf = float(np.median(p))
-    c = np.cumsum(p) / tot
-    obw = float(f[min(len(f) - 1, np.searchsorted(c, 0.995))] - f[np.searchsorted(c, 0.005)])
+    # noise floor: the quietest 10 % of the bins (a wideband signal may fill most of the band,
+    # then the median is the signal, not the noise)
+    nf = float(np.percentile(p, 10))
     peak_db = 10 * math.log10(float(np.max(p)) / nf) if nf > 0 else 99
     if peak_db < 10:
-        return {"type": "off", "obw": obw}
+        return {"type": "off", "obw": float("nan")}
+    ps = np.clip(p - nf, 0, None)                        # occupied bandwidth above the floor
+    c = np.cumsum(ps) / max(float(np.sum(ps)), 1e-300)
+    obw = float(f[min(len(f) - 1, np.searchsorted(c, 0.995))] - f[np.searchsorted(c, 0.005)])
+    fc = float(np.sum(f * ps) / max(float(np.sum(ps)), 1e-300))
     if tone > 0.7:
-        return {"type": "cw", "obw": obw, "tone_frac": tone}
-    return {"type": "wide" if obw > 20e6 else "narrow", "obw": obw, "tone_frac": tone}
+        return {"type": "cw", "obw": obw, "tone_frac": tone, "f_center": float(f[pk])}
+    return {"type": "wide" if obw > 20e6 else "narrow", "obw": obw, "tone_frac": tone, "f_center": fc}
+
+
+def block_power(x, blk=4096, step=1 << 22):
+    """Mean |x|² per block of blk samples over the whole record, computed in pieces (memory-mapped
+    multi-GB files: no full-size temporaries)."""
+    n = len(x) // blk * blk
+    out = np.empty(n // blk, np.float32)
+    step = step // blk * blk
+    for s in range(0, n, step):
+        e = min(n, s + step)
+        v = np.asarray(x[s:e], np.complex64)
+        out[s // blk:e // blk] = (v.real ** 2 + v.imag ** 2).reshape(-1, blk).mean(axis=1)
+    return out
+
+
+def rf_end(x, frac=0.25, blk=4096) -> int:
+    """Sample just after the transmission ends (block power below frac × the strong level), or len(x)."""
+    bp = block_power(x, blk)
+    if not bp.size:
+        return len(x)
+    idx = np.where(bp > frac * float(np.percentile(bp, 99.5)))[0]
+    return len(x) if not len(idx) else int(min(len(x), (idx[-1] + 3) * blk))
 
 
 def rf_onset(x, frac=0.25) -> int:
-    """First sample where the (smoothed) power exceeds frac × its maximum (+ a short settling margin)."""
-    p = np.abs(np.asarray(x[:min(len(x), 4_000_000)])) ** 2
+    """First sample where the (smoothed) power exceeds frac × its maximum (+ a short settling margin).
+    Long records: block powers over the whole record locate the onset, then it is refined."""
     k = 256
+    a0 = 0
+    if len(x) > 4_000_000:
+        blk = 4096
+        bp = block_power(x, blk)
+        if bp.size:
+            ref = float(np.percentile(bp, 99.5))
+            idx = np.where(bp > frac * ref)[0]
+            if not len(idx) or idx[0] == 0:
+                return 0
+            a0 = max(0, (int(idx[0]) - 2) * blk)
+    p = np.abs(np.asarray(x[a0:a0 + min(len(x) - a0, 4_000_000)], np.complex64)) ** 2
     sm = np.convolve(p, np.ones(k) / k, mode="same")
     idx = np.where(sm > frac * sm.max())[0]
-    return int(min(len(x) - 1, idx[0] + 2 * k)) if len(idx) and idx[0] > k else 0
+    on = int(idx[0] + 2 * k) if len(idx) and (idx[0] > k or a0) else 0
+    return int(min(len(x) - 1, a0 + on))
 
 
-def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, log=lambda s: None) -> dict:
+def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, log=lambda s: None,
+                 progress=None) -> dict:
     """Analyse a recording like a station capture. Returns {"cw"| "mod_BPSK"| "mod_OQPSK"| "shr": …,
     "_ident": …}. cfg: station settings (carrier, power_nom, sr_oqpsk, alpha, …)."""
     res = {}
-    x = np.asarray(x, np.complex64)
+    x = x if isinstance(x, np.ndarray) and x.dtype == np.complex64 else np.asarray(x, np.complex64)
     idt = identify(x, fs)
     res["_ident"] = idt
     kind = mode if mode != "auto" else {"cw": "cw", "narrow": "bpsk", "wide": "oqpsk"}.get(idt["type"], "off")
@@ -1437,23 +1537,43 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
     if kind == "off":
         res["cw"] = {"kind": "cw", "present": False, "power": float("nan")}
         return res
+    # narrowband signal in a wide recording: shift to the carrier and decimate first (fast, small)
+    if kind in ("cw", "bpsk") and _finite(idt.get("obw")):
+        fs_t = max(8 * idt["obw"], 4 * 2e3 * (ur_rate or 0),
+                   4 * cfg.get("pn_hi", 100e3) if kind == "cw" else 0.0, 200e3)
+        D = int(fs // fs_t)
+        if D >= 2:
+            f0 = float(idt.get("f_center") or 0.0)
+            log(f"narrowband ({idt['obw'] / 1e3:.0f} kHz): shift {f0 / 1e3:+.1f} kHz, decimate ×{D} -> "
+                f"{fs / D / 1e6:.3f} MS/s")
+            x, fs = decimate(x, fs, f0, D, progress)
+            center = (center + f0) if center else center
+            res["_decimated"] = D
     if kind == "cw":
         res["cw"] = fix_cfe(analyze_cw(x, fs, cfg, (cfg.get("pn_lo", 1e3), cfg.get("pn_hi", 100e3))))
         return res
     if kind == "bpsk":
         rates = [ur_rate] if ur_rate else list(UR_RATES_KBPS)
         tried = []
-        for rk in rates:
+        errs = []
+        # the rate is the one at which КБД decode (synchromarker + RS); MER alone does not tell
+        # (a BPSK signal also demodulates at 2×, 4× its symbol rate, and phase tracking helps every rate).
+        # Candidate rates are tried in parallel threads, BPSK only (the modulation check comes after).
+        def trial(rk):
             sr = 2e3 * rk
-            if fs < 2 * sr or len(x) < 200 * fs / sr:
-                continue
-            # the rate is the one at which КБД decode (synchromarker + RS); MER alone does not tell
-            # (a BPSK signal also demodulates at 2×, 4× its symbol rate, and phase tracking helps every rate)
-            c = dict(cfg, symbol_rate=sr, filter="NONE", decode_ur=True)
+            c = dict(cfg, symbol_rate=sr, filter="NONE", decode_ur=True, try_mods=("BPSK",))
             n = min(len(x), int(3.2 * 2 * 8 * 1279 * fs / sr))
+            return analyze_modulated(x[:n], fs, c, "BPSK")
+        cand = [rk for rk in rates if fs >= 2 * 2e3 * rk and len(x) >= 200 * fs / (2e3 * rk)]
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max(1, min(len(cand), 4))) as ex:
+            futs = {rk: ex.submit(trial, rk) for rk in cand}
+        for rk in cand:
             try:
-                r = analyze_modulated(x[:n], fs, c, "BPSK")
-            except Exception:
+                r = futs[rk].result()
+            except Exception as e:
+                errs.append(f"{rk} kbit/s: {type(e).__name__}: {e}")
+                log(f"BPSK {rk} kbit/s: {type(e).__name__}: {e}")
                 continue
             dd = r.get("decode") or {}
             ok = sum(1 for f in dd.get("frames", []) if f.get("rs_ok"))
@@ -1462,7 +1582,8 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
             if _finite(r.get("mer")):
                 tried.append((rk, ok, dd.get("n_frames", 0), r["mer"]))
         if not tried:
-            raise ValueError("no УР rate fits this recording (sample rate too low or too short)")
+            raise ValueError("no УР rate fits this recording (sample rate too low or too short)"
+                             + (f"; {errs[-1]}" if errs else ""))
         best = max(tried, key=lambda t: (t[1], t[2], -t[0]))
         if best[2] == 0:                                   # nothing decodes: lowest rate that demodulates
             top = max(t[3] for t in tried)
@@ -1476,7 +1597,12 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
     # OQPSK (ШР): modulation quality on the first part, then the packet decoder
     sr = cfg.get("sr_oqpsk", 131.072e6)
     on = rf_onset(x)
-    n = min(len(x) - on, int(6000 * fs / sr))
+    # ≥ 6000 symbols, and a whole number of resampling blocks (34375 samples at 275 MS/s)
+    blk = resample_block(fs, sr * DEMOD_SPS) if abs(fs / sr - round(fs / sr)) > 1e-6 or round(fs / sr) < DEMOD_SPS else 1
+    n = -(-max(int(6000 * fs / sr), blk) // blk) * blk
+    if n > len(x) - on:
+        on = max(0, len(x) - n)
+    n = min(len(x) - on, n)
     c = dict(cfg, symbol_rate=sr, filter="RRC")
     res["mod_OQPSK"] = fix_cfe(analyze_modulated(x[on:on + n], fs, c, "OQPSK"))
     if on:
@@ -1484,7 +1610,16 @@ def analyze_file(x, fs, center, cfg, mode="auto", ur_rate=None, shr_rate=None, l
     if len(x) > 200000:
         import bos_shr
         try:
-            chips, _ = bos_shr.chips_from_iq(x, fs, sr, cfg.get("alpha", 0.25))
+            # chips from just before the RF onset: the preamble search looks at the start of the stream
+            st = max(0, on - int(20e-6 * fs))
+            en = rf_end(x) if len(x) > 4_000_000 else len(x)     # not the noise after the packet
+            if en - st < 200000:
+                en = len(x)
+            log(f"ШР: chip receiver on {(en - st) / fs:.3f} s ({(en - st) / 1e6:.0f} M samples, "
+                f"{bos_shr._workers()} threads) …")
+            t0 = time.time()
+            chips, info = bos_shr.chips_from_iq(x[st:en], fs, sr, cfg.get("alpha", 0.25), progress=progress)
+            log(f"ШР: {len(chips) / 2e6:.1f} M symbols in {time.time() - t0:.1f} s")
             tries = [shr_rate] if shr_rate else list(SHR_RATES_KBPS)[::-1]
             for rk in tries:
                 d = bos_shr.decode_shr(chips, rk, cfg.get("preamble", bos_shr.PREAMBLE), max_cbd=4)

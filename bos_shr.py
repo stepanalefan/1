@@ -22,8 +22,8 @@ ASSUMPTIONS to confirm with a real capture (the document does not fix them; all 
 * the КБД PRS starts with the first bit of the first КБД (after the marker)
 * turbo code tail / puncturing as CCSDS 131.0-B-3 rate 1/2 (systematic + alternating parities)
 
-Long captures are processed by a chip-level receiver (`chips_from_iq`) that needs ≥ 4 samples per
-symbol; the despreading itself is pure correlation, so the receiver works at strongly negative chip
+Long captures are processed by a chip-level receiver (`chips_from_iq`) streamed in blocks at the file's
+own sample rate (e.g. 275 MS/s, parallel FFT threads, cubic interpolation); the despreading itself is pure correlation, so the receiver works at strongly negative chip
 SNR as well (processing gain 10·log10(chips per bit)).
 """
 
@@ -93,15 +93,20 @@ def lfsr(poly: int, init: int, n: int) -> np.ndarray:
         M[t] = P[0]
         P = (A.astype(np.int64) @ P) % 2
         P = P.astype(np.uint8)
-    AB = P                                          # A^B
+    AB = P.astype(np.int64)                         # A^B
     nb = (n + B - 1) // B
-    st = np.array([init >> i & 1 for i in range(d)], np.uint8)
+    st = np.array([init >> i & 1 for i in range(d)], np.int64)
     states = np.zeros((nb, d), np.uint8)
     for k in range(nb):
         states[k] = st
-        st = (AB.astype(np.int64) @ st) % 2
-    out = (states.astype(np.int64) @ M.T.astype(np.int64)) % 2
-    return out.ravel()[:n].astype(np.uint8)
+        st = (AB @ st) % 2
+    # outputs in row blocks (uint8): long sequences (10^8 chips) without a full int64 matrix
+    out = np.empty(nb * B, np.uint8)
+    Mt = M.T.astype(np.float32)                    # exact: sums ≤ d
+    for r in range(0, nb, 2048):
+        e = min(nb, r + 2048)
+        out[r * B:e * B] = ((states[r:e].astype(np.float32) @ Mt).astype(np.int32) & 1).ravel()
+    return out[:n]
 
 
 def randomizer(n: int) -> np.ndarray:
@@ -206,6 +211,20 @@ def turbo_encode(info_bits) -> np.ndarray:
     return out
 
 
+def _pred_tables():
+    """For each next state: its two (previous state, input) transitions."""
+    pp = [[] for _ in range(16)]
+    for s in range(16):
+        for u in (0, 1):
+            pp[_NXT[s, u]].append((s, u))
+    P = np.array([[p[0][0], p[1][0]] for p in pp])
+    U = np.array([[p[0][1], p[1][1]] for p in pp])
+    return P, U
+
+
+_PRV, _PRU = _pred_tables()
+
+
 def _bcjr(Ls, Lp, La):
     """Max-log-MAP for the RSC. Ls/Lp/La: LLRs (positive = bit 0) of systematic, parity, a priori.
     Returns extrinsic LLRs for the information bits."""
@@ -215,23 +234,35 @@ def _bcjr(Ls, Lp, La):
     gam = np.zeros((n, 16, 2))
     for u in (0, 1):
         gam[:, :, u] = 0.5 * xs[u] * (Ls + La)[:, None] + 0.5 * Lp[:, None] * (1 - 2 * _PAR[:, u])[None, :]
-    alpha = np.full((n + 1, 16), NEG)
-    alpha[0, 0] = 0.0
+    # branch metrics into each next state from its two predecessors
+    g0 = gam[:, _PRV[:, 0], _PRU[:, 0]]
+    g1 = gam[:, _PRV[:, 1], _PRU[:, 1]]
+    p0, p1 = _PRV[:, 0], _PRV[:, 1]
+    alpha = np.empty((n + 1, 16))
+    a = np.full(16, NEG)
+    a[0] = 0.0
+    alpha[0] = a
+    mx = np.maximum
     for k in range(n):
-        a = np.full(16, NEG)
-        for u in (0, 1):
-            v = alpha[k] + gam[k, :, u]
-            np.maximum.at(a, _NXT[:, u], v)
-        alpha[k + 1] = a - a.max()
+        a = mx(a[p0] + g0[k], a[p1] + g1[k])
+        a -= a.max()
+        alpha[k + 1] = a
+    n0, n1 = _NXT[:, 0], _NXT[:, 1]
+    gk0, gk1 = gam[:, :, 0], gam[:, :, 1]
     beta = np.full(16, NEG)
     beta[0] = 0.0
-    out = np.zeros(n)
+    m0 = np.empty((n, 16))
+    m1 = np.empty((n, 16))
     for k in range(n - 1, -1, -1):
-        m0 = alpha[k] + gam[k, :, 0] + beta[_NXT[:, 0]]
-        m1 = alpha[k] + gam[k, :, 1] + beta[_NXT[:, 1]]
-        out[k] = m0.max() - m1.max()
-        b = np.maximum(gam[k, :, 0] + beta[_NXT[:, 0]], gam[k, :, 1] + beta[_NXT[:, 1]])
-        beta = b - b.max()
+        b0 = gk0[k] + beta[n0]
+        b1 = gk1[k] + beta[n1]
+        m0[k] = b0
+        m1[k] = b1
+        beta = mx(b0, b1)
+        beta -= beta.max()
+    m0 += alpha[:n]
+    m1 += alpha[:n]
+    out = m0.max(axis=1) - m1.max(axis=1)
     return out - Ls - La
 
 
@@ -307,54 +338,191 @@ def oqpsk_waveform(chips, sps=4, alpha=ALPHA):
 
 
 # ------------------------------------------------------------------------------------------- RX
-def chips_from_iq(x, fs, sr=SYMBOL_RATE, alpha=ALPHA, block=4096):
-    """Chip-level OQPSK receiver for long captures. Returns soft chips (I0, Q0, I1, Q1, …),
-    up to the 4-fold phase / 1-chip ambiguity resolved later by the preamble search."""
-    x = np.asarray(x, np.complex64)
-    if abs(fs / sr - round(fs / sr)) > 1e-6 or round(fs / sr) < 4:
-        import bos_analysis as ba
-        x, fs = ba.resample(x, fs, 4 * sr)
-        x = x.astype(np.complex64)
-    sps = int(round(fs / sr))
-    n0 = min(len(x), 1 << 18)
-    f1 = iq_demod._coarse_cfo(x[:n0], fs, 4)
-    x = x * np.exp(-2j * np.pi * f1 / fs * np.arange(len(x))).astype(np.complex64)
-    h = iq_demod.rrc_taps(alpha, sps).astype(np.float32)
-    y = np.convolve(x, h, mode="same").astype(np.complex64)
-    y /= np.float32(math.sqrt(float(np.mean(np.abs(y[:n0]) ** 2))) or 1.0)
-    # timing per block (squared OQPSK: real² - imag² carries the symbol clock line)
-    e = y.real ** 2 - y.imag ** 2
-    blk = block * sps
-    nb = max(1, len(e) // blk)
-    rot = np.exp(-2j * np.pi * np.arange(blk) / sps)
-    taus = []
-    for b in range(nb):
-        seg = e[b * blk:(b + 1) * blk]
-        taus.append(-np.angle(np.sum(seg * rot[:len(seg)])) / (2 * np.pi) * sps)
-    taus = np.unwrap(np.array(taus) * 2 * np.pi / sps) * sps / (2 * np.pi)
-    cents = (np.arange(nb) + 0.5) * blk
-    nsym = int((len(y) - 2 * sps) // sps)
-    k = np.arange(nsym)
-    tau = np.interp(k * sps, cents, taus) if nb > 1 else np.full(nsym, taus[0])
-    t = k * sps + tau
-    t = t[(t >= 0) & (t < len(y) - sps)]
-    grid = np.arange(len(y))
+def rrc_response(f, sr, alpha):
+    """|H(f)| of the root-raised-cosine filter (unity in the flat part)."""
+    af = np.abs(f)
+    f1, f2 = (1 - alpha) * sr / 2, (1 + alpha) * sr / 2
+    h = np.zeros(len(f), np.float32)
+    h[af <= f1] = 1.0
+    m = (af > f1) & (af < f2)
+    h[m] = np.sqrt(0.5 * (1 + np.cos(np.pi / (alpha * sr) * (af[m] - f1))))
+    return h
 
-    def at(tt):
-        return np.interp(tt, grid, y.real) + 1j * np.interp(tt, grid, y.imag)
-    z = at(t).real + 1j * at(t + sps / 2).imag
-    # carrier phase per block (power 4 vs the 45° QPSK reference), unwrapped
+
+def _workers():
+    import os
+    return max(1, min(8, (os.cpu_count() or 2)))
+
+
+def chips_from_iq(x, fs, sr=SYMBOL_RATE, alpha=ALPHA, block=4096, progress=None, cancel=None):
+    """Chip-level OQPSK receiver for long captures, streamed in blocks at the file's own sample rate
+    (any rate with ≥ ~1.6 samples per symbol, e.g. 275 MS/s; upsampled ×2 in the frequency domain when
+    below 3 samples per symbol). Memory: the soft chips (8 bytes per symbol) plus a few blocks.
+    FFT blocks run in parallel threads. Returns soft chips (I0, Q0, I1, Q1, …), up to the 4-fold phase /
+    1-chip ambiguity resolved later by the preamble search."""
+    from concurrent.futures import ThreadPoolExecutor
+    n = len(x)
+    if fs < 1.25 * sr:
+        raise ValueError(f"sample rate {fs / 1e6:g} MS/s too low for ШР ({sr / 1e6:g} Msym/s): "
+                         f"needs ≥ {1.25 * sr / 1e6:.0f} MS/s")
+    up = 1 if fs / sr >= 3 else 2                        # interpolation needs ~≥ 3 samples per symbol
+    fsu = fs * up
+    sps = fsu / sr
+    n0 = min(n, 1 << 18)
+    # coarse frequency and level from the strongest of up to 32 blocks (not the noise before the RF onset)
+    st = np.unique(np.linspace(0, n - n0, min(32, max(1, n // n0))).astype(np.int64))
+    p0 = [float(np.mean(np.abs(np.asarray(x[s:s + 4096], np.complex64)) ** 2)) for s in st]
+    s0 = int(st[int(np.argmax(p0))])
+    x0 = np.asarray(x[s0:s0 + n0], np.complex64)
+    f1 = iq_demod._coarse_cfo(x0, fs, 4)
+    lvl = float(np.mean(np.abs(x0) ** 2))
+    # block layout (input samples): FFT length L, valid V in the middle, margin M either side
+    L = 1 << 21
+    M = 8192
+    while L - 2 * M < 4 * block * fs / sr and L < (1 << 24):
+        L <<= 1
+    blk = int(round(block * sps))                        # timing block, in output samples
+    Vu = ((L - 2 * M) * up) // blk * blk                 # valid output samples per chunk (whole blocks)
+    V = Vu // up
+    Vu = V * up
+    blk_per = Vu // blk
+    H = rrc_response(np.fft.fftfreq(L, 1 / fs), sr, alpha)
+    nch = max(1, -(-n // V))
+    ph_step = f1 / fs
+
+    def front(c):
+        """chunk c -> matched-filtered y on [c·Vu, c·Vu + Vu + tail) output samples + its timing phasors."""
+        a = c * V - M
+        seg = np.zeros(L, np.complex64)
+        s0, s1 = max(0, a), min(n, a + L)
+        if s1 > s0:
+            idx = np.arange(s0, s1, dtype=np.float64)
+            seg[s0 - a:s1 - a] = np.asarray(x[s0:s1], np.complex64) * \
+                np.exp(-2j * np.pi * ((ph_step * idx) % 1.0)).astype(np.complex64)
+        S = np.fft.fft(seg) * H
+        if up > 1:                                       # zero-pad the spectrum: exact ×up interpolation
+            h = L // 2
+            S = np.concatenate([S[:h], np.zeros(L * (up - 1), S.dtype), S[h:]]) * up
+        y = np.fft.ifft(S).astype(np.complex64)
+        y = y[M * up:M * up + Vu + 16 * up]             # valid part + a short tail for interpolation
+        # timing: the clock line of real² - imag² (phase vs. the global grid). That line depends on the
+        # carrier phase θ (it fades at 45° and flips sign beyond: a half-symbol slip), so per block the
+        # sums for y² and conj(y²) are kept and combined later with θ from y⁴:
+        # Σ Re(y² e^{-2jθ})·rot = (e^{-2jθ} Σ y²·rot + e^{2jθ} Σ conj(y²)·rot) / 2
+        yv = y[:Vu]
+        y2 = yv * yv
+        g = c * Vu + np.arange(Vu, dtype=np.float64)
+        rot = np.exp(-2j * np.pi * ((g / sps) % 1.0)).astype(np.complex64)
+        A = (y2 * rot).reshape(blk_per, blk).sum(axis=1)
+        B = (np.conj(y2) * rot).reshape(blk_per, blk).sum(axis=1)
+        m4 = (y2 * y2).reshape(blk_per, blk).sum(axis=1)
+        return y, (A, B, m4)
+
+    nsym = int(n * up / sps) + 2
+    z = np.empty(nsym, np.complex64)
+    kz = 0                                               # output position
+    kn = 0                                               # next symbol index (time grid k·sps + tau)
+    cents, taus = [], []
+    prev_y = None
+    prev_g0 = 0
+    scale = None
+    last_ang = None
+    last_a4 = None
+
+    def interp(v, t):
+        """Catmull-Rom cubic interpolation of the real array v at fractional positions t."""
+        i = t.astype(np.int64)
+        u = (t - i).astype(np.float32)
+        p0, p1, p2, p3 = v[i - 1], v[i], v[i + 1], v[i + 2]
+        return p1 + 0.5 * u * (p2 - p0 + u * (2 * p0 - 5 * p1 + 4 * p2 - p3 + u * (3 * (p1 - p2) + p3 - p0)))
+
+    def sample(buf, lt, k0):
+        """I at t, Q half a symbol later, into z[k0:…] (runs in a worker thread)."""
+        z.real[k0:k0 + len(lt)] = interp(buf.real.copy(), lt) * scale
+        z.imag[k0:k0 + len(lt)] = interp(buf.imag.copy(), lt + sps / 2) * scale
+
+    with ThreadPoolExecutor(_workers()) as ex:
+        futs = {}
+        jobs = []
+        nxt = 0
+        for c in range(nch):
+            while nxt < nch and nxt < c + 2 * _workers():
+                futs[nxt] = ex.submit(front, nxt)
+                nxt += 1
+            if cancel and cancel():
+                raise RuntimeError("cancelled")
+            y, (A, B, m4) = futs.pop(c).result()
+            g0 = c * Vu
+            if scale is None:
+                scale = np.float32(1.0 / (math.sqrt(lvl) or 1.0))
+            # carrier phase per block (4θ from y⁴, unwrapped across chunks), then the phase-free clock line
+            a4 = np.angle(-m4)                          # ±1±j chips: y⁴ = -4 when aligned
+            a4 = np.unwrap(np.r_[last_a4, a4])[1:] if last_a4 is not None else np.unwrap(a4)
+            last_a4 = a4[-1]
+            th2 = np.exp(-0.5j * a4)                    # e^{-2jθ}, θ = a4 / 4 (0 when aligned)
+            ph = 0.5 * (th2 * A + np.conj(th2) * B)
+            ang = np.angle(ph)
+            if last_ang is not None:
+                ang = np.unwrap(np.r_[last_ang, ang])[1:]
+            else:
+                ang = np.unwrap(ang)
+            last_ang = ang[-1]
+            cents.extend(g0 + (np.arange(blk_per) + 0.5) * blk)
+            taus.extend(-ang / (2 * np.pi) * sps)
+            # buffer = tail of the previous chunk + this chunk
+            if prev_y is not None:
+                keep = prev_y[Vu - 4 * blk:Vu]
+                buf = np.concatenate([keep, y])
+                b0 = prev_g0 + Vu - 4 * blk
+            else:
+                buf, b0 = y, g0
+            last = c == nch - 1
+            end_out = min(n * up, g0 + Vu)              # last valid output sample of the record
+            t_lim = (end_out - sps - 3) if last else (cents[-1])
+            ca, ta = np.asarray(cents), np.asarray(taus)
+            # symbols k with k·sps (+tau) up to t_lim
+            k_hi = min(int(math.floor((t_lim - ta[-1]) / sps)), kn + nsym - kz)
+            if k_hi > kn:
+                k = np.arange(kn, k_hi, dtype=np.float64)
+                lt = k * sps + np.interp(k * sps, ca, ta) - b0
+                ok = (lt >= 1) & (lt + sps / 2 + 3 < len(buf))
+                good = np.where(ok)[0]
+                if len(good):
+                    i0, i1 = good[0], good[-1] + 1
+                    if kz > 0 and i0 > 0:               # a gap inside the stream cannot happen; keep contiguous
+                        i0 = 0
+                        lt = np.clip(lt, 1, len(buf) - sps / 2 - 4)
+                    lt = lt[i0:i1]
+                    jobs.append(ex.submit(sample, buf, lt, kz))
+                    kz += len(lt)
+                    kn += i1
+                elif kz == 0:
+                    kn = k_hi                            # all before the record start
+            prev_y, prev_g0 = y, g0
+            while len(jobs) > 2 * _workers():
+                jobs.pop(0).result()
+            if progress:
+                progress((c + 1) / nch)
+        for j in jobs:
+            j.result()
+    z = z[:kz]
+    # carrier phase per 1024 symbols (power 4 vs the 45° QPSK reference), unwrapped, chunked in place
     pb = 1024
     nzb = max(1, len(z) // pb)
-    ph = [np.angle(-np.mean(z[b * pb:(b + 1) * pb] ** 4)) for b in range(nzb)]
-    ph = np.unwrap(np.array(ph)) / 4
+    ph = np.empty(nzb)
+    for s in range(0, nzb, 4096):
+        e = min(nzb, s + 4096)
+        zz = z[s * pb:e * pb].reshape(e - s, pb) if e * pb <= len(z) else z[s * pb:].reshape(1, -1)
+        ph[s:e] = np.angle(-np.mean(zz.astype(np.complex128) ** 4, axis=1))
+    ph = np.unwrap(ph) / 4
     zc = (np.arange(nzb) + 0.5) * pb
-    phase = np.interp(np.arange(len(z)), zc, ph) if nzb > 1 else np.full(len(z), ph[0])
-    z = z * np.exp(-1j * phase)
-    chips = np.empty(2 * len(z), np.float32)
-    chips[0::2] = z.real
-    chips[1::2] = z.imag
-    return chips, {"cfo_coarse": f1, "fs": fs, "sps": sps}
+    step = 1 << 22
+    for s in range(0, len(z), step):
+        e = min(len(z), s + step)
+        p = np.interp(np.arange(s, e), zc, ph) if nzb > 1 else np.full(e - s, ph[0])
+        z[s:e] *= np.exp(-1j * p).astype(np.complex64)
+    chips = z.view(np.float32)                          # I0, Q0, I1, Q1, … (no copy)
+    return chips, {"cfo_coarse": f1, "fs": fs, "sps": sps, "upsampled": up}
 
 
 def _corr_fft(a, b):
@@ -445,12 +613,22 @@ def decode_shr(chips, rate_kbps, preamble=PREAMBLE, max_cbd=4, turbo_iters=8) ->
     if nbits < CBD_SR_BITS:
         out["note"] = f"capture ends {CBD_SR_BITS - nbits} bits before the end of the first КБД"
         return out
-    prs = lfsr(POLY1, INIT1, nbits * sf) ^ lfsr(POLY2, INIT2, nbits * sf)
-    seg = c[start:start + nbits * sf] * (1.0 - 2.0 * prs.astype(np.float32))
-    seg = seg * np.tile(rail_sign[[(start + i) % 2 for i in (0, 1)]], nbits * sf // 2 + 1)[:nbits * sf] * sgn
-    sb = seg.reshape(nbits, sf).sum(axis=1)
+    prs = lfsr(POLY1, INIT1, nbits * sf)
+    prs ^= lfsr(POLY2, INIT2, nbits * sf)
+    pat = rail_sign[[(start + i) % 2 for i in (0, 1)]] * np.float32(sgn)
+    sb = np.empty(nbits, np.float32)
+    abs_sum = 0.0
+    step = max(1, (1 << 22) // sf)                 # despread in blocks of ~4 M chips
+    for b0 in range(0, nbits, step):
+        b1 = min(nbits, b0 + step)
+        i0, i1 = b0 * sf, b1 * sf
+        seg = c[start + i0:start + i1] * (np.float32(1) - np.float32(2) * prs[i0:i1].astype(np.float32))
+        seg *= np.tile(pat if i0 % 2 == 0 else pat[::-1], (i1 - i0) // 2 + 1)[:i1 - i0]
+        sb[b0:b1] = seg.reshape(b1 - b0, sf).sum(axis=1)
+        abs_sum += float(np.abs(seg).sum(dtype=np.float64))
+    del prs
     out["cbd_snr_db"] = 10 * math.log10(np.mean(np.abs(sb)) ** 2 / (np.var(np.abs(sb)) + 1e-30))
-    out["cbd_eff"] = float(np.mean(np.abs(sb))) / (float(np.mean(np.abs(seg))) * sf + 1e-30)
+    out["cbd_eff"] = float(np.mean(np.abs(sb))) / (abs_sum / (nbits * sf) * sf + 1e-30)
     hard = (sb < 0).astype(np.uint8)
     out["bitstream"] = bd.bits_to_bytes(hard[:len(hard) // 8 * 8])        # despread КБД bits, for export
     err_tot = bits_tot = 0
