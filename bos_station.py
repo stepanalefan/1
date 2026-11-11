@@ -455,6 +455,191 @@ def envelope(x, nb, progress=None):
     return b, pmean, pmax
 
 
+class PlanView(QtWidgets.QWidget):
+    """Column next to the settings: the selected plan step by step - commands to the BOS (CAN ID + data),
+    FSW SCPI and capture sizes, supply / telemetry readings, operator dialogs, waits, PC analysis.
+    Rebuilt whenever the plan or a setting changes; the running test is highlighted. Click a line with
+    ▸ / ▾ to open or close its details."""
+
+    def __init__(self, station):
+        super().__init__()
+        import bos_plan
+        self.bp = bos_plan
+        self.st = station
+        self._sig = None
+        self._plan = None
+        self._desc = []
+        self._open = set()                               # paths of opened nodes
+        self._closed = set()                             # tests closed by the operator
+        self._state = {}                                 # test index -> run / done
+        self._follow = False
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        h = QtWidgets.QHBoxLayout()
+        self.title = QtWidgets.QLabel()
+        self.title.setStyleSheet("font-weight:600;")
+        h.addWidget(self.title, 1)
+        self.b_exp = QtWidgets.QToolButton()
+        self.b_exp.setText("⊞")
+        self.b_exp.clicked.connect(self.expand_all)
+        self.b_col = QtWidgets.QToolButton()
+        self.b_col.setText("⊟")
+        self.b_col.clicked.connect(self.collapse_all)
+        for b in (self.b_exp, self.b_col):
+            b.setAutoRaise(True)
+            h.addWidget(b)
+        v.addLayout(h)
+        self.view = QtWidgets.QTextBrowser()
+        self.view.setOpenLinks(False)
+        self.view.anchorClicked.connect(self._clicked)
+        self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        v.addWidget(self.view, 1)
+        self.legend = QtWidgets.QLabel()
+        self.legend.setWordWrap(True)
+        v.addWidget(self.legend)
+        self.timer = QtCore.QTimer(self, interval=1000, timeout=self.refresh)
+        self.timer.start()
+
+    @staticmethod
+    def _lang():
+        try:
+            import i18n
+            return i18n.CURRENT
+        except Exception:
+            return "en"
+
+    def refresh(self, force=False):
+        st = self.st
+        if st.running and not force:
+            return
+        plan = st.plan_cb.currentText() if hasattr(st, "plan_cb") else st.data.get("plan", "")
+        try:
+            sig = json.dumps([plan, st.cfg, st.lim, st.ctl, st.data.get("supply"), st.data["plans"].get(plan),
+                              self._lang(), st._is_demo()], sort_keys=True, default=str)
+        except Exception:
+            sig = None
+        if sig == self._sig and not force:
+            return
+        if plan != self._plan:
+            self._state = {}
+            self._open = set()
+            self._closed = set()
+        self._plan = plan
+        self._sig = sig
+        try:
+            self._desc = self.bp.describe(st, plan)
+        except Exception as e:
+            self._desc = [("", f"{type(e).__name__}: {e}", [])]
+        self._render()
+
+    # ---- expand / collapse
+    def _clicked(self, url):
+        p = url.toString().split(":", 1)[-1]
+        if p.count(".") == 0:                           # a test: open by default, remember closing
+            (self._closed.discard if p in self._closed else self._closed.add)(p)
+        else:
+            (self._open.discard if p in self._open else self._open.add)(p)
+        self._render()
+
+    def expand_all(self):
+        self._closed = set()
+
+        def walk(steps, path):
+            for i, s in enumerate(steps):
+                q = f"{path}.{i}"
+                if s.children:
+                    self._open.add(q)
+                    walk(s.children, q)
+        for k, (_, _, steps) in enumerate(self._desc):
+            walk(steps, str(k))
+        self._render()
+
+    def collapse_all(self):
+        self._open = set()
+        self._closed = {str(k) for k in range(len(self._desc))}
+        self._render()
+
+    # ---- HTML
+    def _render(self):
+        bp_ = self.bp
+        L = bp_.L
+        plan = self._plan or ""
+        self.title.setText(L(f"Plan sequence: {plan}", f"Последовательность плана: {plan}"))
+        self.b_exp.setToolTip(L("Open all details", "Развернуть всё"))
+        self.b_col.setToolTip(L("Close all", "Свернуть всё"))
+        self.legend.setText(" ".join(f"<b style='color:{v[2]}'>{bp_.tag(k)}</b>" for k, v in bp_.KINDS.items()
+                                     if k != "info"))
+        self.legend.setToolTip("\n".join(f"{bp_.tag(k)} — {bp_.tag_meaning(k)}" for k, v in bp_.KINDS.items()
+                                          if k != "info"))
+        e = html.escape
+        mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
+        rows = []
+        k_test = -1
+        for k, (tid, title, steps) in enumerate(self._desc):
+            if tid:
+                k_test += 1
+                title = f"{k_test + 1}. {_tr(TEST_NAME.get(tid, tid))}"
+                st = self._state.get(k_test)
+                mark = "▶ " if st == "run" else "✓ " if st == "done" else ""
+                bg = "background:#1f3a5f;" if st == "run" else ""
+                n = bp_.count_steps(steps)
+                cnt = L(f"{n} steps", f"шагов: {n}")
+            else:
+                mark, bg, cnt = "", "", ""
+            opened = str(k) not in self._closed
+            arrow = "▾" if opened else "▸"
+            if tid and self._state.get(k_test) == "run":
+                rows.append("<a name='run'></a>")
+            rows.append(f"<table width='100%' cellspacing='0' cellpadding='2' style='margin-top:6px;{bg}'><tr>"
+                        f"<td width='14'><a href='t:{k}' style='text-decoration:none;color:#c9d1d9'>{arrow}</a></td>"
+                        f"<td><a href='t:{k}' style='text-decoration:none;color:#e6edf3'><b>{e(mark + title)}</b></a>"
+                        f" <span style='color:{C_DIM}'>{e(cnt)}</span></td></tr></table>")
+            if opened:
+                self._rows(rows, steps, str(k), 1, mono)
+        sb = self.view.verticalScrollBar()
+        pos = sb.value()
+        self.view.setHtml("<div style='font-size:9pt'>" + "".join(rows) + "</div>")
+        if self._follow:
+            self._follow = False
+            self.view.scrollToAnchor("run")
+        else:
+            sb.setValue(pos)
+
+    def _rows(self, rows, steps, path, depth, mono):
+        bp_ = self.bp
+        e = html.escape
+        for i, s in enumerate(steps):
+            q = f"{path}.{i}"
+            col = bp_.KINDS.get(s.kind, bp_.KINDS["info"])[2]
+            has = bool(s.children)
+            opened = q in self._open
+            arrow = (f"<a href='s:{q}' style='text-decoration:none;color:#c9d1d9'>{'▾' if opened else '▸'}</a>"
+                     if has else "")
+            txt = e(s.text)
+            if has:
+                txt = f"<a href='s:{q}' style='text-decoration:none;color:#c9d1d9'>{txt}</a>"
+            is_code = s.kind == "info" and (s.text.startswith(("0x", "ID ", "INST", "FREQ", "TRAC", "ADJ", "*",
+                                                               "SYST", "DISP", "TRIG")))
+            style = (mono + f"color:{C_DIM};") if is_code else (f"color:{C_DIM};" if s.kind == "info" else "")
+            rows.append(f"<table width='100%' cellspacing='0' cellpadding='1'><tr>"
+                        f"<td width='{14 * depth}'></td><td width='12'>{arrow}</td>"
+                        f"<td width='44' style='color:{col};font-weight:600'>{e(bp_.tag(s.kind))}</td>"
+                        f"<td style=\"{style}\">{txt}</td></tr></table>")
+            if has and opened:
+                self._rows(rows, s.children, q, depth + 1, mono)
+
+    # ---- live state while a plan runs
+    def mark(self, k, state):
+        """Test k (0 = first test of the plan) is 'run' / 'done'. The running test is scrolled into view."""
+        self._state[k] = state
+        self._follow = state == "run"
+        self._render()
+
+    def reset_marks(self):
+        self._state = {}
+        self._render()
+
+
 class FileDialog(QtWidgets.QDialog):
     """Sample rate / centre (from the file if present), signal type, rates."""
 
@@ -762,6 +947,10 @@ class BosStation(QtWidgets.QWidget):
         left.addTab(self.sim_page, "Simulator")
         left.setMinimumWidth(400)
         split.addWidget(left)
+        # ---- middle: what the selected plan does, step by step
+        self.plan_view = PlanView(self)
+        self.plan_view.setMinimumWidth(260)
+        split.addWidget(self.plan_view)
         # ---- right: results
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_overview(), "Diagnosis")
@@ -773,7 +962,13 @@ class BosStation(QtWidgets.QWidget):
         self.tabs.addTab(self._build_corr_view(), "Corrections")
         self.tabs.addTab(self._build_history(), "History")
         split.addWidget(self.tabs)
-        split.setSizes([420, 1140])
+        split.setCollapsible(1, True)
+        self._split = split
+        QtCore.QTimer.singleShot(0, self._split_sizes)
+
+    def _split_sizes(self):
+        w = max(1200, self._split.width())
+        self._split.setSizes([int(w * 0.24), int(w * 0.28), w - int(w * 0.24) - int(w * 0.28)])
 
     @staticmethod
     def _scroll(w):
@@ -1180,8 +1375,10 @@ class BosStation(QtWidgets.QWidget):
     def _build_corr_view(self):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
-        v.addWidget(QtWidgets.QLabel("Suggested adjustments from the last run. Register scaling factors are on the "
-                                     "'Unit / signal' page - check them against the DAC38J82 datasheet before writing."))
+        lb = QtWidgets.QLabel("Suggested adjustments from the last run. Register scaling factors are on the "
+                              "'Unit / signal' page - check them against the DAC38J82 datasheet before writing.")
+        lb.setWordWrap(True)
+        v.addWidget(lb)
         self.corr = QtWidgets.QTableWidget(0, 3)
         self.corr.setHorizontalHeaderLabels(["Adjustment", "Value", "How"])
         self.corr.verticalHeader().hide()
@@ -1203,15 +1400,20 @@ class BosStation(QtWidgets.QWidget):
         v.setContentsMargins(2, 2, 2, 2)
         h = QtWidgets.QHBoxLayout()
         self.fr_info = QtWidgets.QLabel("No decoded frames yet - run a BPSK / ШР test or analyze an I/Q file.")
+        self.fr_info.setWordWrap(True)
+        self.fr_info.setMinimumWidth(120)
         h.addWidget(self.fr_info, 1)
         self.fr_hide_idle = QtWidgets.QCheckBox("Hide idle frames")
         self.fr_hide_idle.toggled.connect(lambda *_: self._fill_frames())
         h.addWidget(self.fr_hide_idle)
+        v.addLayout(h)
+        h = QtWidgets.QHBoxLayout()                       # second row: keeps the page narrow enough
         for txt, fn in (("Save frames (.bin)", self._save_frames_bin), ("Save list (.csv)", self._save_frames_csv),
                         ("Save raw bit stream (.bin)", self._save_bitstream)):
             b = QtWidgets.QPushButton(txt)
             b.clicked.connect(fn)
             h.addWidget(b)
+        h.addStretch(1)
         v.addLayout(h)
         sp = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.fr_table = QtWidgets.QTableWidget(0, 11)
@@ -1235,6 +1437,8 @@ class BosStation(QtWidgets.QWidget):
         self.fr_hl.setChecked(True)
         self.fr_hl.toggled.connect(lambda *_: self._fill_matrix())
         self.fr_cell = QtWidgets.QLabel("")
+        self.fr_cell.setMinimumWidth(40)
+        self.fr_cell.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         for wd in (QtWidgets.QLabel("Format"), self.fr_fmt, self.fr_hl, self.fr_cell):
             bar.addWidget(wd)
         bar.addStretch(1)
@@ -1541,6 +1745,8 @@ class BosStation(QtWidgets.QWidget):
     def _plan_tip(self):
         tests = self.data["plans"].get(self.plan_cb.currentText(), [])
         self.plan_cb.setToolTip("\n".join(f"{k + 1}. {TEST_NAME.get(t, t)}" for k, t in enumerate(tests)))
+        if hasattr(self, "plan_view"):
+            self.plan_view.refresh()
 
     def _plan_changed(self, name):
         self.data["plan"] = name
@@ -1906,8 +2112,16 @@ class BosStation(QtWidgets.QWidget):
 
     # ================================================================ plan
     def _plan_gen(self, tests):
+        pv = getattr(self, "plan_view", None) if self.run_info.get("plan") == self.plan_cb.currentText() else None
+        if pv is not None:
+            pv.refresh(force=True)
+            pv.reset_marks()
         for k, t in enumerate(tests):
             self.cur_test = t
+            if pv is not None:
+                if k:
+                    pv.mark(k - 1, "done")
+                pv.mark(k, "run")
             self.progress.setValue(k)
             self.step_lbl.setText(f"Test {k + 1}/{len(tests)}: {TEST_NAME.get(t, 'Live diagnose')}")
             fn = getattr(self, f"_t_{t}")
@@ -1919,6 +2133,8 @@ class BosStation(QtWidgets.QWidget):
                 self._row(TEST_NAME.get(t, t), "error", None, "", "", "ERROR", note=str(e))
                 self.log(f"BOS station: {TEST_NAME.get(t, t)}: {e}", "err")
             self._update_diagnosis()
+        if pv is not None and tests:
+            pv.mark(len(tests) - 1, "done")
         self.progress.setValue(len(tests))
 
     # ---- unit control helpers (generators)
@@ -2138,14 +2354,21 @@ class BosStation(QtWidgets.QWidget):
         nom = self._mcfg(mod)["symbol_rate"] * (1 + self.cfg["alpha"])
         return min(nom, self.cfg.get("fsw_bw") or nom)
 
-    def _mod_capture(self, mod, label=None):
+    @staticmethod
+    def _mod_n(c):
+        """Samples of a modulation capture: nsym symbols, whole resampling blocks if resampled."""
         from fractions import Fraction
-        c = self._mcfg(mod)
         fs = c["fs"]
         n = int(math.ceil(c["nsym"] * fs / c["symbol_rate"]))
         if abs(fs / c["symbol_rate"] - round(fs / c["symbol_rate"])) > 1e-6:      # resampled: whole blocks
             den = Fraction(c["symbol_rate"] * ba.DEMOD_SPS / fs).limit_denominator(1_000_000).denominator
             n = int(math.ceil(n / den)) * den
+        return n
+
+    def _mod_capture(self, mod, label=None):
+        c = self._mcfg(mod)
+        fs = c["fs"]
+        n = self._mod_n(c)
         r = yield from self._capture("mod", c["carrier"], fs, n,
                                      lambda x, f: ba.analyze_modulated(x, f, c, mod), label or mod,
                                      sr=c["symbol_rate"], filt=c["filter"])

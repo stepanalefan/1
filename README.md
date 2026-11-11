@@ -37,6 +37,7 @@ verdict, the findings and the report.
 | **BOS telemetry** | Live: 6 PLL / JESD flags, FPGA rails 1 V / 1.8 V / 2.5 V, temperatures, 10 MHz reference, Err_Ref_LO, mode, firmware |
 | **Corrections** | Suggested DAC38J82 QMC gain / phase / offset, frequency correction (reference trim or LMX2594), attenuator steps to nominal power, attenuator calibration |
 | **History** | All runs of all units (`bos_reports/bos_history.csv`), filter, open report, most frequent suspect blocks |
+| Middle: *Plan sequence* | The selected plan step by step: CAN commands to the BOS (ID + data bytes), FSW captures and SCPI, supply readings, operator dialogs, waits, analysis; current test highlighted during a run |
 | Left: *Unit / signal* | Carrier, symbol rates (BPSK = УР: 2 × data rate; OQPSK = ШР: always 131.072 Msym/s — set automatically with protocol control), FSW I/Q bandwidth (read from the FSW options: 160 MHz or bandwidth extension) and OQPSK capture rate, roll-off, capture length, LO multiplier, nominal power and attenuator code, **cable loss**, FSW auto level, phase-noise band, stability and linearity settings, QMC scaling, supply output feeding the BOS |
 | Left: *Limits* | All pass / fail limits |
 | Left: *Unit control* | **BOS protocol** (default): the station sends the BOS commands itself (ПИЛВ 0102-004): sender address, CAN line, frequency code N (37650 + 0.125·N MHz), which session command gives BPSK / OQPSK, data rate, session limit, target-designation keep-alive, telemetry enable; *Test link*, *RF off*. Alternatives: CAN library commands or operator prompts. |
@@ -123,6 +124,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 |---|---|
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
+| `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
 | `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
 | `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, streamed multi-core chip receiver (any sample rate ≥ 1.25 × 131 Msym/s, e.g. 275 MS/s), despreading |

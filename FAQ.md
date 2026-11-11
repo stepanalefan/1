@@ -178,6 +178,23 @@ FPGA rails, temperatures, 10 MHz reference) and analyses everything. Results: a 
 warnings / FAIL), a measurement table with limits, **findings** with the most likely faulty block, a block
 diagram of the modulator coloured by suspicion, suggested **corrections**, an HTML report and a history.
 
+### What exactly does a plan do? (the *Plan sequence* column)
+The column between the settings and the results lists the selected plan **step by step, in the order the station
+runs it**, built from the current settings (it changes as soon as you change a setting or the plan):
+* **→BOS** commands to the BOS over CAN: mnemonic, parameters (frequency code N and carrier, Atten_EIRP, rate,
+  number of КБД) and - one click further - the CAN identifier and data bytes exactly as sent; **BOS→** what comes
+  back (acknowledgement КВ+ within 300 ms, ИОК_КОНФИГ, telemetry);
+* **FSW** each I/Q capture with centre frequency, sample rate, number of samples, duration and size, and - one click
+  further - the SCPI commands (INST:SEL, FREQ:CENT, TRAC:IQ:SRAT / RLEN, ADJ:LEV, INIT, TRAC:IQ:DATA:MEM?, the IF
+  power trigger of the ШР packet capture);
+* **PSU** supply current readings (HMP4040 / N6701C), **Oper.** dialogs for the operator (CAN-library or manual
+  control), **Wait** settling times, **Loop** repeated steps (attenuator settings, LO lines, stability, BER),
+  **PC** what is calculated from the data.
+"Before the plan" and "After the plan" show the automatic parts (FSW options read, control link test added in
+protocol mode, MODE_D at the end, report). Click a line with ▸ to open it, ⊞ / ⊟ open or close everything. While a
+plan runs, the current test is highlighted and followed, finished tests get ✓. The splitter handle hides the column.
+In Russian the column is in Russian; in the other languages it stays in English.
+
 ### Which tests are there?
 | Test | Measures | Typical faults it finds |
 |---|---|---|
