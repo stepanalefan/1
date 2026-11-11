@@ -290,12 +290,18 @@ own reference drift is mixed into the carrier-wander measurement. For ШР inclu
 ### What did the first real УР recording show?
 `bos_UR_5s_64spd_256fd.iq.tar` (64 kbit/s, 256 kS/s, 5 s): all 30 КБД decoded, RS without corrections, CRC ok, BER 0 in
 306 000 bits, idle frames exactly as table 4.4, frame counter continuous, SCID 768 (0x300), carrier on channel
-n = 799 with −33 kHz (−0.9 ppm, inside 2·10⁻⁶). Found: the carrier phase is not stable — about 1 kHz p-p frequency
-wander over 5 s (up to ~450 Hz/s) and ~10° RMS phase error left after tracking, which limits MER to ~16 dB; the
-spectrum null at the carrier is only 16 dB deep. Before blaming the BOS: repeat with the FSW locked to the BOS
-10 MHz and with ≥ 8 samples per symbol, and record a carrier (CW) for the integrated phase noise.
+n = 799 with −33 kHz (−0.9 ppm, inside 2·10⁻⁶). With the first 0.1 s (noise before the transmission) excluded
+by the selection: MER 25.6 dB, phase error 1.2° (the whole file gave 16 dB / 10.5° only because of that noise).
+Still found: the carrier frequency wanders about 1 kHz p-p over 5 s (up to ~450 Hz/s) - repeat with the FSW
+locked to the BOS 10 MHz to see whether it is the BOS or the reference difference.
 
+### How do I analyse only part of a recording?
+After the file dialog, **Select the part to analyse** shows the power of the whole recording over time. Drag the
+green edges (or the whole region), or type start / stop; *Auto (signal only)* selects where the signal is on
+(within 10 dB of its strongest part), *Zoom to selection* / *Show all* change the view. Only the selection is
+analysed; the report shows which part. For a ШР packet keep the preambles (start of the transmission) inside.
 
+### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the
 **cable loss** (otherwise power results are off by that much). *Limits*: the pass/fail limits. *BOS supply
 output*: which HMP4040 / N6701C output powers the unit (for the supply-current test).
