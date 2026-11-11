@@ -1,4 +1,4 @@
-# KTR RAD TEST — BOS Test Station
+# KTR TEST — BOS Test Station
 
 Automated test station for the **BOS** modulator unit (BPSK / OQPSK). It controls the unit over CAN,
 measures its output with an R&S FSW, reads the BOS telemetry, and tells the operator **whether the unit is
@@ -134,7 +134,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `n6700_supply.py`, `tfg_generator.py` | N6701C and TFG6806 tabs |
 | `canable_analyzer.py`, `can_commands.py` | CAN tab |
 | `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
-| `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_RAD_TEST.exe` |
+| `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_TEST.exe` |
 
 Settings (`bos_station.json`, `dashboard.json`, `can_commands.json`, `can_lines.json`), reports
 (`bos_reports/`) and daily logs (`*_log_YYYY-MM-DD.csv`) are kept next to the program.

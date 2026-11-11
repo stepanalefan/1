@@ -19,3 +19,4 @@ watchdog_log_*.csv
 bos_station.json
 bos_station.json.tmp
 bos_reports/
+ui_language.txt

@@ -160,6 +160,15 @@ class HelpTab(QtWidgets.QWidget):
         super().__init__()
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(4, 4, 4, 4)
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("Language"))
+        self.lang = QtWidgets.QComboBox()                 # filled by the main window (i18n.LANGS)
+        self.lang.setMinimumWidth(160)
+        self.lang.setToolTip("User-interface language (languages of the G8 countries). Help pages, reports\n"
+                             "and measurement results stay in English.")
+        top.addWidget(self.lang)
+        top.addStretch(1)
+        v.addLayout(top)
         self.tabs = QtWidgets.QTabWidget()
         self.views = {}
         for title, fname in PAGES:

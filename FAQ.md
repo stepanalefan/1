@@ -1,4 +1,4 @@
-# KTR RAD TEST — FAQ
+# KTR TEST — FAQ
 
 Automated test station for the **BOS** modulator unit (BPSK / OQPSK; MPF300T FPGA, DAC38J82, LMX2594,
 ADMV1013, ADRF5730, CHA3397): R&S FSW signal analyzer, BOS CAN control and telemetry, automatic
@@ -43,16 +43,16 @@ BOS unit with injectable faults (BOS Test Station → *Simulator*) are simulated
 ### How do I build an EXE?
 Run `build_exe.bat`, or in the PyCharm terminal (one line):
 ```
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name KTR_RAD_TEST --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod --hidden-import bos_station --hidden-import bos_analysis --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name KTR_TEST --icon app.ico --add-data "app.ico;." --hidden-import bench_monitor --hidden-import canable_analyzer --hidden-import can_commands --hidden-import telemetry --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod --hidden-import bos_station --hidden-import bos_analysis --hidden-import pyvisa_py --hidden-import pyvisa.ctwrapper --hidden-import serial.tools.list_ports --collect-submodules pyvisa --collect-submodules pyvisa_py --collect-submodules can --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib fsw_vsa_monitor.py
 ```
-Result: `dist\KTR_RAD_TEST.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
+Result: `dist\KTR_TEST.exe`. Without `app.ico`, remove `--icon app.ico --add-data "app.ico;."`.
 When adding a new module to the program, add a `--hidden-import <module>` for it.
 
 ### The EXE closes immediately / shows nothing.
 Build once **without** `--windowed` and start it from a terminal — the error is printed there.
 
 ### The EXE starts slowly.
-`--onefile` unpacks itself on every start. Use `--onedir` and copy the whole `dist\KTR_RAD_TEST`
+`--onefile` unpacks itself on every start. Use `--onedir` and copy the whole `dist\KTR_TEST`
 folder instead.
 
 ---
@@ -300,6 +300,12 @@ After the file dialog, **Select the part to analyse** shows the power of the who
 green edges (or the whole region), or type start / stop; *Auto (signal only)* selects where the signal is on
 (within 10 dB of its strongest part), *Zoom to selection* / *Show all* change the view. Only the selection is
 analysed; the report shows which part. For a ШР packet keep the preambles (start of the transmission) inside.
+
+### How do I change the language?
+**Help** tab → *Language*: English, Français, Deutsch, Italiano, 日本語, Русский (the languages of the G8 countries).
+It applies at once and is remembered (`ui_language.txt` next to the program). Translated: tabs, buttons, labels,
+settings, limits, table headers, test and measurement names. Kept in English: technical identifiers (telemetry
+field names, SCPI, model names, units), log messages, findings text, HTML reports and these help pages.
 
 ### What do I have to set first?
 *Unit / signal*: carrier frequency, symbol rate, roll-off, nominal output power, nominal attenuator code and the

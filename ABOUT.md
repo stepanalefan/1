@@ -1,4 +1,4 @@
-# KTR RAD TEST
+# KTR TEST
 
 **BOS modulator test station and bench control software**
 

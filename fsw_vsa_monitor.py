@@ -227,6 +227,11 @@ except Exception as _e:  # pragma: no cover
     n6700_supply = None
     _N67_ERR = f"{type(_e).__name__}: {_e}"
 
+try:  # user-interface languages (G8)
+    import i18n
+except Exception:  # pragma: no cover
+    i18n = None
+
 try:  # Help tab (FAQ / Readme / About)
     import help_tab
 except Exception:  # pragma: no cover
@@ -1471,7 +1476,7 @@ class RunningStat:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
-        self.setWindowTitle("KTR RAD TEST")
+        self.setWindowTitle("KTR TEST")
         self.resize(1560, 940)
         self.connected = False
         self.supported: set[str] = set()
@@ -1938,6 +1943,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.help = help_tab.HelpTab() if help_tab else None
         if self.help:
             self.tabs.addTab(self.help, "Help")
+        self.translator = None
+        if i18n:
+            self.translator = i18n.Translator(self, i18n.load_language())
+            if self.help:
+                for code, name in i18n.LANGS:
+                    self.help.lang.addItem(name, code)
+                self.help.lang.setCurrentIndex(max(0, self.help.lang.findData(self.translator.lang)))
+                self.help.lang.currentIndexChanged.connect(
+                    lambda *_: self.translator.set_language(self.help.lang.currentData()))
+            QtCore.QTimer.singleShot(0, self.translator.apply)
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([420, 1140])
 
@@ -2922,7 +2937,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 # --------------------------------------------------------------------------- #
-APP_ID = "KTR.RadTest.1"      # any unique string: Company.Product.SubProduct.Version
+APP_ID = "KTR.Test.1"      # any unique string: Company.Product.SubProduct.Version
 ICON_FILE = "app.ico"
 
 
@@ -2968,7 +2983,7 @@ def main():
     if not icon.isNull():
         # System tray (notification area) icon - Windows shows nothing there by default.
         win.tray = QtWidgets.QSystemTrayIcon(icon, win)
-        win.tray.setToolTip("KTR RAD TEST")
+        win.tray.setToolTip("KTR TEST")
         win.tray.activated.connect(lambda *_: (win.showNormal(), win.raise_(), win.activateWindow()))
         win.tray.show()
     win.show()

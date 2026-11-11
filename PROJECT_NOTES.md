@@ -14,7 +14,7 @@ were removed; CAN, telemetry, FSW, HMP4040, N6701C, TFG6806, sequences and logs 
 
 ## 1. What the program is
 
-Name: **KTR RAD TEST** (EXE `KTR_RAD_TEST.exe`; start file still `fsw_vsa_monitor.py`).
+Name: **KTR TEST** (EXE `KTR_TEST.exe`; start file still `fsw_vsa_monitor.py`).
 
 A PyQt5 desktop program (Windows, run from PyCharm or as a PyInstaller EXE) that tests the **BOS modulator**
 (BPSK / OQPSK; Microsemi MPF300T FPGA → TI DAC38J82 (JESD204B) → ADI ADMV1013 I/Q upconverter with LO ×4

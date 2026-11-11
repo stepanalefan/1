@@ -173,6 +173,14 @@ DEFAULT_PLANS = {
 CTL_MODES = [("rf_off", "RF off"), ("cw", "Carrier (CW)"), ("bpsk", "BPSK"), ("oqpsk", "OQPSK")]
 
 
+def _tr(text):
+    try:
+        import i18n
+        return i18n.tr(text, i18n.CURRENT)
+    except Exception:
+        return text
+
+
 def _mono():
     f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
     return f
@@ -312,6 +320,7 @@ class BlockDiagram(QtWidgets.QWidget):
             p.setBrush(self._color(b))
             p.drawRoundedRect(rect, 6, 6)
             name, part = next((x[1], x[2]) for x in ba.BLOCKS if x[0] == b)
+            name = _tr(name)
             p.setPen(QtGui.QColor("#ffffff"))
             f.setBold(True)
             f.setPointSizeF(9)
@@ -327,7 +336,7 @@ class BlockDiagram(QtWidgets.QWidget):
         f.setPointSizeF(8)
         p.setFont(f)
         p.drawText(QtCore.QRectF(0, h - 18, w - 8, 16), QtCore.Qt.AlignRight,
-                   "suspicion: green < 10 % · yellow · orange · red > 65 %   (click a block to filter the findings)")
+                   _tr("suspicion: green < 10 % · yellow · orange · red > 65 %   (click a block to filter the findings)"))
 
     def mousePressEvent(self, ev):
         for b, r in self.rects.items():
@@ -2958,7 +2967,7 @@ class BosStation(QtWidgets.QWidget):
             self.sig_src.setCurrentIndex(keep)
         if "att" in self.res and "bits" in self.res["att"]:
             h.append(f"<h2>Attenuator</h2><img src='data:image/png;base64,{self._img(self.att_plot)}' width=700>")
-        h.append(f"<p style='color:#6e7781'>KTR RAD TEST · BOS Test Station · {e(stamp)}</p></body></html>")
+        h.append(f"<p style='color:#6e7781'>KTR TEST · BOS Test Station · {e(stamp)}</p></body></html>")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(h))
         self._append_history(verdict, summary, path)

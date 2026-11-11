@@ -75,12 +75,12 @@ def read_iq_tar(path) -> IQData:
     return IQData(x, fs, center, os.path.basename(path), {"format": "R&S iq.tar", "datatype": dtype})
 
 
-def write_iq_tar(path, x, fs, center=None, comment="KTR RAD TEST BOS station"):
+def write_iq_tar(path, x, fs, center=None, comment="KTR TEST BOS station"):
     x = np.asarray(x, np.complex64)
     base = os.path.basename(path).replace(".iq.tar", "")
     dname = f"{base}.complex.1ch.float32"
     xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n<RS_IQ_TAR_FileFormat fileFormatVersion="1">\n'
-           f"<Name>KTR RAD TEST</Name><Comment>{comment}</Comment>"
+           f"<Name>KTR TEST</Name><Comment>{comment}</Comment>"
            f"<DateTime>{time.strftime('%Y-%m-%dT%H:%M:%S')}</DateTime>"
            f"<Samples>{len(x)}</Samples><Clock unit=\"Hz\">{fs:.10g}</Clock><Format>complex</Format>"
            f"<DataType>float32</DataType><ScalingFactor unit=\"V\">1</ScalingFactor>"
