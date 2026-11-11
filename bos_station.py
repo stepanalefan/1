@@ -442,6 +442,117 @@ class FileDialog(QtWidgets.QDialog):
         return iq, self.mode.currentData(), self.ur.currentData(), self.shr.currentData()
 
 
+class SegmentDialog(QtWidgets.QDialog):
+    """Power envelope of the whole recording with a draggable selection (like an audio editor):
+    only the selected part is analysed, so noise before / after the transmission is left out."""
+
+    def __init__(self, parent, iq):
+        super().__init__(parent)
+        self.setWindowTitle(f"Select the part to analyse - {iq.name}")
+        self.resize(1100, 520)
+        self.iq = iq
+        self.n = len(iq.x)
+        self.fs = iq.fs
+        v = QtWidgets.QVBoxLayout(self)
+        # envelope: mean and max power per bin (dBm), ≤ 4000 bins
+        nb = min(4000, max(1, self.n // 16))
+        self.bin = max(1, self.n // nb)
+        m = self.n // self.bin * self.bin
+        p = (np.abs(np.asarray(iq.x[:m], np.complex64).reshape(-1, self.bin)) ** 2) / 50.0 * 1e3
+        self.t = (np.arange(p.shape[0]) + 0.5) * self.bin / self.fs
+        self.pmean = 10 * np.log10(p.mean(axis=1) + 1e-20)
+        pmax = 10 * np.log10(p.max(axis=1) + 1e-20)
+        self.plot = pg.PlotWidget()
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setLabel("bottom", "time", units="s")
+        self.plot.setLabel("left", "power", units="dBm")
+        self.plot.getPlotItem().setMenuEnabled(False)
+        self.plot.plot(self.t, pmax, pen=pg.mkPen("#2f6fb0", width=1))
+        self.plot.plot(self.t, self.pmean, pen=pg.mkPen("#58a6ff", width=1.5))
+        a, b = self._auto()
+        self.region = pg.LinearRegionItem(values=(a / self.fs, b / self.fs), brush=pg.mkBrush(63, 185, 80, 50),
+                                          pen=pg.mkPen("#3fb950", width=2))
+        self.region.setBounds((0, self.n / self.fs))
+        self.region.sigRegionChanged.connect(self._update)
+        self.plot.addItem(self.region)
+        v.addWidget(self.plot, 1)
+        h = QtWidgets.QHBoxLayout()
+        self.start = QtWidgets.QDoubleSpinBox()
+        self.stop = QtWidgets.QDoubleSpinBox()
+        for sb in (self.start, self.stop):
+            sb.setDecimals(6)
+            sb.setRange(0, self.n / self.fs)
+            sb.setSuffix(" s")
+            sb.setSingleStep(max(1e-6, self.n / self.fs / 1000))
+            sb.valueChanged.connect(self._spin)
+        self.info = QtWidgets.QLabel()
+        for txt, fn in (("Auto (signal only)", self._set_auto), ("Whole recording", self._set_all),
+                        ("Zoom to selection", self._zoom), ("Show all", lambda: self.plot.autoRange())):
+            bt = QtWidgets.QPushButton(txt)
+            bt.clicked.connect(fn)
+            h.addWidget(bt)
+        h.addWidget(QtWidgets.QLabel("Start"))
+        h.addWidget(self.start)
+        h.addWidget(QtWidgets.QLabel("Stop"))
+        h.addWidget(self.stop)
+        h.addWidget(self.info, 1)
+        v.addLayout(h)
+        v.addWidget(QtWidgets.QLabel("Drag the green edges (or the whole region) to choose the part to analyse; "
+                                     "dark line = peak, light line = mean power per point. For a ШР packet keep the "
+                                     "start of the transmission (preambles) inside the selection."))
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.button(QtWidgets.QDialogButtonBox.Ok).setText("Analyse selection")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self._update()
+
+    def _auto(self):
+        """Samples where the mean power is within 10 dB of the strongest part (+ small margins)."""
+        if self.pmean.size < 3:
+            return 0, self.n
+        on = np.where(self.pmean > np.percentile(self.pmean, 99) - 10)[0]
+        if not on.size:
+            return 0, self.n
+        a = (on[0] + 1) * self.bin                         # skip the bin where the RF switches on
+        b = on[-1] * self.bin
+        return (a, b) if b - a > 1000 else (0, self.n)
+
+    def _set_auto(self):
+        a, b = self._auto()
+        self.region.setRegion((a / self.fs, b / self.fs))
+
+    def _set_all(self):
+        self.region.setRegion((0, self.n / self.fs))
+
+    def _zoom(self):
+        a, b = self.region.getRegion()
+        pad = (b - a) * 0.05
+        self.plot.setXRange(a - pad, b + pad, padding=0)
+
+    def _spin(self, *_):
+        if self.start.value() < self.stop.value():
+            self.region.blockSignals(True)
+            self.region.setRegion((self.start.value(), self.stop.value()))
+            self.region.blockSignals(False)
+            self._update(spin=False)
+
+    def selection(self):
+        a, b = self.region.getRegion()
+        return max(0, int(a * self.fs)), min(self.n, int(b * self.fs))
+
+    def _update(self, *_, spin=True):
+        a, b = self.selection()
+        if spin:
+            for sb, val in ((self.start, a / self.fs), (self.stop, b / self.fs)):
+                sb.blockSignals(True)
+                sb.setValue(val)
+                sb.blockSignals(False)
+        seg = np.asarray(self.iq.x[a:b])
+        pw = 10 * math.log10(float(np.mean(np.abs(seg) ** 2)) / 50.0 * 1e3 + 1e-20) if b > a else float("nan")
+        self.info.setText(f"{(b - a) / self.fs:.6f} s, {b - a:,} samples, mean {pw:.2f} dBm")
+
+
 class BosStation(QtWidgets.QWidget):
     def __init__(self, host):
         super().__init__()
@@ -2266,6 +2377,15 @@ class BosStation(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "I/Q file", f"{type(e).__name__}: {e}")
             return
+        seg = SegmentDialog(self, self._file[0])
+        if seg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        a, b = seg.selection()
+        iq = self._file[0]
+        self._file_seg = (a, b, len(iq.x))
+        if (a, b) != (0, len(iq.x)):
+            iq = bos_iqfile.IQData(iq.x[a:b], iq.fs, iq.center, iq.name, dict(iq.meta, segment=(a, b)))
+            self._file = (iq,) + tuple(self._file[1:])
         self.start_plan(f"I/Q file: {os.path.basename(path)}", tests=["file"])
 
     def _t_file(self):
@@ -2292,6 +2412,10 @@ class BosStation(QtWidgets.QWidget):
                                                                           _fin(idt.get("obw")) else ""))
         if iq.center:
             self._row(T, "File centre frequency", iq.center / 1e9, "GHz", "", "INFO", spec="{:.9f}")
+        seg = iq.meta.get("segment")
+        if seg:
+            self._row(T, "Analysed part", (seg[1] - seg[0]) / iq.fs, "s", "", "INFO", spec="{:.6f}",
+                      note=f"{seg[0] / iq.fs:.6f} … {seg[1] / iq.fs:.6f} s of the recording")
         nom = res.pop("_nominal", None)
         if nom and abs(nom - self.cfg["carrier"]) > 1:
             self.cfg["carrier"] = nom                      # diagnosis against the channel actually used
