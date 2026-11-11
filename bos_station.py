@@ -1014,7 +1014,8 @@ class BosStation(QtWidgets.QWidget):
         self.fr_hide_idle = QtWidgets.QCheckBox("Hide idle frames")
         self.fr_hide_idle.toggled.connect(lambda *_: self._fill_frames())
         h.addWidget(self.fr_hide_idle)
-        for txt, fn in (("Save selected (.bin)", self._save_frames_bin), ("Save list (.csv)", self._save_frames_csv)):
+        for txt, fn in (("Save frames (.bin)", self._save_frames_bin), ("Save list (.csv)", self._save_frames_csv),
+                        ("Save raw bit stream (.bin)", self._save_bitstream)):
             b = QtWidgets.QPushButton(txt)
             b.clicked.connect(fn)
             h.addWidget(b)
@@ -1029,12 +1030,46 @@ class BosStation(QtWidgets.QWidget):
         self.fr_table.horizontalHeader().setStretchLastSection(True)
         self.fr_table.currentCellChanged.connect(lambda r, *_: self._show_frame(r))
         sp.addWidget(self.fr_table)
-        self.fr_hex = QtWidgets.QPlainTextEdit()
+        # Miller-style matrix: one frame per row, one byte per column
+        mw = QtWidgets.QWidget()
+        mv = QtWidgets.QVBoxLayout(mw)
+        mv.setContentsMargins(0, 0, 0, 0)
+        bar = QtWidgets.QHBoxLayout()
+        self.fr_fmt = QtWidgets.QComboBox()
+        self.fr_fmt.addItems(["HEX", "DEC", "BIN"])
+        self.fr_fmt.currentIndexChanged.connect(lambda *_: self._fill_matrix())
+        self.fr_hl = QtWidgets.QCheckBox("Highlight changing columns")
+        self.fr_hl.setChecked(True)
+        self.fr_hl.toggled.connect(lambda *_: self._fill_matrix())
+        self.fr_cell = QtWidgets.QLabel("")
+        for wd in (QtWidgets.QLabel("Format"), self.fr_fmt, self.fr_hl, self.fr_cell):
+            bar.addWidget(wd)
+        bar.addStretch(1)
+        mv.addLayout(bar)
+        self.fr_hex = QtWidgets.QPlainTextEdit()          # header of the selected frame
         self.fr_hex.setReadOnly(True)
         self.fr_hex.setFont(_mono())
-        self.fr_hex.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        sp.addWidget(self.fr_hex)
-        sp.setSizes([300, 400])
+        self.fr_hex.setMaximumHeight(56)
+        mv.addWidget(self.fr_hex)
+        self.fr_mat = QtWidgets.QTableWidget(0, 0)
+        self.fr_mat.setFont(_mono())
+        self.fr_mat.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.fr_mat.horizontalHeader().setDefaultSectionSize(26)
+        self.fr_mat.verticalHeader().setDefaultSectionSize(18)
+        self.fr_mat.currentCellChanged.connect(self._matrix_cell)
+        mv.addWidget(self.fr_mat, 3)
+        self.fr_img = pg.PlotWidget()
+        self.fr_img.getPlotItem().setMenuEnabled(False)
+        self.fr_img.invertY(True)
+        self.fr_img.setLabel("bottom", "bit")
+        self.fr_img.setLabel("left", "frame")
+        self.fr_imgitem = pg.ImageItem(axisOrder="row-major")
+        self.fr_img.addItem(self.fr_imgitem)
+        self.fr_cursor = pg.InfiniteLine(angle=90, pen=pg.mkPen("#3fb950", width=2))
+        self.fr_img.addItem(self.fr_cursor)
+        mv.addWidget(self.fr_img, 2)
+        sp.addWidget(mw)
+        sp.setSizes([220, 600])
         v.addWidget(sp, 1)
         self._frames = []
         return w
@@ -1076,28 +1111,86 @@ class BosStation(QtWidgets.QWidget):
         self.fr_info.setText(f"{len(allf)} frame(s) decoded ({n_idle} idle, {len(allf) - n_idle} data). "
                              "Select a frame to see its 1115 bytes." if allf else
                              "No decoded frames yet - run a BPSK / ШР test or analyze an I/Q file.")
+        self._fill_matrix()
         if fr:
             tb.selectRow(0)
             self._show_frame(0)
         else:
             self.fr_hex.clear()
 
+    def _fill_matrix(self):
+        fr = getattr(self, "_frames", [])
+        m = self.fr_mat
+        m.setUpdatesEnabled(False)
+        if not fr:
+            m.setRowCount(0)
+            m.setColumnCount(0)
+            self.fr_imgitem.clear()
+            m.setUpdatesEnabled(True)
+            return
+        a = np.array([np.frombuffer(f["tf"], np.uint8) for _, f in fr])
+        fmt = self.fr_fmt.currentText()
+        m.setRowCount(len(fr))
+        m.setColumnCount(a.shape[1])
+        m.setHorizontalHeaderLabels([str(i) for i in range(a.shape[1])])
+        m.setVerticalHeaderLabels([str(i + 1) for i in range(len(fr))])
+        m.horizontalHeader().setDefaultSectionSize({"HEX": 26, "DEC": 32, "BIN": 70}[fmt])
+        changing = (a != a[0]).any(axis=0) if self.fr_hl.isChecked() and len(fr) > 1 else np.zeros(a.shape[1], bool)
+        yellow = QtGui.QBrush(QtGui.QColor("#5c5000"))
+        for r in range(a.shape[0]):
+            for c in range(a.shape[1]):
+                b = int(a[r, c])
+                it = QtWidgets.QTableWidgetItem(f"{b:02X}" if fmt == "HEX" else f"{b}" if fmt == "DEC" else f"{b:08b}")
+                if changing[c]:
+                    it.setBackground(yellow)
+                m.setItem(r, c, it)
+        m.setUpdatesEnabled(True)
+        bits = np.unpackbits(a, axis=1)                    # 1 = dark, like Miller
+        self.fr_imgitem.setImage((1 - bits).astype(np.float32) * 255, levels=(0, 255))
+        self.fr_img.setXRange(0, min(bits.shape[1], 2000), padding=0)
+        nchg = int(changing.sum())
+        self.fr_cell.setText(f"{a.shape[0]} frames × {a.shape[1]} bytes; {nchg} byte column(s) change between frames"
+                             + (f" (first: {int(np.argmax(changing))})" if nchg else ""))
+
+    def _matrix_cell(self, row, col, *_):
+        fr = getattr(self, "_frames", [])
+        if 0 <= row < len(fr) and col >= 0:
+            b = fr[row][1]["tf"][col]
+            self.fr_cursor.setValue(col * 8)
+            self.fr_cell.setText(f"frame {row + 1}, byte {col}: 0x{b:02X} = {b} = {b:08b}b   (bits {col * 8}…{col * 8 + 7})")
+            if self.fr_table.currentRow() != row:
+                self.fr_table.selectRow(row)
+
+    def _save_bitstream(self):
+        streams = []
+        for label, r in self.res.get("_caps", []):
+            d = (r.get("decode") or r.get("shr") or {}) if isinstance(r, dict) else {}
+            if d.get("bitstream"):
+                streams.append((label, d["bitstream"]))
+        if not streams:
+            QtWidgets.QMessageBox.information(self, "Raw bit stream", "No demodulated bit stream in this run.")
+            return
+        label, data = streams[-1]
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save raw bit stream", "bos_bitstream.bin", "Binary (*.bin)")
+        if p:
+            with open(p, "wb") as fh:
+                fh.write(data)
+            self.log(f"BOS station: bit stream of '{label}' ({len(data) * 8:,} bits, MSB first, after SP-L decoding "
+                     f"and polarity correction) saved to {p}")
+
     def _show_frame(self, row):
         if not 0 <= row < len(self._frames):
             return
         src, f = self._frames[row]
-        tf = f["tf"]
-        hdr = (f"{src}   SCID {f.get('scid')}  VCID {f.get('vcid')}  OCF {f.get('ocf')}  MC count {f.get('mcfc')}  "
-               f"VC count {f.get('vcfc')}  first header pointer 0x{f.get('fhp', 0):03X}"
-               f" ({'idle frame' if f.get('idle') else 'data'})   CRC {'ok' if f.get('crc_ok') else 'BAD'}\n"
-               f"bytes 0-5 primary header, 6-17 secondary / CLCW, 18-1112 data field, 1113-1114 CRC\n\n")
-        lines = []
-        for o in range(0, len(tf), 16):
-            chunk = tf[o:o + 16]
-            hx = " ".join(f"{b:02X}" for b in chunk)
-            asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-            lines.append(f"{o:04d}  {hx:<47}  {asc}")
-        self.fr_hex.setPlainText(hdr + "\n".join(lines))
+        self.fr_hex.setPlainText(
+            f"{src}   SCID {f.get('scid')}  VCID {f.get('vcid')}  OCF {f.get('ocf')}  MC count {f.get('mcfc')}  "
+            f"VC count {f.get('vcfc')}  FHP 0x{f.get('fhp', 0):03X} ({'idle' if f.get('idle') else 'data'})  "
+            f"CRC {'ok' if f.get('crc_ok') else 'BAD'}\n"
+            f"bytes 0-5 primary header, 6-17 secondary / CLCW, 18-1112 data field, 1113-1114 CRC")
+        if self.fr_mat.currentRow() != row and row < self.fr_mat.rowCount():
+            self.fr_mat.blockSignals(True)
+            self.fr_mat.setCurrentCell(row, max(0, self.fr_mat.currentColumn()))
+            self.fr_mat.blockSignals(False)
 
     def _save_frames_bin(self):
         rows = sorted({i.row() for i in self.fr_table.selectedIndexes()}) or range(len(self._frames))

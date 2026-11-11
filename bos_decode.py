@@ -246,6 +246,7 @@ def decode_ur(sym, scid=None) -> dict:
         pos, neg = neg, pos
         out["inverted"] = True
     out["asm_found"] = len(pos)
+    out["bitstream"] = bits_to_bytes(bits[:len(bits) // 8 * 8])        # hard bits after polarity, for export
     nb = CBD_UR * 8
     raw_err = raw_tot = 0
     for p in pos:

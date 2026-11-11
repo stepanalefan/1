@@ -452,6 +452,7 @@ def decode_shr(chips, rate_kbps, preamble=PREAMBLE, max_cbd=4, turbo_iters=8) ->
     out["cbd_snr_db"] = 10 * math.log10(np.mean(np.abs(sb)) ** 2 / (np.var(np.abs(sb)) + 1e-30))
     out["cbd_eff"] = float(np.mean(np.abs(sb))) / (float(np.mean(np.abs(seg))) * sf + 1e-30)
     hard = (sb < 0).astype(np.uint8)
+    out["bitstream"] = bd.bits_to_bytes(hard[:len(hard) // 8 * 8])        # despread КБД bits, for export
     err_tot = bits_tot = 0
     pos = 0
     while pos + CBD_SR_BITS <= nbits:
