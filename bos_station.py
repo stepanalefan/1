@@ -1193,7 +1193,8 @@ class BosStation(QtWidgets.QWidget):
             self.fr_mat.blockSignals(False)
 
     def _save_frames_bin(self):
-        rows = sorted({i.row() for i in self.fr_table.selectedIndexes()}) or range(len(self._frames))
+        sel = sorted({i.row() for i in self.fr_table.selectedIndexes()})
+        rows = sel if len(sel) > 1 else list(range(len(self._frames)))   # one (auto-)selected row = save all
         if not self._frames:
             return
         p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save frames", "bos_frames.bin", "Binary (*.bin)")
