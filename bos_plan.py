@@ -92,8 +92,8 @@ def proto(st, code, data=b"", what=""):
     name = bp.COMMANDS.get(code, ("?", 0, ""))
     s = Step("can", f"{what or name[0]}  —  {L(name[2], name[2])}" if not what else what,
              [Step("info", can_frame(st, code, data)), _ack(st)],
-             tip=L(f"CAN line '{st.ctl.get('line', 'BOS')}', sender 0x{st.ctl.get('sender', 0x18):02X}",
-                   f"линия CAN '{st.ctl.get('line', 'BOS')}', отправитель 0x{st.ctl.get('sender', 0x18):02X}"))
+             tip=L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', 0x18):02X}",
+                   f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель 0x{st.ctl.get('sender', 0x18):02X}"))
     return [s]
 
 
@@ -301,6 +301,25 @@ def t_ref(st, demo, state):
                                 f"needed): PulsNumb_10MHz > 0 (10 MHz pulses present), Stat_10MHz",
                                 f"ИОК_ОСН после включения (≤ {max(10, int(c.get('ref_wait_s', 30)))} с; при "
                                 f"необходимости REQ_TM): PulsNumb_10MHz > 0 (импульсы 10 МГц есть), Stat_10MHz")))
+    return out
+
+
+def t_can12(st, demo, state):
+    l1, l2 = st.ctl.get("line", "BOS CAN1"), st.ctl.get("line2", "BOS CAN2")
+    out = []
+    for n, line in ((1, l1), (2, l2)):
+        sub = [Step("info", L(f"on line '{line}'", f"по линии '{line}'")),
+               Step("info", can_frame(st, 0x00)),
+               Step("rx", L(f"КВ+ must come back on '{line}' with 'via CAN{n}'",
+                            f"КВ+ должна прийти по '{line}' с признаком «через CAN{n}»")),
+               Step("info", can_frame(st, 0x11, bp.p_req_tm(0xFC))),
+               Step("rx", L(f"КВ+, then ИОК_ОСН on '{line}' within 3 s", f"КВ+, затем ИОК_ОСН по '{line}' за 3 с"))]
+        out.append(Step("can", L(f"CAN{n}: NOP + REQ_TM ИОК_ОСН via {line}", f"CAN{n}: NOP + REQ_TM ИОК_ОСН через "
+                                                                             f"{line}"), sub))
+    if st.ctl.get("can1_only", False):
+        out += proto(st, 0x06, bytes([0x01]), L("SET_CAN = 01 — BOS transmits via CAN1 only",
+                                                "SET_CAN = 01 — БОС передаёт только по CAN1"))
+    out.append(Step("info", L(f"afterwards every command via CAN1 ({l1})", f"далее все команды через CAN1 ({l1})")))
     return out
 
 
@@ -579,7 +598,7 @@ def t_ber(st, demo, state):
     return out
 
 
-TESTS = {"ref": t_ref, "link": t_link, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
+TESTS = {"ref": t_ref, "can12": t_can12, "link": t_link, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
          "oqpsk": t_mod("OQPSK"), "shr": t_shr, "att": t_att, "lin": t_lin, "harm": t_harm, "drift": t_drift,
          "ber": t_ber}
 
@@ -591,6 +610,8 @@ def describe(st, plan):
     method = st.ctl.get("method", "protocol")
     if method == "protocol" and "link" not in tests:
         tests.insert(0, "link")
+    if method == "protocol" and st.ctl.get("can_check", True) and "can12" not in tests:
+        tests.insert(0, "can12")
     if "ref" not in tests:
         tests.insert(0, "ref")
     out = []
@@ -606,10 +627,10 @@ def describe(st, plan):
             "prompt": L("control: the operator switches the BOS", "управление: оператор переключает БОС")}
     prep.append(Step("info", mtxt.get(method, method)))
     if method == "protocol":
-        prep.append(Step("info", L(f"CAN line '{st.ctl.get('line', 'BOS')}', sender 0x{st.ctl.get('sender', 0x18):02X}, "
+        prep.append(Step("info", L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', 0x18):02X}, "
                                    f"BOS 0x{bp.BOS:02X}, N = {st.ctl.get('freq_n', 800)} → "
                                    f"{_hz(bp.freq_hz(int(st.ctl.get('freq_n', 800))))}",
-                                   f"линия CAN '{st.ctl.get('line', 'BOS')}', отправитель "
+                                   f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель "
                                    f"0x{st.ctl.get('sender', 0x18):02X}, БОС 0x{bp.BOS:02X}, N = "
                                    f"{st.ctl.get('freq_n', 800)} → {_hz(bp.freq_hz(int(st.ctl.get('freq_n', 800))))}")))
     if demo:

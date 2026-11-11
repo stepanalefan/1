@@ -149,6 +149,9 @@ TESTS = [  # id, name, description
     ("ref", "Reference & BOS power-up", "TFG6806 to the configured reference (UTILity:CLOck:SOURce), its 10 MHz output to "
                                        "the BOS on, then BOS power on, then 10 MHz pulses (PulsNumb_10MHz) present "
                                        "(added automatically)"),
+    ("can12", "CAN1 / CAN2 lines", "NOP acknowledgement and telemetry request (REQ_TM ИОК_ОСН) first via CAN1, then "
+                                   "via CAN2, answers expected on the same line; afterwards only CAN1 is used "
+                                   "(protocol control, added automatically)"),
     ("link", "Control link & BOS setup", "NOP acknowledgement, standby, session limit, telemetry periods, "
                                          "stored КОНФИГ read back (protocol control only, added automatically)"),
     ("pre", "Pre-check (telemetry)", "BOS telemetry present, PLLs locked, JESD OK, rails, temperatures, reference"),
@@ -832,10 +835,11 @@ class BosStation(QtWidgets.QWidget):
         self.host = host
         self.data = {"cfg": {k: d for k, _, _, d, _, _ in CFG_FIELDS},
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
-                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS", "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
+                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS CAN1", "line2": "BOS CAN2",
+                             "can_check": True, "can1_only": False, "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
                              "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
                              "tm_enable": True,
-                             "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS",
+                             "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS CAN1",
                              "settle_ms": 1500, "prompt": True,
                              "tfg_setup": True, "tfg_src": "EXT", "tfg_feed": 1, "power_up": "prompt",
                              "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
@@ -851,6 +855,9 @@ class BosStation(QtWidgets.QWidget):
                 self.data[k] = d.get(k, self.data[k])
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
+            for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
+                if self.data["ctl"].get(k) in ("BOS", "AFAR", "UPNG"):
+                    self.data["ctl"][k] += " CAN1"
             if d.get("lim_ver", 1) < 2:                   # Err_Ref_LO limit: was ±1000, now ≤ 3 before a mode
                 if self.data["lim"].get("err_ref_lo") == 1000.0:
                     self.data["lim"]["err_ref_lo"] = 3.0
@@ -865,6 +872,7 @@ class BosStation(QtWidgets.QWidget):
         self.job_done.connect(self._on_ext_job)
         self._ref_failed = False
         self._gate_rows = set()
+        self.tlm_line_t = {}                         # (line, array type) -> time of the last complete array
         self.demo = False
         # telemetry
         self.rx = telemetry.Reassembler() if telemetry else None
@@ -1077,8 +1085,19 @@ class BosStation(QtWidgets.QWidget):
         self.p_sender.setCurrentIndex(max(0, self.p_sender.findData(self.ctl.get("sender", 0x18))))
         self.p_sender.setToolTip("Sender address of the station. The BOS executes commands only from allowed\n"
                                  "addresses and answers КВ- otherwise - then try ВМ 1 (0x20).")
-        self.p_line = QtWidgets.QLineEdit(self.ctl.get("line", "BOS"))
-        self.p_line.setToolTip("CAN line (CAN tab) the BOS is connected to")
+        self.p_line = QtWidgets.QLineEdit(self.ctl.get("line", "BOS CAN1"))
+        self.p_line.setToolTip("CAN tab line of the BOS CAN1 - all commands of the plan go here")
+        self.p_line2 = QtWidgets.QLineEdit(self.ctl.get("line2", "BOS CAN2"))
+        self.p_line2.setToolTip("CAN tab line of the BOS CAN2 - used only by the CAN1 / CAN2 check")
+        self.p_can12 = QtWidgets.QCheckBox("Check CAN1, then CAN2 at the start (NOP + REQ_TM)")
+        self.p_can12.setChecked(bool(self.ctl.get("can_check", True)))
+        self.p_can1 = QtWidgets.QCheckBox("Then SET_CAN: BOS transmits via CAN1 only")
+        self.p_can1.setChecked(bool(self.ctl.get("can1_only", False)))
+        self.p_can1.setToolTip("SET_CAN 0x06 = 01 (standby only, not saved). With both buses enabled the BOS\n"
+                               "sends its periodic telemetry alternately on CAN1 and CAN2.")
+        for wd in (self.p_can12, self.p_can1):
+            wd.toggled.connect(lambda *_: self._collect())
+        self.p_line2.editingFinished.connect(self._collect)
         self.p_freq = QtWidgets.QSpinBox()
         self.p_freq.setRange(656, 944)
         self.p_freq.setValue(int(self.ctl.get("freq_n", 800)))
@@ -1120,7 +1139,10 @@ class BosStation(QtWidgets.QWidget):
             wd.toggled.connect(lambda *_: self._collect())
         self.p_line.editingFinished.connect(self._collect)
         f.addRow("Sender address", self.p_sender)
-        f.addRow("CAN line", self.p_line)
+        f.addRow("CAN line 1", self.p_line)
+        f.addRow("CAN line 2", self.p_line2)
+        f.addRow(self.p_can12)
+        f.addRow(self.p_can1)
         f.addRow("Frequency code N", self.p_freq)
         f.addRow("", self.p_freq_lbl)
         f.addRow("BPSK signal from", self.p_bpsk)
@@ -1775,7 +1797,9 @@ class BosStation(QtWidgets.QWidget):
                             settle_ms=self.settle.value())
         if hasattr(self, "p_freq"):
             self.ctl.update(method=self.method.currentData(), sender=self.p_sender.currentData(),
-                            line=self.p_line.text().strip() or "BOS", freq_n=self.p_freq.value(),
+                            line=self.p_line.text().strip() or "BOS CAN1",
+                            line2=self.p_line2.text().strip() or "BOS CAN2", can_check=self.p_can12.isChecked(),
+                            can1_only=self.p_can1.isChecked(), freq_n=self.p_freq.value(),
                             bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
                             rate_ur=self.p_rate_ur.currentData(), rate_shr=self.p_rate_shr.currentData(),
                             time_snr=self.p_tsnr.value(),
@@ -1927,6 +1951,7 @@ class BosStation(QtWidgets.QWidget):
             for fr in frames:
                 a = bp.parse_ack(fr.can_id, fr.ext, fr.data, self.ctl.get("sender", 0x18))
                 if a and a["code"] == self._ack_code:
+                    a["bus"] = getattr(fr, "bus", "")
                     self.pending = "ack-received"
                     self.wait_timer.stop()
                     QtCore.QTimer.singleShot(0, lambda a=a: self._advance(a))
@@ -1940,6 +1965,7 @@ class BosStation(QtWidgets.QWidget):
             base, t, data, ts = r
             if base >> 16 != 0x1A46:
                 continue
+            self.tlm_line_t[(getattr(fr, "bus", ""), t)] = time.time()
             if t == 0xFA and len(data) >= 8 + bp.CONFIG_LEN:
                 try:
                     self.cfg_rx = (time.time(), bp.decode_config(data[8:8 + bp.CONFIG_LEN]))
@@ -2069,6 +2095,9 @@ class BosStation(QtWidgets.QWidget):
         offline = tests == ["file"]
         if self.ctl.get("method") == "protocol" and tests not in (["live"], ["file"]) and "link" not in tests:
             tests.insert(0, "link")
+        if self.ctl.get("method") == "protocol" and self.ctl.get("can_check", True) and \
+                tests not in (["live"], ["file"], ["link"]) and "can12" not in tests:
+            tests.insert(0, "can12")                       # both CAN lines checked, then CAN1 only
         if tests not in (["live"], ["file"], ["link"]) and "ref" not in tests:
             tests.insert(0, "ref")                         # TFG reference + BOS power-up before anything else
         self._ref_failed = False
@@ -2247,12 +2276,13 @@ class BosStation(QtWidgets.QWidget):
     def _sim_map(self):
         return {self.ctl.get("bpsk_cmd", 0xA1): "BPSK", self.ctl.get("oqpsk_cmd", 0xA4): "OQPSK"}
 
-    def _frame(self, code, data=b"", ack=True, receiver=bp.BOS):
+    def _frame(self, code, data=b"", ack=True, receiver=bp.BOS, line=None):
         c = getattr(self.host, "can_win", None)
         can_id, payload = bp.command(code, self.ctl.get("sender", 0x18), data, ack, receiver)
         if c is None:
             return False
-        return c.send_frame(c.FRAME(0, can_id, True, False, None, payload, bus=self.ctl.get("line", "BOS")))
+        return c.send_frame(c.FRAME(0, can_id, True, False, None, payload,
+                                    bus=line or self.ctl.get("line", "BOS CAN1")))
 
     def _send_now(self, code, data=b""):
         """Fire-and-forget (RF off button, keep-alive, end of a test)."""
@@ -2270,17 +2300,23 @@ class BosStation(QtWidgets.QWidget):
                 self.cur_mode not in (None, "rf_off"):
             self._send_now(0x0C, bp.p_angle(0.0, 0.0))
 
-    def _proto(self, code, data=b"", what=""):
-        """Send a command with acknowledgement request; returns the acknowledgement dict."""
+    def _proto(self, code, data=b"", what="", line=None):
+        """Send a command with acknowledgement request (on `line`, default CAN line 1); returns the
+        acknowledgement dict (with "bus" = the line it came back on)."""
         name = bp.COMMANDS[code][0]
+        line = line or self.ctl.get("line", "BOS CAN1")
         if self._is_demo():
             ok = self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
             yield ("sleep", 0.02)
-            a = {"code": code, "negative": not ok, "unknown": not ok, "can2": False, "byte": 0, "array": False}
+            two = line == self.ctl.get("line2", "BOS CAN2")
+            a = {"code": code, "negative": not ok, "unknown": not ok, "can2": two, "byte": 0, "array": False,
+                 "bus": line}
+            if code == 0x11:
+                self.tlm_line_t[(line, data[0] if data else 0xFC)] = time.time()
         else:
             self._ack_code = code
-            if not self._frame(code, data):
-                raise _TestError(f"{name}: CAN send failed - line '{self.ctl.get('line')}' not connected (CAN tab)")
+            if not self._frame(code, data, line=line):
+                raise _TestError(f"{name}: CAN send failed - line '{line}' not connected (CAN tab)")
             a = yield ("ack", 0.3)
         if a is None:
             raise _TestError(f"{name}: no acknowledgement within 300 ms (BOS off, wrong CAN line, "
@@ -2497,6 +2533,49 @@ class BosStation(QtWidgets.QWidget):
         if tl.get("Stat_10MHz") is not None:
             self._row(T, "External 10 MHz valid (Stat_10MHz)", None, "", "norm",
                       "PASS" if tl["Stat_10MHz"] else "FAIL", text="norm" if tl["Stat_10MHz"] else "no signal")
+
+    def _t_can12(self):
+        """Both BOS CAN lines: NOP (КВ back on the same line, 'via CAN<n>' bit) and REQ_TM ИОК_ОСН (array back on
+        that line), CAN1 first, then CAN2. Afterwards the plan uses CAN1 only (optionally SET_CAN = CAN1)."""
+        T = TEST_NAME["can12"]
+        c = getattr(self.host, "can_win", None)
+        names = c.line_names() if c is not None and hasattr(c, "line_names") else []
+        import canable_analyzer as ca
+        lines = [(1, ca.resolve_line(self.ctl.get("line", "BOS CAN1"), names)),
+                 (2, ca.resolve_line(self.ctl.get("line2", "BOS CAN2"), names))]
+        for n, line in lines:
+            try:
+                a = yield from self._proto(0x00, what=f"NOP via CAN{n} ({line})", line=line)
+            except _TestError as e:
+                self._row(T, f"CAN{n} ({line}): command + КВ", None, "", "КВ+ on this line", "FAIL", text="no КВ",
+                          note=str(e))
+                continue
+            same = a.get("bus") in ("", line, None) or self._is_demo()
+            bit_ok = a.get("can2") == (n == 2)
+            self._row(T, f"CAN{n} ({line}): command + КВ", None, "", "КВ+ on this line",
+                      "PASS" if same and bit_ok else "FAIL",
+                      text=f"КВ+ on {a.get('bus') or line}, via CAN{2 if a.get('can2') else 1}",
+                      note="" if same and bit_ok else "acknowledgement on another line / wrong 'via CAN' bit")
+            t0 = time.time()
+            try:
+                yield from self._proto(0x11, bp.p_req_tm(0xFC), f"REQ_TM ИОК_ОСН via CAN{n}", line=line)
+            except _TestError as e:
+                self._row(T, f"CAN{n} ({line}): telemetry (REQ_TM ИОК_ОСН)", None, "", "received", "FAIL",
+                          text="no КВ", note=str(e))
+                continue
+            got = False
+            for _ in range(30):
+                tr = self.tlm_line_t.get((line, 0xFC))
+                if tr is not None and tr >= t0 - 0.05:
+                    got = True
+                    break
+                yield ("sleep", 0.1)
+            self._row(T, f"CAN{n} ({line}): telemetry (REQ_TM ИОК_ОСН)", None, "", f"ИОК_ОСН on {line}",
+                      "PASS" if got else "FAIL", text="received" if got else "not received within 3 s")
+        if self.ctl.get("can1_only", False):
+            yield from self._proto(0x06, bytes([0x01]), "SET_CAN - transmission via CAN1 only", line=lines[0][1])
+            self._row(T, "SET_CAN (transmission via CAN1 only)", None, "", "КВ+", "PASS", text="КВ+")
+        self._row(T, "Further commands", None, "", "", "INFO", text=f"via CAN1 only ({lines[0][1]})")
 
     def _t_link(self):
         T = TEST_NAME["link"]

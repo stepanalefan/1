@@ -60,32 +60,34 @@ class Reassembler:
     modulo 16 (AFAR 184 B: 00, 41..4F, 40..45, 86). Segments must arrive in order."""
 
     def __init__(self):
-        self.parts: dict[int, list[bytes]] = {}          # base id -> segments so far
+        self.parts: dict[tuple, list[bytes]] = {}        # (line, base id) -> segments so far
         self.errors = 0
 
     def feed(self, f):
-        """f: canable_analyzer.Frame. Returns (base_id, type, data, ts) or None."""
+        """f: canable_analyzer.Frame. Returns (base_id, type, data, ts) or None. Arrays are collected per CAN
+        line (f.bus): a unit with two lines sends its periodic arrays alternately on both."""
         if not f.ext or f.rtr or (f.can_id & 0xFF) not in MD_TYPES:
             return None
         base = f.can_id & ~0xFF00
+        key = (getattr(f, "bus", "") or "", base)
         seg = (f.can_id >> 8) & 0xFF
         kind, idx = seg >> 6, seg & 0x0F
         if kind == 0:                                  # first segment: start a new array
-            if base in self.parts:
+            if key in self.parts:
                 self.errors += 1                       # previous one never completed
-            self.parts[base] = [f.data]
+            self.parts[key] = [f.data]
             return None
-        buf = self.parts.get(base)
+        buf = self.parts.get(key)
         if buf is None:
             return None                                # started before the capture began
         if idx != len(buf) % 16:                       # lost / out-of-order segment
             self.errors += 1
-            del self.parts[base]
+            del self.parts[key]
             return None
         buf.append(f.data)
         if kind != 2:
             return None
-        del self.parts[base]
+        del self.parts[key]
         return base, f.can_id & 0xFF, b"".join(buf), f.ts
 
 

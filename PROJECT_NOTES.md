@@ -20,7 +20,7 @@ A PyQt5 desktop program (Windows, run from PyCharm or as a PyInstaller EXE) that
 (BPSK / OQPSK; Microsemi MPF300T FPGA → TI DAC38J82 (JESD204B) → ADI ADMV1013 I/Q upconverter with LO ×4
 from TI LMX2594 → ADI ADRF5730 step attenuator → UMS CHA3397 PA). It switches the unit over CAN, captures the
 output with an R&S FSW (raw I/Q), reads the BOS CAN telemetry and diagnoses faults down to the block.
-Also: HMP4040 / N6701C supplies, TFG6806 generator, three CAN lines, sequences, daily CSV logs.
+Also: HMP4040 / N6701C supplies, TFG6806 generator, six CAN lines (BOS / AFAR / UPNG × CAN1, CAN2), sequences, daily CSV logs.
 
 The user works in PyCharm on Windows, builds the EXE with `build_exe.bat`, and tests on the real bench.
 Everything here was developed in a Linux container without the hardware: features were verified
@@ -79,7 +79,7 @@ rthook_visa.py       PyInstaller runtime hook (EXE only), see 6
 | R&S HMP4040 | USB virtual COM 9600 Bd, or LAN socket 5025. pymeasure-style SCPI. |
 | Keysight N6701C | LAN socket 5025 / VISA. |
 | BOS modulator | MPF300T → JESD204B → DAC38J82 (I/Q) → ADMV1013 (LO ×4 from LMX2594) → ADRF5730 (6 bit, 0.5 dB) → CHA3397. Telemetry IOK DOP (0xFB): pll_lmk, pll_jesd, pll_all, pll_lmx (DAC), pll_lmx (mod), jesd_err, FPGA rails (fix3 mV); IOK OSN (0xFC): temperatures, Stat_10MHz / Sour_10MHz, Err_Ref_LO, Mode, Mode_SNR. |
-| CAN | BOS on **CANable** (slcan), AFAR on **IXXAT CAN1**, UPNG on **IXXAT CAN2** (python-can `ixxat`, channel 0/1). 29-bit IDs `prefix(16) | segment(8) | type(8)`; prefixes BOS 0x1A46, UPNG 0x1A86, AFAR 0x1AC6. Arrays little-endian; segment byte bits 7-6 first/middle/last, bits 3-0 counter mod 16. |
+| CAN | Two lines per unit: BOS CAN1 / CAN2, AFAR CAN1 / CAN2, UPNG CAN1 / CAN2 (defaults: BOS CAN1 on **CANable** (slcan), AFAR CAN1 on **IXXAT** channel 0, UPNG CAN1 on IXXAT channel 1; CAN2 adapters chosen on the CAN tab). Unit-only names ('BOS') resolve to CAN1; telemetry reassembled per line (BOS alternates arrays between buses). 29-bit IDs `prefix(16) | segment(8) | type(8)`; prefixes BOS 0x1A46, UPNG 0x1A86, AFAR 0x1AC6. Arrays little-endian; segment byte bits 7-6 first/middle/last, bits 3-0 counter mod 16. |
 
 ---
 

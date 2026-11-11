@@ -37,9 +37,11 @@ IXXAT USB-to-CAN (python-can "ixxat" interface, needs the IXXAT VCI 4 driver on 
 
 Lines
 -----
-Up to three CAN lines are captured at the same time, each on its own adapter / channel
-(default: BOS on the CANable, AFAR on IXXAT CAN1, UPNG on IXXAT CAN2), stored in
-can_lines.json. Every frame carries its line name: Trace and Monitor show it in the "Line"
+Every unit (BOS, AFAR, UPNG) has two CAN lines, CAN1 and CAN2: six lines, each on its own adapter /
+channel, all captured at the same time, stored in can_lines.json (default: BOS CAN1 on the CANable,
+AFAR CAN1 on IXXAT channel 0, UPNG CAN1 on IXXAT channel 1; the CAN2 lines are disabled until an
+adapter is chosen). A name that is only a unit ('BOS', older settings / library commands) means that
+unit's CAN1 line. Every frame carries its line name: Trace and Monitor show it in the "Line"
 column and the line checkboxes next to the ID filter hide / show whole lines.
 Transmit: the panel sends on the selected line; library commands can be tied to a line.
 
@@ -106,12 +108,31 @@ CANABLE_USB_IDS = [(0x16D0, 0x117E), (0x0483, 0x5740)]   # slcan firmware / gene
 TRACE_MAX = 100_000      # rows kept in the Trace view
 RAW_MAX = 300_000        # frames kept in memory (Trace is rebuilt from these on filter change)
 HL_TIME = 2.0            # s, a changed byte stays highlighted in the Monitor
-LINE_COLORS = ["#f0b03e", "#79c0ff", "#4fd18b"]
-DEFAULT_LINES = [  # name = unit on that line
-    {"name": "BOS", "iface": "slcan", "channel": "", "bitrate": 500_000, "listen": False, "enabled": True},
-    {"name": "AFAR", "iface": "ixxat", "channel": "0", "bitrate": 500_000, "listen": False, "enabled": True},
-    {"name": "UPNG", "iface": "ixxat", "channel": "1", "bitrate": 500_000, "listen": False, "enabled": True},
+LINE_COLORS = ["#f0b03e", "#d29922", "#79c0ff", "#388bfd", "#4fd18b", "#2ea043"]
+UNITS = ("BOS", "AFAR", "UPNG")
+# every unit has two CAN lines (CAN1 / CAN2); each line = its own adapter / channel. CAN2 lines start disabled:
+# tick them and choose their adapter on the CAN tab.
+DEFAULT_LINES = [  # name = "<unit> CAN<n>"
+    {"name": "BOS CAN1", "iface": "slcan", "channel": "", "bitrate": 500_000, "listen": False, "enabled": True},
+    {"name": "BOS CAN2", "iface": "slcan", "channel": "", "bitrate": 500_000, "listen": False, "enabled": False},
+    {"name": "AFAR CAN1", "iface": "ixxat", "channel": "0", "bitrate": 500_000, "listen": False, "enabled": True},
+    {"name": "AFAR CAN2", "iface": "ixxat", "channel": "", "bitrate": 500_000, "listen": False, "enabled": False},
+    {"name": "UPNG CAN1", "iface": "ixxat", "channel": "1", "bitrate": 500_000, "listen": False, "enabled": True},
+    {"name": "UPNG CAN2", "iface": "ixxat", "channel": "", "bitrate": 500_000, "listen": False, "enabled": False},
 ]
+
+
+def line_unit(name: str) -> str:
+    """'BOS CAN2' -> 'BOS' (unit of a line name; also old single-line names 'BOS')."""
+    return (name or "").split()[0].upper() if name else ""
+
+
+def resolve_line(name: str, names) -> str:
+    """Line to use for `name`: itself, or '<unit> CAN1' for an old unit-only name ('BOS' -> 'BOS CAN1')."""
+    if name in names:
+        return name
+    alt = f"{name} CAN1"
+    return alt if alt in names else name
 APP_ID = "CANable Analyzer"
 ICON_FILE = "lupa.ico"
 
@@ -1220,8 +1241,18 @@ class SnifferWindow(QtWidgets.QMainWindow):
         try:
             with open(self.lines_file, encoding="utf-8") as fh:
                 saved = json.load(fh)
-            for d, sv in zip(lines, saved):
-                d.update({k: sv[k] for k in d if k in sv})
+            by_name = {d["name"]: d for d in lines}
+            old = len(saved) <= 3 and all(" " not in str(sv.get("name", "")) for sv in saved)
+            for k, sv in enumerate(saved):
+                name = str(sv.get("name", ""))
+                if old:                                # three-line file (one line per unit): -> CAN1 lines
+                    name = f"{name.upper()} CAN1" if name.upper() in UNITS else \
+                        ("BOS CAN1", "AFAR CAN1", "UPNG CAN1")[k] if k < 3 else name
+                d = by_name.get(name) if old else (lines[k] if k < len(lines) else None)
+                if d is not None:
+                    d.update({key: sv[key] for key in d if key in sv and key != "name"})
+                    if not old:
+                        d["name"] = sv.get("name", d["name"])
         except (OSError, ValueError, TypeError):
             pass
         return lines
@@ -1249,7 +1280,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
             use.setChecked(ln["enabled"])
             use.setToolTip("Connect this line with 'Connect'")
             name = QtWidgets.QLineEdit(ln["name"])
-            name.setMaximumWidth(80)
+            name.setMinimumWidth(112)
+            name.setMaximumWidth(130)
             name.setStyleSheet(f"color:{LINE_COLORS[i % len(LINE_COLORS)]};font-weight:700;")
             iface = QtWidgets.QComboBox()
             iface.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -1359,8 +1391,8 @@ class SnifferWindow(QtWidgets.QMainWindow):
         for i, ui in enumerate(self.line_ui):
             ui["use"].setChecked(True)
             self._set_iface(i, "demo")
-            name = self._line_name(i).upper()
-            ui["port"].setEditText(name if name in ("BOS", "AFAR", "UPNG") else "all")
+            unit = line_unit(self._line_name(i))
+            ui["port"].setEditText(unit if unit in UNITS else "all")
 
     def refresh_ports(self, i=0):
         ui = self.line_ui[i]
@@ -1651,7 +1683,7 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
     def send_frame(self, f: Frame) -> bool:
         """Sends on f.bus (a library command tied to a line) or on the Transmit panel's line."""
-        line = f.bus or self.tx_line.currentText()
+        line = resolve_line(f.bus, self.line_names()) if f.bus else self.tx_line.currentText()
         w = self.workers.get(line)
         if w is None or w.backend is None:
             self.logmsg(f"line '{line}' is not connected", "warn")

@@ -3,7 +3,7 @@
 Automated test station for the **BOS** modulator unit (BPSK / OQPSK; MPF300T FPGA, DAC38J82, LMX2594,
 ADMV1013, ADRF5730, CHA3397): R&S FSW signal analyzer, BOS CAN control and telemetry, automatic
 fault diagnosis with reports, plus R&S HMP4040 / Keysight N6701C power supplies, Suin TFG6806
-generator, three CAN lines (CANable + IXXAT), test sequences and CSV logging.
+generator, six CAN lines (two per unit: BOS / AFAR / UPNG CAN1 + CAN2), test sequences and CSV logging.
 
 ---
 
@@ -37,7 +37,7 @@ python fsw_vsa_monitor.py --ip 192.168.0.10 --protocol socket
 ```
 
 ### Can I try the program without instruments?
-Yes: `--demo`. FSW, TFG6806, HMP4040, N6701C, three CAN lines (BOS / AFAR / UPNG) and a complete
+Yes: `--demo`. FSW, TFG6806, HMP4040, N6701C, six CAN lines (BOS / AFAR / UPNG, CAN1 + CAN2) and a complete
 BOS unit with injectable faults (BOS Test Station → *Simulator*) are simulated. Demo mode never overwrites your saved CAN line settings.
 
 ### How do I build an EXE?
@@ -412,10 +412,23 @@ Yes: Main tab → *+ BOS test*. The step waits for the verdict and can stop the 
 
 ## 7. CAN and telemetry
 
-### How are the three lines set up?
-CAN tab → *CAN lines*: one row per line (default **BOS** = CANable, **AFAR** = IXXAT CAN1,
-**UPNG** = IXXAT CAN2) with interface, channel/port, bitrate. *Connect* opens all ticked lines;
-each runs in its own thread, so all are captured at the same time.
+### How are the CAN lines set up? (two per unit)
+Every unit - BOS, AFAR, UPNG - has **two CAN lines, CAN1 and CAN2**, so the CAN tab → *CAN lines* has six rows:
+**BOS CAN1 / BOS CAN2 / AFAR CAN1 / AFAR CAN2 / UPNG CAN1 / UPNG CAN2**, each with its own adapter / channel,
+bitrate, listen-only. Defaults: BOS CAN1 = CANable, AFAR CAN1 = IXXAT channel 0, UPNG CAN1 = IXXAT channel 1 (as
+before); the **CAN2 lines start unticked** - choose their adapter (second CANable, a second IXXAT, ...) and tick
+them. *Connect* opens all ticked lines, each in its own thread, so all are captured at the same time; Trace /
+Monitor show the line of every frame. An older setup (one line per unit) is taken over as the CAN1 lines, and a
+command or setting that names only a unit ("BOS") goes to that unit's CAN1 line. Telemetry arrays are collected
+per line: with both buses enabled the BOS sends its periodic arrays alternately on CAN1 and CAN2.
+
+### How does the station use the two BOS lines?
+Protocol control, first after the power-up (*CAN1 / CAN2 lines*, Unit control: *CAN line 1 / 2*): via **CAN1**
+NOP with acknowledgement (КВ+ must come back on CAN1 with the "via CAN1" bit) and REQ_TM ИОК_ОСН (the array must
+arrive on CAN1 within 3 s), then the same via **CAN2**. The BOS receives on both buses and answers on the bus the
+request came from (ПИЛВ 4.2.3.6). After that the whole plan uses **CAN1 only**. Optional: *Then SET_CAN* sends
+SET_CAN = 01 so the BOS also transmits only on CAN1 (standby only, not saved - power cycle or SET_CAN = 11 restores
+both).
 
 ### Can the IXXAT read both channels at once?
 Yes — CAN1 and CAN2 are separate controllers; each line has its own reader. A single-channel

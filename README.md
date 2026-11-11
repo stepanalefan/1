@@ -9,7 +9,7 @@ REF 10 MHz ─► clock PLLs ─► FPGA MPF300T ══JESD204B══► DAC38J8
                     └───────────────► LMX2594 (LO) ─────────┘
 ```
 
-Also on board: R&S HMP4040 and Keysight N6701C supplies, Suin TFG6806 generator, three CAN lines with
+Also on board: R&S HMP4040 and Keysight N6701C supplies, Suin TFG6806 generator, two CAN lines per unit (six lines) with
 telemetry decoding, test sequences, daily CSV logs.
 
 ```
@@ -47,6 +47,7 @@ verdict, the findings and the report.
 
 | Test | Measurement | Typical faults found |
 |---|---|---|
+| CAN1 / CAN2 lines | (protocol control, added automatically after power-up) NOP + КВ and REQ_TM ИОК_ОСН via CAN1, then via CAN2, answers on the same line; then CAN1 only | dead CAN line / transceiver, wrong line wiring |
 | Reference & BOS power-up | (added automatically, first) TFG6806 external reference and the standard BOS 10 MHz (sine, 2 Vpp, 2 V offset), output on → BOS power on → PulsNumb_10MHz pulses present; before every mode command PulsNumb_10MHz = 10 000 000 ± 5 and \|Err_Ref_LO\| ≤ 3 | TFG not on its reference, 10 MHz missing / off frequency, BOS not settled on the reference |
 | Control link & BOS setup | (protocol control, added automatically) NOP and MODE_D acknowledged, SET_Time_SNR, ИОК periods, ИОК_КОНФИГ read back and CRC-checked | no CAN link, КВ- (sender not allowed), corrupt / unexpected stored configuration |
 | Pre-check | BOS telemetry: PLLs (LMK, DAC clock, LMX2594, FPGA JESD, FPGA), JESD link, rails, temperatures, 10 MHz, Err_Ref_LO | unlocked PLL, JESD error, bad rail, overheating, missing reference |
@@ -87,7 +88,7 @@ diagram, all measurements, corrections, telemetry and plots.
 | **TFG6806** | Suin TFG6806, both channels with waveform display; LAN or USB |
 | **HMP4040** | R&S HMP4040 (USB or LAN): 4 channels, master output, power cycling, plot, daily `hmp_log` |
 | **N6701C** | Keysight N6701C (LAN / USB / GPIB): per output V, I, OVP, OCP, on/off, plot, daily `n6700_log` |
-| **CAN** | Three CAN lines (BOS = CANable, AFAR = IXXAT CAN1, UPNG = IXXAT CAN2): trace, monitor, transmit, command library, scripts, record / open candump logs |
+| **CAN** | Two CAN lines per unit: BOS / AFAR / UPNG × CAN1 / CAN2 (defaults BOS CAN1 = CANable, AFAR CAN1 = IXXAT ch 0, UPNG CAN1 = IXXAT ch 1; CAN2 lines: choose the adapter): trace, monitor, transmit, command library, scripts, record / open candump logs |
 | **Telemetry** | Decoded arrays of BOS, UPNG and AFAR with the meaning of every field |
 | **Logs** | Any CSV logs of the program on one time plot |
 | **Help** | FAQ / Readme / About |

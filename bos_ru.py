@@ -378,6 +378,17 @@ TFG6806 CH{} offset|Смещение TFG6806 CH{}
 TFG6806 internal 10 MHz on the rear port (UTILity:INSide:CLOck?)|Внутренние 10 МГц TFG6806 на заднем разъёме (UTILity:INSide:CLOck?)
 setting only: the TFG has no query for 'external clock present'; without a qualified clock it runs on its internal one (status bar 'Ext Ref On')|только настройка: у TFG нет запроса «внешняя опора есть»; без годного сигнала он работает от внутренней (строка состояния «Ext Ref On»)
 BOS power on|Питание БОС включено
+CAN{} ({}): command + КВ|CAN{} ({}): команда + КВ
+CAN{} ({}): telemetry (REQ_TM ИОК_ОСН)|CAN{} ({}): телеметрия (REQ_TM ИОК_ОСН)
+КВ+ on {}, via CAN{}|КВ+ по {}, через CAN{}
+КВ+ on this line|КВ+ по этой линии
+ИОК_ОСН on {}|ИОК_ОСН по {}
+not received within 3 s|не получен за 3 с
+acknowledgement on another line / wrong 'via CAN' bit|квитанция по другой линии / неверный признак «через CAN»
+SET_CAN (transmission via CAN1 only)|SET_CAN (передача только по CAN1)
+Further commands|Дальнейшие команды
+via CAN1 only ({})|только через CAN1 ({})
+no КВ|нет КВ
 {}: {} V, limit {} A|{}: {} В, ограничение {} А
 10 MHz pulses present (PulsNumb_10MHz)|Импульсы 10 МГц есть (PulsNumb_10MHz)
 10 MHz pulses (PulsNumb_10MHz)|Импульсы 10 МГц (PulsNumb_10MHz)

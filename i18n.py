@@ -226,6 +226,11 @@ Key sound|Son des touches|Tastenton|Suono dei tasti|キー音|Звук клав�
 Subnet mask|Masque de sous-réseau|Subnetzmaske|Maschera di sottorete|サブネットマスク|Маска подсети
 Gateway|Passerelle|Gateway|Gateway|ゲートウェイ|Шлюз
 Channel|Canal|Kanal|Canale|チャンネル|Канал
+CAN1 / CAN2 lines|Lignes CAN1 / CAN2|CAN1- / CAN2-Leitungen|Linee CAN1 / CAN2|CAN1 / CAN2回線|Линии CAN1 / CAN2
+CAN line 1|Ligne CAN 1|CAN-Leitung 1|Linea CAN 1|CAN回線1|Линия CAN 1
+CAN line 2|Ligne CAN 2|CAN-Leitung 2|Linea CAN 2|CAN回線2|Линия CAN 2
+Check CAN1, then CAN2 at the start (NOP + REQ_TM)|Vérifier CAN1 puis CAN2 au début (NOP + REQ_TM)|Zu Beginn CAN1, dann CAN2 prüfen (NOP + REQ_TM)|All'inizio verifica CAN1, poi CAN2 (NOP + REQ_TM)|開始時にCAN1、次にCAN2を確認 (NOP + REQ_TM)|В начале проверить CAN1, затем CAN2 (NOP + REQ_TM)
+Then SET_CAN: BOS transmits via CAN1 only|Puis SET_CAN : le BOS émet seulement sur CAN1|Dann SET_CAN: BOS sendet nur über CAN1|Poi SET_CAN: il BOS trasmette solo su CAN1|次にSET_CAN: BOSはCAN1のみで送信|Затем SET_CAN: БОС передаёт только по CAN1
 Reference & BOS power-up|Référence et mise sous tension BOS|Referenz & BOS-Einschalten|Riferimento e accensione BOS|基準信号とBOS電源投入|Опора и включение БОС
 10 MHz reference (TFG6806) and BOS power-up|Référence 10 MHz (TFG6806) et mise sous tension BOS|10-MHz-Referenz (TFG6806) und BOS-Einschalten|Riferimento 10 MHz (TFG6806) e accensione BOS|10 MHz基準 (TFG6806) とBOS電源投入|Опора 10 МГц (TFG6806) и включение БОС
 Set up the TFG6806 before the plan|Configurer le TFG6806 avant le plan|TFG6806 vor dem Plan einstellen|Configura il TFG6806 prima del piano|プラン前にTFG6806を設定|Настроить TFG6806 перед планом
