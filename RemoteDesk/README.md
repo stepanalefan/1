@@ -50,6 +50,31 @@ on without resetting Windows).
 contain 16–256 px sizes. They are used for the .exe files, windows, taskbar and tray.
 To change them, edit and run `python make_icons.py`, or replace the .ico files with your own.
 
+## Linux: Raspberry Pi 5 and Ubuntu 24.04 / 26.04
+Both installers are in `linux/` and work on Raspberry Pi 5 (arm64) and x86-64 PCs.
+
+**Server** (runs in the background, starts at boot, no screen needed):
+```
+cd RemoteDesk/linux
+sudo ./install_server.sh                 # port 7070; --port N for another, --uninstall to remove
+sudo remotedesk-admin list               # desks: ID, computer name, online, IP, last seen
+sudo remotedesk-admin set-id OLD NEW     # change a desk's ID (an online desk is told at once)
+sudo remotedesk-admin delete ID          # forget a desk
+sudo remotedesk-admin sessions           # active connections
+journalctl -u remotedesk-server -f       # live log
+```
+Desk IDs are kept in `/var/lib/remotedesk/desks.json`. Run the installer again to update.
+For connections from the internet, forward TCP port 7070 on your router to the Pi.
+
+**Client** (app menu entry "RemoteDesk", command `remotedesk`):
+```
+cd RemoteDesk/linux
+./install_client.sh                      # as your normal user; --server also adds the server window app
+```
+Controlling other computers works everywhere. Being controlled needs an X11 desktop:
+Ubuntu 24.04 → choose **"Ubuntu on Xorg"** on the login screen (gear icon). Ubuntu 25.10 / 26.04
+use Wayland only, so other computers cannot connect to them (the app says so).
+
 ## Without a server: Tailscale
 [Tailscale](https://tailscale.com/download) (free for personal use) connects your devices
 through NAT and firewalls with an encrypted tunnel, so no RemoteDesk Server is needed.

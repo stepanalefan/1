@@ -68,7 +68,10 @@ class VideoEncoder:
         f = self._av.VideoFrame.from_image(img).reformat(format="yuv420p")
         f.pts = int((time.time() - self._t0) * 1000)
         if keyframe:
-            f.pict_type = self._av.video.frame.PictureType.I
+            try:
+                f.pict_type = self._av.video.frame.PictureType.I      # PyAV 12+
+            except AttributeError:
+                f.pict_type = "I"                                      # older PyAV (e.g. Ubuntu 24.04)
         return [(bool(p.is_keyframe), bytes(p)) for p in self.ctx.encode(f)]
 
     def close(self):

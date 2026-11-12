@@ -193,6 +193,74 @@ class Relay:
         self.registry.delete(desk_id)
         self.on_log(f"Desk {desk_id} removed")
 
+    # ------------------------------------------------------- admin socket
+    def serve_admin(self, path):
+        """Local admin interface (Unix socket, Linux): one JSON request per line.
+        Used by `python -m remote_desk.admin` on a headless server."""
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        os.chmod(path, 0o660)           # owner + group (e.g. the 'remotedesk' group) only
+        srv.listen(4)
+        self.on_log(f"Admin socket: {path}")
+
+        def loop():
+            while self.running:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    break
+                threading.Thread(target=self._admin_conn, args=(conn,), daemon=True).start()
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _admin_conn(self, conn):
+        try:
+            conn.settimeout(10)
+            req = recv_line(conn)
+            send_line(conn, self.admin(req))
+        except Exception as e:
+            try:
+                send_line(conn, {"ok": False, "error": str(e)})
+            except OSError:
+                pass
+        finally:
+            conn.close()
+
+    def admin(self, req):
+        cmd = req.get("cmd")
+        hosts, sess = self.snapshot()
+        online = {i: (ip, since) for i, ip, since in hosts}
+        if cmd == "list":
+            desks = []
+            for d in sorted(self.registry.list(), key=lambda d: d["id"]):
+                on = online.get(d["id"])
+                desks.append({"id": d["id"], "name": d.get("name", ""), "online": bool(on),
+                              "ip": on[0] if on else d.get("ip", ""),
+                              "since": on[1] if on else None, "last_seen": d.get("last_seen")})
+            return {"ok": True, "desks": desks}
+        if cmd == "sessions":
+            return {"ok": True, "sessions": [{"sid": sid, "desk": hid, "viewer": vip, "since": since,
+                                              "bytes": n} for sid, hid, vip, since, n in sess]}
+        if cmd == "set-id":
+            old, new = str(req.get("old", "")).replace(" ", ""), str(req.get("new", "")).replace(" ", "")
+            if old not in self.registry.desks:
+                return {"ok": False, "error": f"no desk with ID {old}"}
+            self.change_id(old, new)
+            return {"ok": True}
+        if cmd == "delete":
+            i = str(req.get("id", "")).replace(" ", "")
+            if i not in self.registry.desks:
+                return {"ok": False, "error": f"no desk with ID {i}"}
+            self.delete_desk(i)
+            return {"ok": True}
+        if cmd == "disconnect":
+            self.disconnect_session(str(req.get("sid", "")))
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown command {cmd!r}"}
+
     def snapshot(self):
         with self.lock:
             hosts = [(i, h["ip"], h["since"]) for i, h in self.hosts.items()]
@@ -345,13 +413,23 @@ def main():
     ap.add_argument("--bind", default="", help="address to listen on (default: all IPv4 and IPv6)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("RD_RELAY_PORT", 7070)))
     ap.add_argument("--desks", default=REGISTRY_FILE, help="file that stores desk IDs")
+    ap.add_argument("--admin-socket", help="Unix socket for remotedesk-admin (Linux), "
+                                           "e.g. /run/remotedesk/admin.sock")
     ap.add_argument("--no-name-match", action="store_true",
                     help="do not recognise desks by computer name when their key is unknown")
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.v else logging.INFO,
                         format="%(asctime)s %(message)s")
-    Relay(a.bind, a.port, registry=Registry(a.desks, not a.no_name_match)).serve_forever()
+    relay = Relay(a.bind, a.port, registry=Registry(a.desks, not a.no_name_match))
+    relay.start()
+    if a.admin_socket:
+        relay.serve_admin(a.admin_socket)
+    try:
+        while relay.running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        relay.stop()
 
 
 if __name__ == "__main__":

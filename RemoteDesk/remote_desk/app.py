@@ -43,6 +43,13 @@ def parse_hp(s, default_port):
         return None
 
 
+def wayland_session():
+    """True on a Linux Wayland desktop, where this app cannot capture the screen
+    or move the mouse (that needs X11, e.g. "Ubuntu on Xorg" at the login screen)."""
+    return sys.platform.startswith("linux") and (
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY")))
+
+
 def fmt_id(i):
     i = i.replace(" ", "")
     return f"{i[:3]} {i[3:6]} {i[6:]}" if i.isdigit() and len(i) == 9 else i
@@ -391,6 +398,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_lan()
 
     def _show_lan(self):
+        if getattr(self, "share_disabled", False):
+            return                                   # keeps the Wayland explanation
         ips = local_addresses()
         if ips and self.cfg.get("port"):
             self.lan_lbl.setText("On the local network you can also connect to: "
@@ -434,7 +443,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_tailscale(self, st):
         self._ts = st
         port = self.cfg.get("port") or 0
-        if not self.relay and not st.running:
+        if not self.relay and not st.running and not self.share_disabled:
             self.id_lbl.setText("No server set")
         self.ts_copy.setVisible(st.running)
         if not st.installed:
@@ -452,7 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ts_info.setText(f"Tailscale is {what}.")
         else:
             name = st.dns or st.name
-            if not self.relay:          # no server: the Tailscale address is the desk's address
+            if not self.relay and not self.share_disabled:   # no server: Tailscale address = desk address
                 self.id_lbl.setText(format_hostport(st.ip, port) if port and port != 7071 else st.ip)
             self.ts_lbl.setText(f"{theme.dot(theme.OK)} <b>{format_hostport(st.ip, port) if port else st.ip}</b>"
                                 + (f"<br><span style='color:#6b7178'>{name}</span>" if name else ""))
@@ -528,6 +537,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_host(self):
         relay = parse_hp(self.cfg.get("relay"), 7070)
         self.relay = relay
+        self.share_disabled = wayland_session()
+        if self.share_disabled:
+            # this PC can still control others; it just cannot be shared
+            self.host = Host(self.pw.text(), self._host_event, direct_port=0, relay=None)
+            self.id_lbl.setText("Not shared")
+            self.lan_lbl.setText(
+                "Others can't connect to this computer: on a Wayland desktop RemoteDesk cannot "
+                "capture the screen. You can still connect to other computers. Ubuntu 24.04: "
+                "choose \"Ubuntu on Xorg\" at login to share it.")
+            self._set_online(False, "Sharing this computer is not available on Wayland")
+            return
         self.host = Host(self.pw.text(), self._host_event, direct_port=self.cfg["port"],
                          relay=relay, host_id=self.cfg.get("id"),
                          machine_key=self.cfg["machine_key"],
@@ -680,8 +700,13 @@ class MainWindow(QtWidgets.QMainWindow):
         relay = parse_hp(new["relay"], 7070)
         if relay != self.relay:
             self.relay = relay
-            self.host.set_relay(relay)
-            if relay:
+            if self.share_disabled:
+                pass
+            else:
+                self.host.set_relay(relay)
+            if self.share_disabled:
+                pass
+            elif relay:
                 self._set_online(False, f"Connecting to server {format_hostport(*relay)}…")
                 self.id_lbl.setText(fmt_id(self.cfg["id"]) if self.cfg.get("id") else "…")
             else:
