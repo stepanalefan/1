@@ -43,7 +43,9 @@ echo "==> Installing system packages (sudo)"
 # PyQt5 has no pip builds for arm64, so the GUI toolkit (and the other binary
 # packages) come from Ubuntu; pip only adds what Ubuntu lacks or ships too old.
 PKGS="python3 python3-venv python3-pip python3-pyqt5 python3-cryptography python3-numpy python3-pil \
-python3-cffi python3-xlib libpulse0"
+python3-cffi python3-xlib libpulse0 \
+python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-pipewire"
+# (the last line: sharing this computer on a Wayland desktop through the desktop portal)
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null
 # optional system packages (newer Ubuntu has them; pip covers the rest)
@@ -121,7 +123,8 @@ echo "==> Checking"
 # imported, which fails in a terminal without a desktop although they are installed fine
 import importlib.util
 for mod, what in [("PyQt5.QtWidgets", "window"), ("cryptography", "encryption"), ("mss", "screen capture"),
-                  ("pynput", "mouse/keyboard control"), ("av", "video stream + sound"), ("soundcard", "sound")]:
+                  ("pynput", "mouse/keyboard control"), ("av", "video stream + sound"), ("soundcard", "sound"),
+                  ("gi", "Wayland screen sharing")]:
     try:
         ok = importlib.util.find_spec(mod) is not None
     except Exception:
@@ -134,8 +137,9 @@ echo "RemoteDesk is installed: open it from the app menu, or run: remotedesk"
 case "${XDG_SESSION_TYPE:-}" in
     wayland)
         echo
-        echo "Note: this desktop uses Wayland. You can control other computers from here, but"
-        echo "others cannot control this one. On Ubuntu 24.04 choose \"Ubuntu on Xorg\" on the login"
-        echo "screen (gear icon) to share this computer; Ubuntu 25.10+ has no Xorg session." ;;
+        echo "This desktop uses Wayland: sharing this computer goes through the desktop's"
+        echo "screen-sharing permission. The first time someone connects, a dialog asks here;"
+        echo "to allow it in advance (e.g. for a Pi nobody sits at), open RemoteDesk and click"
+        echo "\"Allow sharing...\" under This Desk." ;;
 esac
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "(Log out and in again so the 'remotedesk' command is found.)" ;; esac

@@ -71,9 +71,20 @@ For connections from the internet, forward TCP port 7070 on your router to the P
 cd RemoteDesk/linux
 ./install_client.sh                      # as your normal user; --server also adds the server window app
 ```
-Controlling other computers works everywhere. Being controlled needs an X11 desktop:
-Ubuntu 24.04 → choose **"Ubuntu on Xorg"** on the login screen (gear icon). Ubuntu 25.10 / 26.04
-use Wayland only, so other computers cannot connect to them (the app says so).
+Controlling other computers works everywhere. Being controlled:
+
+| Desktop | Screen | Mouse + keyboard |
+|---|---|---|
+| X11 (Xorg; e.g. "Ubuntu on Xorg" on 24.04, XFCE, MATE, LXQt) | ✅ | ✅ |
+| Wayland with GNOME (Ubuntu 24.04 / 26.04 default) or KDE Plasma | ✅ via the desktop portal | ✅ via the portal |
+| Wayland with wlroots (Sway, labwc, Wayfire) | ✅ via the portal | ❌ view only |
+
+On Wayland the desktop asks once for permission ("Allow remote interaction"); RemoteDesk keeps the
+answer. For a Pi nobody sits at, open RemoteDesk once and click **Allow sharing…** under *This Desk*.
+
+**Server window** (menu entry "RemoteDesk Server", installed by `install_server.sh` when the Pi boots
+into a desktop, or with `--gui`): shows and edits desks, sessions and the log of the running service,
+and starts / stops / restarts it (asks for your password).
 
 ## Without a server: Tailscale
 [Tailscale](https://tailscale.com/download) (free for personal use) connects your devices

@@ -9,6 +9,7 @@ import hashlib, io, json, logging, os, socket, struct, sys, threading, time
 from . import protocol as P
 from .media import AudioCapture, VideoEncoder
 from .netutil import clean_ip, connect, format_hostport, listen
+from . import wayland
 
 log = logging.getLogger("host")
 TILE = 64
@@ -152,18 +153,26 @@ class CaptureHub:
         self.monitors = []          # [{"w", "h"}]
         self.default_monitor = 0
         self.ready = threading.Event()
+        self.error = None
+        self.geoms = {}
         self.running = True
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
         try:
-            cap = ScreenCapture()       # mss objects must stay in the thread that made them
+            cap = self.host.make_capture()   # mss objects must stay in the thread that made them
             self.monitors = cap.monitors
             self.default_monitor = max(0, cap.monitor - 1)
+            for i in range(len(self.monitors)):      # geometry of every monitor, for input
+                cap.set_monitor(i)
+                self.geoms[i] = dict(cap.geometry)
+            cap.set_monitor(self.default_monitor)
         except Exception as e:
             log.error("screen capture unavailable: %s", e)
+            self.error = str(e)
             self.running = False
             self.ready.set()
+            self.host.release_capture()
             return
         self.ready.set()
         while self.running:
@@ -186,10 +195,14 @@ class CaptureHub:
                     self.frames[m] = frame
                     self.cond.notify_all()
             time.sleep(max(0.0, 1 / fps - (time.time() - t0)))
+        try:
+            getattr(cap, "close", lambda: None)()
+        finally:
+            self.host.release_capture()
 
     def geometry(self, monitor):
         f = self.frames.get(monitor)
-        return f.geometry if f else None
+        return f.geometry if f else self.geoms.get(monitor)
 
     def stop(self):
         self.running = False
@@ -402,6 +415,7 @@ class Host:
         self._vlock = threading.RLock()
         self._injector = None
         self._audio = None                 # AudioCapture while someone listens
+        self._portal = None                # Wayland portal session while sharing
         self._audio_error = None
         self._fails = {}
         self._gen = 0
@@ -522,7 +536,13 @@ class Host:
             if self.hub is None or not self.hub.running:
                 self.hub = CaptureHub(self)
             hub = self.hub
-        hub.ready.wait(10)
+        hub.ready.wait(200)                    # Wayland: the person here may first have to allow it
+        if not hub.running:
+            msg = f"This computer cannot share its screen: {hub.error or 'capture failed'}"
+            v.send(P.CHAT, {"from": self.name, "text": msg, "ts": time.time()})
+            v.chan.close()
+            self.ev("status", msg)
+            return
         v.monitor = hub.default_monitor
         with self._vlock:
             self.viewers.append(v)
@@ -548,7 +568,8 @@ class Host:
         """The first viewer that may control gets control; everyone else views."""
         with self._vlock:
             viewers = list(self.viewers)
-            controller = next((v for v in viewers if v.may_control and not self.view_only), None)
+            controller = next((v for v in viewers if v.may_control and not self.view_only
+                               and self.input_possible()), None)
             for v in viewers:
                 v.control = v is controller
         names = [{"name": v.name, "control": v.control} for v in viewers]
@@ -563,8 +584,42 @@ class Host:
         with self._vlock:
             return next((v.name for v in self.viewers if v.control), None)
 
+    # ------------------------------------------- screen + input backends
+    def make_capture(self):
+        """X11 / Windows / macOS: mss. Wayland: the desktop portal (asks the user once)."""
+        if not wayland.wayland_session():
+            return ScreenCapture()
+        portal = self._portal
+        if portal is None:
+            # not under the viewer lock: the person here may take a while to answer the dialog
+            want_input = not self.view_only and wayland.probe().get("input", False)
+            portal = wayland.PortalSession(want_input=want_input).start()
+            with self._vlock:
+                self._portal = portal
+        return wayland.WaylandCapture(portal)
+
+    def release_capture(self):
+        with self._vlock:
+            p, self._portal = self._portal, None
+            self._injector = None
+        if p:
+            p.close()
+
+    def input_possible(self):
+        if wayland.wayland_session():
+            p = self._portal
+            return p is None or p.input           # unknown until the portal session exists
+        return True
+
     def injector(self):
         if self.view_only:
+            return None
+        if wayland.wayland_session():
+            p = self._portal
+            if p and p.input:
+                if not isinstance(self._injector, wayland.PortalInjector):
+                    self._injector = wayland.PortalInjector(p)
+                return self._injector
             return None
         if self._injector is None:
             try:

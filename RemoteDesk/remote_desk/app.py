@@ -7,6 +7,7 @@ import argparse, json, os, secrets, string, sys, threading, time
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import tailscale, theme
+from . import wayland
 from .host import Host
 from .netutil import format_hostport, local_addresses, parse_hostport
 from .viewer import ViewerWindow, open_channel
@@ -43,11 +44,7 @@ def parse_hp(s, default_port):
         return None
 
 
-def wayland_session():
-    """True on a Linux Wayland desktop, where this app cannot capture the screen
-    or move the mouse (that needs X11, e.g. "Ubuntu on Xorg" at the login screen)."""
-    return sys.platform.startswith("linux") and (
-        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY")))
+wayland_session = wayland.wayland_session
 
 
 def fmt_id(i):
@@ -348,6 +345,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ts_copy.hide()
         row.addWidget(self.ts_copy)
         l.addLayout(row)
+        # Wayland: permission given through the desktop's screen-sharing dialog
+        self.wl_box = QtWidgets.QWidget()
+        wl = QtWidgets.QVBoxLayout(self.wl_box)
+        wl.setContentsMargins(0, 6, 0, 0)
+        wl.addWidget(theme.label("Screen sharing (Wayland)", "Muted"))
+        wrow = QtWidgets.QHBoxLayout()
+        self.wl_lbl = theme.label("")
+        self.wl_lbl.setWordWrap(True)
+        wrow.addWidget(self.wl_lbl, 1)
+        self.wl_btn = QtWidgets.QPushButton("Allow sharing…", objectName="Icon")
+        self.wl_btn.clicked.connect(self._wayland_setup)
+        wrow.addWidget(self.wl_btn)
+        wl.addLayout(wrow)
+        self.wl_box.hide()
+        l.addWidget(self.wl_box)
         l.addStretch()
         body.addWidget(c, 2)
 
@@ -537,17 +549,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_host(self):
         relay = parse_hp(self.cfg.get("relay"), 7070)
         self.relay = relay
-        self.share_disabled = wayland_session()
+        self.wayland = wayland_session()
+        self.portal = wayland.probe() if self.wayland else None
+        self.share_disabled = self.wayland and not self.portal["screen"]
         if self.share_disabled:
             # this PC can still control others; it just cannot be shared
             self.host = Host(self.pw.text(), self._host_event, direct_port=0, relay=None)
             self.id_lbl.setText("Not shared")
             self.lan_lbl.setText(
-                "Others can't connect to this computer: on a Wayland desktop RemoteDesk cannot "
-                "capture the screen. You can still connect to other computers. Ubuntu 24.04: "
-                "choose \"Ubuntu on Xorg\" at login to share it.")
-            self._set_online(False, "Sharing this computer is not available on Wayland")
+                "Others can't connect to this computer: this Wayland desktop offers no screen "
+                f"sharing ({self.portal['error']}). You can still connect to other computers.")
+            self._set_online(False, "Sharing this computer is not available here")
             return
+        if self.wayland:
+            self.wl_box.show()
+            self._update_wayland_status()
         self.host = Host(self.pw.text(), self._host_event, direct_port=self.cfg["port"],
                          relay=relay, host_id=self.cfg.get("id"),
                          machine_key=self.cfg["machine_key"],
@@ -561,6 +577,37 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_online(False, "No server configured — connect via Tailscale or on the local "
                                     "network, or add a server in Settings.")
         self.host.start()
+
+    def _update_wayland_status(self):
+        allowed = os.path.exists(wayland.TOKEN_FILE)
+        mode = "screen, mouse and keyboard" if self.portal["input"] else "screen only (view only — " \
+            "this desktop does not allow remote input)"
+        if allowed:
+            self.wl_lbl.setText(f"{theme.dot(theme.OK)} Allowed: {mode}")
+            self.wl_btn.setText("Ask again…")
+        else:
+            self.wl_lbl.setText(f"{theme.dot('#E0A100')} Not allowed yet — the desktop asks when someone "
+                                f"first connects. Allow it now if nobody will be here then.")
+            self.wl_btn.setText("Allow sharing…")
+
+    def _wayland_setup(self):
+        """Shows the desktop's sharing dialog now and remembers the answer."""
+        self.wl_btn.setEnabled(False)
+        self.wl_lbl.setText("Answer the dialog on this screen: choose the screen(s) and allow remote control.")
+        if self.wl_btn.text().startswith("Ask"):
+            try:
+                os.remove(wayland.TOKEN_FILE)
+            except OSError:
+                pass
+
+        def work():
+            try:
+                s = wayland.PortalSession(want_input=self.portal["input"]).start()
+                s.close()
+                self.host_sig.emit("wayland", None)
+            except Exception as e:
+                self.host_sig.emit("wayland", str(e))
+        threading.Thread(target=work, daemon=True).start()
 
     def _set_online(self, on, text):
         self.status_dot.setText(f"{theme.dot(theme.OK if on else theme.BAD)} {text}")
@@ -583,6 +630,11 @@ class MainWindow(QtWidgets.QMainWindow):
         elif name == "online":
             if arg:
                 self._set_online(True, "Ready to connect (secure connection)")
+        elif name == "wayland":
+            self.wl_btn.setEnabled(True)
+            self._update_wayland_status()
+            if arg:
+                QtWidgets.QMessageBox.warning(self, "Screen sharing", f"Not allowed: {arg}")
         elif name == "status":
             if "unreachable" in arg:
                 self._set_online(False, arg)
