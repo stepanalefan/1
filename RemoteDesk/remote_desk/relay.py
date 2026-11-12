@@ -39,6 +39,8 @@ class Registry:
             for d in data.get("desks", []):
                 if valid_id(d.get("id")):
                     self.desks[d["id"]] = d
+            if "match_by_name" in data:          # changed in the server window: wins
+                self.match_by_name = bool(data["match_by_name"])
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -46,7 +48,8 @@ class Registry:
 
     def save(self):
         with self.lock:
-            data = {"desks": sorted(self.desks.values(), key=lambda d: d["id"])}
+            data = {"match_by_name": self.match_by_name,
+                    "desks": sorted(self.desks.values(), key=lambda d: d["id"])}
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -123,11 +126,22 @@ class Relay:
     def __init__(self, host="", port=7070, on_log=None, registry=None):
         self.addr = (host, port)
         self.registry = registry or Registry()
+        self.started = time.time()
+        self.log_lines = []          # recent log for the admin interface: (seq, time, text)
+        self._log_seq = 0
         self.hosts = {}     # id -> {"sock", "ip", "since"}
         self.pending = {}   # token -> (viewer sock, time, host_id, viewer ip)
         self.sessions = {}  # sid -> {"host_id", "viewer", "since", "bytes", "socks"}
         self.lock = threading.Lock()
-        self.on_log = on_log or (lambda msg: log.info(msg))
+        sink = on_log or (lambda msg: log.info(msg))
+
+        def on_log_(msg):
+            with self.lock:
+                self._log_seq += 1
+                self.log_lines.append((self._log_seq, time.time(), msg))
+                del self.log_lines[:-500]
+            sink(msg)
+        self.on_log = on_log_
         self._srv = None
         self.running = False
         self.total_sessions = 0
@@ -248,13 +262,31 @@ class Relay:
             old, new = str(req.get("old", "")).replace(" ", ""), str(req.get("new", "")).replace(" ", "")
             if old not in self.registry.desks:
                 return {"ok": False, "error": f"no desk with ID {old}"}
-            self.change_id(old, new)
+            try:
+                self.change_id(old, new)
+            except (ValueError, KeyError) as e:
+                return {"ok": False, "error": str(e)}
             return {"ok": True}
         if cmd == "delete":
             i = str(req.get("id", "")).replace(" ", "")
             if i not in self.registry.desks:
                 return {"ok": False, "error": f"no desk with ID {i}"}
             self.delete_desk(i)
+            return {"ok": True}
+        if cmd == "log":
+            after = int(req.get("after", 0))
+            with self.lock:
+                lines = [{"seq": n, "time": t, "text": m} for n, t, m in self.log_lines if n > after]
+            return {"ok": True, "lines": lines}
+        if cmd == "stats":
+            return {"ok": True, "port": self.addr[1], "started": self.started, "pid": os.getpid(),
+                    "total_sessions": self.total_sessions, "match_by_name": self.registry.match_by_name,
+                    "desks": len(self.registry.desks), "online": len(hosts), "sessions": len(sess),
+                    "bytes": sum(x[4] for x in sess)}
+        if cmd == "set-option":
+            if "match_by_name" in req:
+                self.registry.match_by_name = bool(req["match_by_name"])
+                self.registry.save()
             return {"ok": True}
         if cmd == "disconnect":
             self.disconnect_session(str(req.get("sid", "")))
