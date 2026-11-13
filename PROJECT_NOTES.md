@@ -20,7 +20,7 @@ A PyQt5 desktop program (Windows, run from PyCharm or as a PyInstaller EXE) that
 (BPSK / OQPSK; Microsemi MPF300T FPGA → TI DAC38J82 (JESD204B) → ADI ADMV1013 I/Q upconverter with LO ×4
 from TI LMX2594 → ADI ADRF5730 step attenuator → UMS CHA3397 PA). It switches the unit over CAN, captures the
 output with an R&S FSW (raw I/Q), reads the BOS CAN telemetry and diagnoses faults down to the block.
-Also: HMP4040 / N6701C supplies, TFG6806 generator, six CAN lines (BOS / AFAR / UPNG × CAN1, CAN2), sequences, daily CSV logs.
+Also: HMP4040 / N6701C / IT6832 supplies, TFG6806 generator, six CAN lines (BOS / AFAR / UPNG × CAN1, CAN2), sequences, daily CSV logs.
 
 The user works in PyCharm on Windows, builds the EXE with `build_exe.bat`, and tests on the real bench.
 Everything here was developed in a Linux container without the hardware: features were verified
@@ -44,6 +44,7 @@ dashboard.py         Main tab: device status, supply panels, BOS summary, power 
                      constellation, telemetry watch (dashboard.json)
 bench_monitor.py     HMP4040 tab (BenchTab: HmpWorker, power cycling, hmp_log) + visa_manager(), open_link()
 n6700_supply.py      Keysight N6701C tab      tfg_generator.py   Suin TFG6806 tab (LAN + USB)
+it6800_supply.py     ITECH IT6832 tab (TTL serial via arduino/it6800_bridge, frame or SCPI)
 canable_analyzer.py  CAN tab (3 lines, workers per line) + can_commands.py (library, scripts)
 telemetry.py         Reassembler + field layouts of the unit arrays, Telemetry tab, array_listeners
 log_viewer.py        Logs tab        help_tab.py   Help tab (FAQ / Readme / About)

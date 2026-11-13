@@ -81,7 +81,7 @@ WD_DEFAULTS = {  # power watchdog configuration (dashboard.json "watchdog")
     "on": False, "always": False,
     "seq_error": True, "comm": True, "cc": True, "cc_s": 1.0, "prot": True,
     "imax_on": False, "imax": 5.0,
-    "off_hmp": True, "off_n67": True,
+    "off_hmp": True, "off_n67": True, "off_it68": True,
 }
 def parse_si(text: str) -> float:
     t = text.strip().replace(" ", "").replace(",", ".")
@@ -567,8 +567,11 @@ class WatchdogDialog(QtWidgets.QDialog):
         self.off_n67 = QtWidgets.QCheckBox("N6701C: all outputs OFF")
         self.off_hmp.setChecked(bool(c["off_hmp"]))
         self.off_n67.setChecked(bool(c["off_n67"]))
+        self.off_it68 = QtWidgets.QCheckBox("IT6832: output OFF")
+        self.off_it68.setChecked(bool(c.get("off_it68", True)))
         gv.addWidget(self.off_hmp)
         gv.addWidget(self.off_n67)
+        gv.addWidget(self.off_it68)
         gv.addWidget(QtWidgets.QLabel("A running sequence is always stopped. The event is written to the log "
                                       "and to watchdog_log_YYYY-MM-DD.csv."))
         v.addWidget(g)
@@ -580,7 +583,8 @@ class WatchdogDialog(QtWidgets.QDialog):
     def values(self, on: bool) -> dict:
         c = {k: cb.isChecked() for k, cb in self.cb.items()}
         c.update(on=on, always=self.always.isChecked(), cc_s=self.cc_s.value(), imax=self.imax.value(),
-                 off_hmp=self.off_hmp.isChecked(), off_n67=self.off_n67.isChecked())
+                 off_hmp=self.off_hmp.isChecked(), off_n67=self.off_n67.isChecked(),
+                 off_it68=self.off_it68.isChecked())
         return c
 
 
@@ -588,7 +592,7 @@ class WatchdogDialog(QtWidgets.QDialog):
 #  Dashboard                                                                   #
 # --------------------------------------------------------------------------- #
 class Dashboard(QtWidgets.QWidget):
-    DEVICES = ["FSW", "HMP4040", "N6701C", "TFG6806", "CAN", "BOS"]
+    DEVICES = ["FSW", "HMP4040", "N6701C", "IT6832", "TFG6806", "CAN", "BOS"]
 
     def __init__(self, host):
         super().__init__()
@@ -954,6 +958,11 @@ class Dashboard(QtWidgets.QWidget):
             self._set_status("N6701C", "ok" if n.ok else "off", n.status_lbl.text().lstrip("✓ "),
                              (" ".join(on) + " ON") if on else "")
             self._refresh_n67(n)
+        it = getattr(h, "it68", None)
+        if it:
+            r = it.last if it.ok else {}
+            act = (f"ON  {r['v']:.3f} V  {r['i']:.4f} A  {r['mode']}" if r.get("on") else "output off") if r else ""
+            self._set_status("IT6832", "ok" if it.ok else "off", it.status_lbl.text().lstrip("✓ "), act)
         tfg = getattr(h, "tfg", None)
         if tfg:
             on = [f"CH{ch}" for ch, v in tfg.out_on.items() if v] if tfg.is_connected else []
@@ -1023,7 +1032,7 @@ class Dashboard(QtWidgets.QWidget):
             parts.append(f"CC > {c['cc_s']:g} s")
         if c.get("imax_on"):
             parts.append(f"I > {c['imax']:g} A")
-        acts = [n for k, n in (("off_hmp", "HMP4040"), ("off_n67", "N6701C")) if c.get(k)]
+        acts = [n for k, n in (("off_hmp", "HMP4040"), ("off_n67", "N6701C"), ("off_it68", "IT6832")) if c.get(k)]
         return (", ".join(parts) or "no condition") + "  →  off: " + (", ".join(acts) or "nothing") + \
             ("  (always)" if c.get("always") else "  (during sequences)")
 
@@ -1065,6 +1074,9 @@ class Dashboard(QtWidgets.QWidget):
                 return self.wd_trigger("HMP4040 communication lost")
             if n and n.comm_error_t > self.wd_since:
                 return self.wd_trigger("N6701C communication lost")
+            it = getattr(h, "it68", None)
+            if it and it.comm_error_t > self.wd_since:
+                return self.wd_trigger("IT6832 communication lost")
         if c["prot"] and n and n.ok:
             for ch in n.channels:
                 if not n.tripped(ch):
@@ -1072,8 +1084,10 @@ class Dashboard(QtWidgets.QWidget):
                 elif ch not in self.wd_pre_trip:
                     return self.wd_trigger(f"N6701C OUT{ch} protection tripped ({n6700_mode(n, ch, True)})")
         if c["imax_on"]:
+            it = getattr(h, "it68", None)
             for name, meas in (("HMP4040", b.hmp_last_meas if b and b._hmp_ok else {}),
-                               ("N6701C", n.last_meas if n and n.ok else {})):
+                               ("N6701C", n.last_meas if n and n.ok else {}),
+                               ("IT6832", it.last_meas if it and it.ok else {})):
                 for ch, (_, i) in meas.items():
                     if abs(i) > c["imax"]:
                         return self.wd_trigger(f"{name} OUT{ch} current {i:.3f} A > {c['imax']:g} A")
@@ -1083,6 +1097,9 @@ class Dashboard(QtWidgets.QWidget):
                 cc_now |= {("HMP4040", ch) for ch in (1, 2, 3, 4) if b.hmp_cc(ch)}
             if n and n.ok:
                 cc_now |= {("N6701C", ch) for ch in n.channels if n.is_cc(ch)}
+            it = getattr(h, "it68", None)
+            if it and it.ok and it.is_cc():
+                cc_now.add(("IT6832", 1))
             for key in list(self.wd_cc):
                 if key not in cc_now:
                     del self.wd_cc[key]
@@ -1128,6 +1145,13 @@ class Dashboard(QtWidgets.QWidget):
                 acts.append("N6701C all outputs OFF")
             else:
                 acts.append("N6701C not connected - could NOT switch it off")
+        it = getattr(h, "it68", None)
+        if self.wd.get("off_it68", True):
+            if it and it.ok and it.worker.dev is not None:
+                it.worker.submit(lambda: it.worker.set_output(False, "watchdog"))
+                acts.append("IT6832 output OFF")
+            elif it is not None:
+                acts.append("IT6832 not connected - could NOT switch it off")
         self.log("Power watchdog action: " + "; ".join(acts), "err")
         self._wd_write(stamp, reason, acts)
         self._wd_show()

@@ -226,6 +226,16 @@ Key sound|Son des touches|Tastenton|Suono dei tasti|キー音|Звук клав�
 Subnet mask|Masque de sous-réseau|Subnetzmaske|Maschera di sottorete|サブネットマスク|Маска подсети
 Gateway|Passerelle|Gateway|Gateway|ゲートウェイ|Шлюз
 Channel|Canal|Kanal|Canale|チャンネル|Канал
+Model|Modèle|Modell|Modello|モデル|Модель
+Baud rate|Débit|Baudrate|Baud rate|ボーレート|Скорость обмена
+Arduino bridge (wait 2 s after opening)|Pont Arduino (attendre 2 s après l'ouverture)|Arduino-Brücke (2 s nach dem Öffnen warten)|Ponte Arduino (attendi 2 s dopo l'apertura)|Arduinoブリッジ (オープン後2秒待機)|Мост Arduino (ждать 2 с после открытия)
+Write daily log|Écrire le journal quotidien|Tageslog schreiben|Scrivi il log giornaliero|日次ログを書き込む|Писать суточный журнал
+Current limit|Limite de courant|Strombegrenzung|Limite di corrente|電流制限|Ограничение тока
+Max. voltage|Tension max.|Max. Spannung|Tensione max.|最大電圧|Макс. напряжение
+OUTPUT ON|SORTIE ACTIVE|AUSGANG AN|USCITA ON|出力オン|ВЫХОД ВКЛ.
+OUTPUT OFF|SORTIE COUPÉE|AUSGANG AUS|USCITA OFF|出力オフ|ВЫХОД ВЫКЛ.
+Command console|Console de commandes|Befehlskonsole|Console comandi|コマンドコンソール|Консоль команд
+IT6832: output OFF|IT6832 : sortie coupée|IT6832: Ausgang AUS|IT6832: uscita OFF|IT6832: 出力オフ|IT6832: выход ВЫКЛ.
 CAN1 / CAN2 lines|Lignes CAN1 / CAN2|CAN1- / CAN2-Leitungen|Linee CAN1 / CAN2|CAN1 / CAN2回線|Линии CAN1 / CAN2
 CAN line 1|Ligne CAN 1|CAN-Leitung 1|Linea CAN 1|CAN回線1|Линия CAN 1
 CAN line 2|Ligne CAN 2|CAN-Leitung 2|Linea CAN 2|CAN回線2|Линия CAN 2

@@ -1038,6 +1038,7 @@ class BosStation(QtWidgets.QWidget):
             sup.addItem(f"HMP4040 CH{ch}", f"hmp:{ch}")
         for ch in (1, 2, 3, 4):
             sup.addItem(f"N6701C CH{ch}", f"n67:{ch}")
+        sup.addItem("IT6832", "it68:1")
         sup.setCurrentIndex(max(0, sup.findData(self.data.get("supply", "none"))))
         sup.setToolTip("Bench supply output that powers the BOS (supply current test, PA bias check)")
         sup.currentIndexChanged.connect(lambda *_: self._collect())
@@ -2428,6 +2429,16 @@ class BosStation(QtWidgets.QWidget):
                 w.set_channel(ch, v, i, True)
                 w.set_master(True)
                 return v, i
+        elif kind == "it68":
+            it = getattr(self.host, "it68", None)
+            if not it or not it.ok:
+                raise _TestError("IT6832 not connected")
+            w, name = it.worker, "IT6832"
+
+            def job():
+                r = w.dev.read()
+                w.set_output(True, "BOS power-up")
+                return r["vset"], r["iset"]
         else:
             n = getattr(self.host, "n67", None)
             if not n or not n.ok:
@@ -2761,6 +2772,10 @@ class BosStation(QtWidgets.QWidget):
             b = getattr(self.host, "bench", None)
             if b and b._hmp_ok and ch in b.hmp_last_meas:
                 return b.hmp_last_meas[ch][1]
+        elif kind == "it68":
+            it = getattr(self.host, "it68", None)
+            if it and it.ok and it.last:
+                return it.last["i"]
         else:
             n = getattr(self.host, "n67", None)
             if n and n.ok and ch in n.last_meas:

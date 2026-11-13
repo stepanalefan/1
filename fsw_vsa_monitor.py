@@ -28,7 +28,7 @@ Features
 * Tabs: BOS Test Station (bos_station.py: automated test + fault diagnosis of the BOS
   modulator from the FSW signal and the BOS CAN telemetry), Main (dashboard.py: device
   status, test sequences, constellation, telemetry watch list), Spectrum Analyzer
-  (VSA + Spectrum + I/Q), TFG6806, HMP4040, N6701C, CAN, Telemetry, Logs, Help.
+  (VSA + Spectrum + I/Q), TFG6806, HMP4040, N6701C, IT6832, CAN, Telemetry, Logs, Help.
 
 Install
 -------
@@ -226,6 +226,13 @@ try:  # Keysight N6701C power system tab
 except Exception as _e:  # pragma: no cover
     n6700_supply = None
     _N67_ERR = f"{type(_e).__name__}: {_e}"
+
+try:  # ITECH IT6800-series (IT6832) power supply tab
+    import it6800_supply
+    _IT68_ERR = None
+except Exception as _e:  # pragma: no cover
+    it6800_supply = None
+    _IT68_ERR = f"{type(_e).__name__}: {_e}"
 
 try:  # user-interface languages (G8)
     import i18n
@@ -1526,6 +1533,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bench.folder_listeners.append(self.n67._reopen_log)
         elif n6700_supply is None:
             self.logmsg(f"N6701C tab disabled - n6700_supply.py could not be loaded ({_N67_ERR})", "warn")
+        if self.it68:
+            self.it68.log.connect(self.logmsg)
+            if self.bench:
+                self.bench.folder_listeners.append(self.it68._reopen_log)
+        elif it6800_supply is None:
+            self.logmsg(f"IT6832 tab disabled - it6800_supply.py could not be loaded ({_IT68_ERR})", "warn")
         if self.bench:
             self.bench.log.connect(self.logmsg)
         else:
@@ -1545,6 +1558,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bench.demo_chk.setChecked(True)
             if self.n67:
                 self.n67.demo_chk.setChecked(True)
+            if self.it68:
+                self.it68.demo_chk.setChecked(True)
             if self.tfg:
                 self.tfg.demo.setChecked(True)
                 QtCore.QTimer.singleShot(500, self.tfg.on_connect)
@@ -1734,6 +1749,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.n67 = n6700_supply.N6700Tab(
             self, folder_fn=lambda: self.bench.log_folder if self.bench else bench_monitor.script_dir()) \
             if n6700_supply else None
+        self.it68 = it6800_supply.IT6800Tab(
+            self, folder_fn=lambda: self.bench.log_folder if self.bench else bench_monitor.script_dir()) \
+            if it6800_supply else None
         pages = [left, self._build_spec_settings(), self._build_iq_settings()]
         self.can_win = None
         if canable_analyzer:
@@ -1929,6 +1947,17 @@ class MainWindow(QtWidgets.QMainWindow):
             n_split.addWidget(page(self.n67.page))
             n_split.setSizes([340, 1220])
             self.tabs.addTab(n_split, "N6701C")
+        if self.it68:
+            i_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            iscroll = QtWidgets.QScrollArea()
+            iscroll.setWidget(self.it68.settings_panel)
+            iscroll.setWidgetResizable(True)
+            iscroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            iscroll.setMinimumWidth(330)
+            i_split.addWidget(iscroll)
+            i_split.addWidget(page(self.it68.page))
+            i_split.setSizes([340, 1220])
+            self.tabs.addTab(i_split, "IT6832")
         if self.can_win:
             self.tabs.addTab(page(self.can_win), "CAN")
         if self.telem:
@@ -2921,6 +2950,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.bench.shutdown()
         if self.n67:
             self.n67.shutdown()
+        if self.it68:
+            self.it68.shutdown()
         if self.can_win:
             self.can_win.close()            # stops worker, script, recording
         if self.tfg:

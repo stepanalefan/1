@@ -367,6 +367,8 @@ def _supply_name(st):
     if src == "none":
         return None
     kind, ch = src.split(":")
+    if kind == "it68":
+        return "IT6832"
     return ("HMP4040" if kind == "hmp" else "N6701C") + f" {L('output', 'выход')} {ch}"
 
 

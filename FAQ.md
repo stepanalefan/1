@@ -127,7 +127,7 @@ Select *Built-in / arb #* and enter the waveform number (the manual does not lis
 
 ---
 
-## 5. Power supplies (HMP4040, N6701C) and VISA
+## 5. Power supplies (HMP4040, N6701C, IT6832) and VISA
 
 ### Error "PyUSB does not seem to be properly installed … No backend available".
 The program used pyvisa's pure-Python fallback instead of the installed VISA. Make sure the
@@ -156,6 +156,30 @@ The channel is in current limit (current at the set limit and voltage below the 
 ### N6701C: how do I connect?
 N6701C tab: IP address (raw socket 5025) or a VISA string (`TCPIP0::…::inst0::INSTR`, USB via Keysight IO
 Libraries). The module models and ranges are read from the unit. *Clear protection* resets OV / OC / OT.
+
+### ITECH IT6832: how do I connect it?
+The IT6800-series supplies (IT6832: 0-32 V, 0-6 A, 192 W) have a **TTL-level** serial port on the rear DB9 -
+not RS-232, never connect it to a PC's RS-232 port. Use ITECH's adapter (IT-E121 / IT-E122) or an **Arduino as
+USB-to-TTL bridge**: load `arduino/it6800_bridge/it6800_bridge.ino`, wire supply TX → Arduino RX, supply RX ←
+Arduino TX, GND - GND (Leonardo / Micro / Mega: hardware Serial1; Uno / Nano: pins 10 RX / 11 TX with
+SoftwareSerial). The port uses 5 V levels: a 5 V Arduino, or a level shifter for a 3.3 V board.
+On the supply's front panel set the baud rate (4800-38400, default 9600) and the communication address; set the
+same on the **IT6832** tab, choose the COM port and *Connect*. Keep *Arduino bridge (wait 2 s)* ticked for an
+Uno / Nano (they reset when the port is opened).
+
+*Protocol*: **Frame** for the IT6800 series (IT6821...IT6834, 26-byte binary frames: AAh, address, command,
+22 data bytes, checksum = sum of the first 25 bytes) - remote 20h, output 21h, max. voltage 22h, voltage 23h
+(mV), current 24h (mA), read 26h; or **SCPI** for the IT6800A/B models (USB / RS-232 built in, e.g. IT6832A):
+SYSTem:REMote, VOLTage, CURRent, OUTPut, MEASure:VOLTage? / CURRent?, VOLTage:PROTection, SYSTem:ERRor?.
+The tab has V / I / max. voltage, output on / off, measured V / I / P with CV / CC, a plot, a daily
+`it6832_log_YYYY-MM-DD.csv` and a **command console** (frame: type the command byte and data in hex, e.g.
+`26` or `23 E0 2E 00 00`, or a whole frame `AA 00 26 …`; the sent and received frames are shown in hex).
+
+**Check with the console on your unit first**: the frame layout and commands 20h / 21h / 23h are from ITECH's
+frame-format guide; the byte positions of the 26h reply (current, voltage, state, set values) follow the same guide
+family and are kept in one table (`FRAME_LAYOUT` in `it6800_supply.py`) so they can be corrected quickly if the
+reply differs. In the BOS station the IT6832 can be chosen as the BOS supply (*Unit / signal*); the Main tab shows
+its status and the power watchdog can switch its output off.
 
 ### What does the power watchdog do?
 Main tab → *Power watchdog* → *Conditions…*: switch the HMP4040 master and/or all N6701C outputs OFF and stop
