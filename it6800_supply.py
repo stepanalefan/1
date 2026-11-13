@@ -13,7 +13,7 @@ The rear DB9 of the IT6800 is a **TTL-level** serial port (not RS-232): use ITEC
 adapter, or an Arduino as USB-to-TTL bridge (arduino/it6800_bridge/it6800_bridge.ino). 8 data bits,
 no parity, 1 stop bit (fixed); baud rate 4800 / 9600 / 19200 / 38400 (default 9600) and the communication
 address (front panel >ADDR: 0...30, default 0) are set on the front panel and must match the settings here.
-The manuals number the DB9 pins but do not assign the signals: measure before wiring (see the sketch). An Arduino Uno / Nano resets when
+DB9 (measured on an IT6832): pin 3 = supply TX, pin 2 = supply RX, pin 5 = GND, normal TTL polarity. An Arduino Uno / Nano resets when
 the port is opened: "Arduino bridge" waits 2 s before the first command.
 
 Protocols

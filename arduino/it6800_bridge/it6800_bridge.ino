@@ -20,17 +20,14 @@
     The baud rate is fixed by PSU_BAUD below (both sides); 9600 or 19200 recommended with SoftwareSerial.
     These boards reset when the port is opened: keep "Arduino bridge (wait 2 s)" ticked on the IT6832 tab.
 
-  Wiring
-  ------
-    supply TX  ->  Arduino RX (see above)
-    supply RX  <-  Arduino TX
-    supply GND --  Arduino GND
-  Do NOT connect any supply-side supply voltage pin to the Arduino. The supply's TTL port uses 5 V levels:
-  use a 5 V Arduino (Uno, Nano, Mega, Leonardo, Micro). With a 3.3 V board (Uno R4 is 5 V; Due, Zero,
-  ESP32 are 3.3 V) put a level shifter in between.
-  Finding the pins on the DB9: with the supply on and nothing connected, the supply's TX pin idles HIGH
-  (about +5 V against the GND pin); its RX pin is an input. Check the pinout in the IT6800 user manual
-  ("communication interface") or measure before connecting.
+  Wiring  (IT6800 DB9 pinout measured on an IT6832: pin 3 = supply TX, pin 2 = supply RX, pin 5 = GND,
+  ------   normal TTL polarity - lines idle at +5 V; the DB9 shell is NOT signal ground)
+    DB9 pin 3 (supply TX)  ->  Arduino RX   (Uno / Nano: pin 10; Leonardo / Micro / Nano Every: pin 0; Mega: pin 19)
+    DB9 pin 2 (supply RX)  <-  Arduino TX   (Uno / Nano: pin 11; Leonardo / Micro / Nano Every: pin 1; Mega: pin 18)
+    DB9 pin 5 (GND)        --  Arduino GND
+  Other DB9 pins: not connected. A 1 kOhm resistor in each signal line is optional (protection).
+  The supply's TTL port uses 5 V levels: use a 5 V Arduino (Uno, Nano, Mega, Leonardo, Micro, Uno R4); with a
+  3.3 V board (Due, Zero, ESP32) put a level shifter in between.
 
   Polarity
   --------

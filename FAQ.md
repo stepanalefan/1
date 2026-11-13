@@ -160,8 +160,9 @@ Libraries). The module models and ranges are read from the unit. *Clear protecti
 ### ITECH IT6832: how do I connect it?
 The IT6800-series supplies (IT6832: 0-32 V, 0-6 A, 192 W) have a **TTL-level** serial port on the rear DB9 -
 not RS-232, never connect it to a PC's RS-232 port. Use ITECH's adapter (IT-E121 / IT-E122) or an **Arduino as
-USB-to-TTL bridge**: load `arduino/it6800_bridge/it6800_bridge.ino`, wire supply TX → Arduino RX, supply RX ←
-Arduino TX, GND - GND (Leonardo / Micro / Mega: hardware Serial1; Uno / Nano: pins 10 RX / 11 TX with
+USB-to-TTL bridge**: load `arduino/it6800_bridge/it6800_bridge.ino` and wire **DB9 pin 3 (supply TX) → Arduino
+RX, DB9 pin 2 (supply RX) ← Arduino TX, DB9 pin 5 → Arduino GND** (measured on an IT6832; the DB9 shell is not
+signal ground; normal TTL polarity, `INVERT_TTL 0`) (Leonardo / Micro / Mega: hardware Serial1; Uno / Nano: pins 10 RX / 11 TX with
 SoftwareSerial). The port uses 5 V levels: a 5 V Arduino, or a level shifter for a 3.3 V board.
 On the supply's front panel set the baud rate (4800-38400, default 9600) and the communication address; set the
 same on the **IT6832** tab, choose the COM port and *Connect*. Keep *Arduino bridge (wait 2 s)* ticked for an
@@ -181,9 +182,7 @@ executed, C0h not effective); 26h returns current [mA], voltage [mV], state (out
 unregulated, fan speed, remote), set current, max. voltage and set voltage; 31h (read on connect) returns model,
 software version and serial number - the tab warns if the model differs from the one selected; 37h enables the
 front-panel Local key. IT6832: programming resolution 10 mV / 10 mA, max. voltage (LVP) up to 33 V, address 0...30
-(front panel >ADDR). The manuals number the DB9 pins but do not assign the signals: before wiring the Arduino,
-find the supply's TX (idles at about +5 V against GND with the supply on, or about 0 V if the port is
-inverted - see Polarity) and GND with a meter.
+(front panel >ADDR).
 **Polarity:** some ITECH TTL ports have 5 V levels but RS-232 polarity (idle LOW) - reported for an IT6302 on the
 Arduino forum. With the supply on, the supply's TX pin idles at about +5 V (normal TTL) or about 0 V (inverted).
 For an inverted port set `INVERT_TTL 1` in the sketch: it then uses SoftwareSerial with inverted logic on pins 10
