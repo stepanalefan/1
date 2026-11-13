@@ -175,11 +175,16 @@ The tab has V / I / max. voltage, output on / off, measured V / I / P with CV / 
 `it6832_log_YYYY-MM-DD.csv` and a **command console** (frame: type the command byte and data in hex, e.g.
 `26` or `23 E0 2E 00 00`, or a whole frame `AA 00 26 …`; the sent and received frames are shown in hex).
 
-**Check with the console on your unit first**: the frame layout and commands 20h / 21h / 23h are from ITECH's
-frame-format guide; the byte positions of the 26h reply (current, voltage, state, set values) follow the same guide
-family and are kept in one table (`FRAME_LAYOUT` in `it6800_supply.py`) so they can be corrected quickly if the
-reply differs. In the BOS station the IT6832 can be chosen as the BOS supply (*Unit / signal*); the Main tab shows
-its status and the power watchdog can switch its output off.
+The protocol is implemented as in ITECH's *IT6800 Series Frame Format Programming Guide* (chapter 3): set
+commands are answered with a 12h frame (80h ok, 90h checksum error, A0h parameter error / out of range, B0h not
+executed, C0h not effective); 26h returns current [mA], voltage [mV], state (output, over-temperature, CV / CC /
+unregulated, fan speed, remote), set current, max. voltage and set voltage; 31h (read on connect) returns model,
+software version and serial number - the tab warns if the model differs from the one selected; 37h enables the
+front-panel Local key. IT6832: programming resolution 10 mV / 10 mA, max. voltage (LVP) up to 33 V, address 0...30
+(front panel >ADDR). The manuals number the DB9 pins but do not assign the signals: before wiring the Arduino,
+find the supply's TX (idles at about +5 V against GND with the supply on) and GND with a meter.
+In the BOS station the IT6832 can be chosen as the BOS supply (*Unit / signal*); the Main tab shows its status and
+the power watchdog can switch its output off.
 
 ### What does the power watchdog do?
 Main tab → *Power watchdog* → *Conditions…*: switch the HMP4040 master and/or all N6701C outputs OFF and stop

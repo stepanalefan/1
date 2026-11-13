@@ -11,8 +11,9 @@ Connection
 ----------
 The rear DB9 of the IT6800 is a **TTL-level** serial port (not RS-232): use ITECH's IT-E121 / IT-E122
 adapter, or an Arduino as USB-to-TTL bridge (arduino/it6800_bridge/it6800_bridge.ino). 8 data bits,
-no parity, 1 stop bit (fixed); baud rate 4800 / 9600 / 19200 / 38400 and the communication address
-0...254 are set on the front panel and must match the settings here. An Arduino Uno / Nano resets when
+no parity, 1 stop bit (fixed); baud rate 4800 / 9600 / 19200 / 38400 (default 9600) and the communication
+address (front panel >ADDR: 0...30, default 0) are set on the front panel and must match the settings here.
+The manuals number the DB9 pins but do not assign the signals: measure before wiring (see the sketch). An Arduino Uno / Nano resets when
 the port is opened: "Arduino bridge" waits 2 s before the first command.
 
 Protocols
@@ -22,20 +23,21 @@ Protocols
   numbers little-endian (low byte first).
       20h  remote control   data[0] = 1 remote / 0 front panel
       21h  output           data[0] = 1 on / 0 off
-      22h  max. voltage     uint32 mV  (upper limit of the voltage setting)
+      22h  max. voltage     uint32 mV  (upper limit of the voltage setting, LVP; 16.000 V = 00003E80h)
       23h  output voltage   uint32 mV
-      24h  output current   uint16 mA
+      24h  output current   uint16 mA  (1.000 A = 03E8h)
       25h  new address      data[0]
       26h  read state       reply: current uint16 mA [3:5], voltage uint32 mV [5:9], state [9]
-                            (bit 0 output on, bit 1 over-temperature, bits 3-2 mode 01 CV 10 CC 11 unreg.,
-                            bits 7-4 fan), set current uint16 mA [10:12], max. voltage uint32 mV [12:16],
-                            set voltage uint32 mV [16:20]
-      Set commands are answered with a 12h frame: data[0] 80h ok, 90h checksum error, A0h parameter
-      error, B0h unknown command, C0h invalid command.
-  The commands 20h / 21h / 23h and the frame layout are from the guide; the byte positions of 22h,
-  24h, 25h and of the 26h reply follow the same guide family and are kept in FRAME_LAYOUT / the
-  constants below so that they can be checked on the instrument with the console (it shows the raw
-  frames in hex) and corrected in one place.
+                            (bit 0 output on, bit 1 over-temperature, bits 3-2 mode 1 CV / 2 CC / 3 unreg.,
+                            bits 6-4 fan speed 0...5, bit 7 remote), set current uint16 mA [10:12],
+                            max. voltage uint32 mV [12:16], set voltage uint32 mV [16:20]
+      31h  identification   reply: model ASCII [3:8], software version [8] low / [9] high (02 03 -> V2.03),
+                            serial number ASCII [10:20]
+      37h  local key        data[0] = 1 enable / 0 disable
+      12h  command result   data[0] 80h ok, 90h checksum error, A0h parameter error / out of range,
+                            B0h command not executed, C0h command not effective
+  All of the above as in the IT6800 Frame Format Programming Guide (IT6821...IT6834, chapter 3).
+  IT6832: programming resolution 10 mV / 10 mA, readback 10 mV (100 mV above 20 V) / 10 mA, LVP 0-33 V.
 * SCPI (IT6800A/B series and firmware with SCPI), lines ending with LF:
       SYSTem:REMote / SYSTem:LOCal, *IDN?, VOLTage <V>, VOLTage?, CURRent <A>, CURRent?,
       OUTPut ON|OFF, OUTPut?, MEASure:VOLTage?, MEASure:CURRent?, MEASure:POWer?,
@@ -63,17 +65,21 @@ try:
 except ImportError:  # pragma: no cover
     serial = None
 
-MODELS = {  # model: (V max, A max, W)
+MODELS = {  # model: (V max, A max, W) - IT6800 user manual, specifications; LVP (max. voltage) = V max + 1 V
     "IT6832": (32.0, 6.0, 192.0), "IT6831": (18.0, 10.0, 180.0), "IT6833": (72.0, 3.0, 216.0),
     "IT6834": (150.0, 1.2, 180.0), "IT6821": (18.0, 5.0, 90.0), "IT6822": (32.0, 3.0, 96.0),
     "IT6823": (72.0, 1.5, 108.0),
 }
+
+
+def lvp_max(model: str) -> float:
+    return MODELS[model][0] + 1.0
 MODEL = "IT6832"                                 # default (bench model)
 V_MAX, I_MAX, P_MAX = MODELS[MODEL]
 BAUDS = (4800, 9600, 19200, 38400)
 FRAME_LEN = 26
-STATUS = {0x80: "ok", 0x90: "checksum error", 0xA0: "parameter error", 0xB0: "unknown command",
-          0xC0: "invalid command"}
+STATUS = {0x80: "ok", 0x90: "checksum error", 0xA0: "parameter error / out of range",
+          0xB0: "command not executed", 0xC0: "command not effective"}
 # reply of 26h: (name, start, length) of each field in the 26-byte frame
 FRAME_LAYOUT = {"i_mA": (3, 2), "v_mV": (5, 4), "state": (9, 1), "iset_mA": (10, 2), "vmax_mV": (12, 4),
                 "vset_mV": (16, 4)}
@@ -153,8 +159,28 @@ class FrameDevice:
         self.link, self.addr = link, addr
         self.trace = []                                 # (tx, rx) hex of the last exchanges
         self.set_remote(True)
-        self.info = f"{model}, frame protocol, address {addr}"
+        self.ident = {}
+        try:
+            self.ident = self.identify()
+        except Exception:
+            pass
+        idm = self.ident.get("model", "")
+        self.info = (f"{idm or model}, SN {self.ident.get('serial', '?')}, {self.ident.get('version', '')}, "
+                     f"frame protocol, address {addr}" if self.ident else f"{model}, frame protocol, address {addr}")
+        self.model_mismatch = bool(idm) and idm.upper() != model.upper()
         self.read()                                     # proves the link
+
+    def identify(self) -> dict:
+        """31h: model (ASCII), software version, serial number (ASCII)."""
+        rx = self._xfer(0x31)
+        model = rx[3:8].split(b"\0")[0].decode("ascii", "replace").strip()
+        if model and not model.upper().startswith("IT"):
+            model = "IT" + model
+        return {"model": model, "version": f"V{rx[9]:X}.{rx[8]:02X}",
+                "serial": rx[10:20].split(b"\0")[0].decode("ascii", "replace").strip()}
+
+    def set_local_key(self, on: bool):
+        self._set(0x37, bytes([1 if on else 0]), "local key")
 
     def _xfer(self, cmd: int, data: bytes = b"") -> bytes:
         tx = make_frame(self.addr, cmd, data)
@@ -197,6 +223,7 @@ class FrameDevice:
         st = field(rx, "state")
         return {"v": field(rx, "v_mV") / 1000, "i": field(rx, "i_mA") / 1000, "on": bool(st & 1),
                 "ot": bool(st & 2), "mode": MODES.get((st >> 2) & 3, "") if st & 1 else "OFF",
+                "fan": (st >> 4) & 7, "remote": bool(st & 0x80),
                 "vset": field(rx, "vset_mV") / 1000, "iset": field(rx, "iset_mA") / 1000,
                 "vmax": field(rx, "vmax_mV") / 1000}
 
@@ -266,6 +293,9 @@ class ScpiDevice:
     def set_remote(self, on: bool):
         self.w("SYSTem:REMote" if on else "SYSTem:LOCal")
 
+    def set_local_key(self, on: bool):
+        self.w("SYSTem:LOCal" if on else "SYSTem:REMote")
+
     def set_output(self, on: bool):
         self._set(f"OUTPut {'ON' if on else 'OFF'}")
 
@@ -316,6 +346,9 @@ class DemoDevice:
         self.rng = np.random.default_rng()
 
     def set_remote(self, on):
+        pass
+
+    def set_local_key(self, on):
         pass
 
     def set_output(self, on):
@@ -380,7 +413,14 @@ class IT68Worker(bm._Worker):
                 link.close()
                 raise
         self.connected.emit(True, self.dev.info)
+        if getattr(self.dev, "model_mismatch", False):
+            self.log.emit(f"{self.model} selected, but the supply reports {self.dev.ident.get('model')} - "
+                          f"check the model (ranges)", "warn")
         self._next_tel = 0.0
+
+    def set_local_key(self, on):
+        self.dev.set_local_key(on)
+        self.log.emit(f"{self.model} front-panel local key {'enabled' if on else 'disabled'}", "ok")
 
     def disconnect_dev(self):
         if self.dev is not None:
@@ -526,7 +566,8 @@ class IT6800Tab(QtCore.QObject):
         self.baud.setToolTip("Same as on the front panel (menu: baud rate); 8 data bits, no parity, 1 stop bit")
         self.addr_sp = QtWidgets.QSpinBox()
         self.addr_sp.setRange(0, 254)
-        self.addr_sp.setToolTip("Communication address set on the front panel (frame protocol)")
+        self.addr_sp.setToolTip("Communication address set on the front panel (>ADDR, 0...30, default 0); "
+                                "frame protocol")
         self.proto = QtWidgets.QComboBox()
         self.proto.addItem("Frame (IT6800, IT6821-IT6834)", "frame")
         self.proto.addItem("SCPI (IT6800A/B, SCPI firmware)", "scpi")
@@ -583,9 +624,10 @@ class IT6800Tab(QtCore.QObject):
         row.setContentsMargins(0, 0, 0, 0)
         self.out_box = box = QtWidgets.QGroupBox()
         f = QtWidgets.QFormLayout(box)
-        self.v = bm._spin(0, V_MAX, 3, " V", 12.0, 0.1)
+        self.v = bm._spin(0, V_MAX, 2, " V", 12.0, 0.1)
         self.v.setToolTip("Output voltage (frame 23h / SCPI VOLTage)")
-        self.i = bm._spin(0, I_MAX, 3, " A", 0.5, 0.01)
+        self.i = bm._spin(0, I_MAX, 2, " A", 0.5, 0.01)
+        self.i.setToolTip("Current limit, 10 mA steps (frame 24h / SCPI CURRent)")
         self.vmax = bm._spin(0, V_MAX, 2, " V", V_MAX, 1.0)
         self.vmax.setToolTip("Frame protocol: upper limit of the voltage setting (22h); SCPI: over-voltage protection")
         self.on = QtWidgets.QCheckBox("Output on")
@@ -616,6 +658,10 @@ class IT6800Tab(QtCore.QObject):
             b.setStyleSheet("font-weight:700;")
             b.clicked.connect(lambda _, on=on: self.worker.submit(lambda: self.worker.set_output(on)))
             side.addWidget(b)
+        lk = QtWidgets.QPushButton("Enable local key")
+        lk.setToolTip("Frame 37h: allow the front-panel Local key while in remote mode")
+        lk.clicked.connect(lambda: self.worker.submit(lambda: self.worker.set_local_key(True)))
+        side.addWidget(lk)
         side.addStretch(1)
         row.addLayout(side)
         root.addWidget(self.g_ctrl)
@@ -681,8 +727,8 @@ class IT6800Tab(QtCore.QObject):
             self.out_box.setTitle(f"{m} output  (0-{vm:g} V, 0-{im:g} A, {pm:g} W)")
             self.v.setMaximum(vm)
             self.i.setMaximum(im)
-            self.vmax.setMaximum(vm)
-            self.vmax.setValue(vm)
+            self.vmax.setMaximum(lvp_max(m))
+            self.vmax.setValue(lvp_max(m))
 
     # ---------------------------------------------------------------- actions
     def _set_connected(self, on):
@@ -774,7 +820,9 @@ class IT6800Tab(QtCore.QObject):
         color = "#ff6b6b" if r["mode"] == "CC" or r.get("ot") else ("#4fd18b" if r["mode"] == "CV" else "#8a96a3")
         self.mode.setText(mode)
         self.mode.setStyleSheet(f"font-weight:700;font-size:15px;color:{color};")
-        self.sets.setText(f"set {r['vset']:.3f} V / {r['iset']:.4f} A, max. {r['vmax']:.2f} V")
+        self.sets.setText(f"set {r['vset']:.2f} V / {r['iset']:.2f} A, max. {r['vmax']:.2f} V"
+                          + (f"  ·  fan {r['fan']}/5" if "fan" in r else "")
+                          + ("  ·  remote" if r.get("remote") else ""))
         ts, vs, is_ = self.hist
         ts.append(now)
         vs.append(r["v"])
