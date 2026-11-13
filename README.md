@@ -137,7 +137,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA / serial / socket helpers |
 | `n6700_supply.py`, `tfg_generator.py` | N6701C and TFG6806 tabs |
-| `it6800_supply.py`, `arduino/it6800_bridge/it6800_bridge.ino` | IT6832 tab (frame / SCPI protocol) and the Arduino USB-to-TTL bridge sketch |
+| `it6800_supply.py`, `arduino/it6800_bridge/it6800_bridge.ino`, `arduino/it6800_probe/it6800_probe.ino` | IT6832 tab (frame / SCPI protocol), the Arduino USB-to-TTL bridge sketch and a stand-alone diagnosis sketch |
 | `canable_analyzer.py`, `can_commands.py` | CAN tab |
 | `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
 | `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_TEST.exe` |

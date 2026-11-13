@@ -183,6 +183,11 @@ unregulated, fan speed, remote), set current, max. voltage and set voltage; 31h 
 software version and serial number - the tab warns if the model differs from the one selected; 37h enables the
 front-panel Local key. IT6832: programming resolution 10 mV / 10 mA, max. voltage (LVP) up to 33 V, address 0...30
 (front panel >ADDR).
+**No connection?** Load `arduino/it6800_probe/it6800_probe.ino` instead of the bridge (same wiring) and open the
+Serial Monitor at 115200 baud: it talks to the supply without the PC program, checks the idle level of the
+supply's TX line, scans all baud rates and addresses 0...30 with the remote command (20h), shows any byte received
+in hex and, when found, reads model / serial (31h) and voltage / current (26h) every 2 s. `t` checks the Arduino
+pins with a jumper 10-11. Its output tells whether the problem is the wiring, the supply settings or the PC side.
 **Polarity:** some ITECH TTL ports have 5 V levels but RS-232 polarity (idle LOW) - reported for an IT6302 on the
 Arduino forum. With the supply on, the supply's TX pin idles at about +5 V (normal TTL) or about 0 V (inverted).
 For an inverted port set `INVERT_TTL 1` in the sketch: it then uses SoftwareSerial with inverted logic on pins 10
