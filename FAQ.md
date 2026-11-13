@@ -182,7 +182,12 @@ unregulated, fan speed, remote), set current, max. voltage and set voltage; 31h 
 software version and serial number - the tab warns if the model differs from the one selected; 37h enables the
 front-panel Local key. IT6832: programming resolution 10 mV / 10 mA, max. voltage (LVP) up to 33 V, address 0...30
 (front panel >ADDR). The manuals number the DB9 pins but do not assign the signals: before wiring the Arduino,
-find the supply's TX (idles at about +5 V against GND with the supply on) and GND with a meter.
+find the supply's TX (idles at about +5 V against GND with the supply on, or about 0 V if the port is
+inverted - see Polarity) and GND with a meter.
+**Polarity:** some ITECH TTL ports have 5 V levels but RS-232 polarity (idle LOW) - reported for an IT6302 on the
+Arduino forum. With the supply on, the supply's TX pin idles at about +5 V (normal TTL) or about 0 V (inverted).
+For an inverted port set `INVERT_TTL 1` in the sketch: it then uses SoftwareSerial with inverted logic on pins 10
+(RX) / 11 (TX) on every board. If nothing answers, also try swapping the two signal wires.
 In the BOS station the IT6832 can be chosen as the BOS supply (*Unit / signal*); the Main tab shows its status and
 the power watchdog can switch its output off.
 

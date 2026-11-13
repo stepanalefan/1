@@ -32,15 +32,26 @@
   (about +5 V against the GND pin); its RX pin is an input. Check the pinout in the IT6800 user manual
   ("communication interface") or measure before connecting.
 
+  Polarity
+  --------
+  Some ITECH TTL ports use 5 V levels with RS-232 polarity (inverted: idle LOW, start bit HIGH), see
+  forum.arduino.cc "Controlling ITECH power supply with TTL logic" (IT6302). Check with a meter, supply on,
+  nothing connected: the supply's TX pin idles at about +5 V = normal TTL, about 0 V = inverted.
+  For an inverted port set INVERT_TTL to 1 below: every board then uses SoftwareSerial with inverted logic
+  on pin 10 (RX) / pin 11 (TX) (Uno, Nano, Mega 2560, Leonardo, Micro: pin 10 supports pin-change
+  interrupts on all of them); keep 9600 or 19200 baud.
+
   LED (pin 13 / LED_BUILTIN) flashes on traffic.
 */
 
-#if defined(HAVE_HWSERIAL1) || defined(USBCON) || defined(ARDUINO_ARCH_MEGAAVR) || defined(ARDUINO_ARCH_RENESAS)
+#define INVERT_TTL 0                   // 1 = the supply's TTL port has RS-232 polarity (idle LOW)
+
+#if !INVERT_TTL && (defined(HAVE_HWSERIAL1) || defined(USBCON) || defined(ARDUINO_ARCH_MEGAAVR) || defined(ARDUINO_ARCH_RENESAS))
   #define PSU Serial1
   #define HW_UART 1
 #else
   #include <SoftwareSerial.h>
-  SoftwareSerial PSU(10, 11);          // RX, TX
+  SoftwareSerial PSU(10, 11, INVERT_TTL ? true : false);   // RX, TX, inverse logic
   #define HW_UART 0
 #endif
 
