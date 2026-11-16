@@ -1354,6 +1354,8 @@ class BosSimulator:
         self.sr_t = 0.0
         self.time_snr = 30
         self.saved_time_snr = 30          # Time_SNR in the stored (user) КОНФИГ
+        self.md_config = None             # last MD_CONFIG received (RAM)
+        self.md_settings = None           # last MD_SETTINGS received
         self.protocol = False             # True once driven by protocol commands (designation required)
 
     def att_db(self):
@@ -1402,9 +1404,30 @@ class BosSimulator:
             return False
         return True
 
+    def md_array(self, md, data):
+        """Data array to the simulated BOS: MD_CONFIG takes effect at once, MD_SETTINGS is kept."""
+        if md == 0x01:
+            self.md_config = bytearray(data[:136])
+            self.time_snr = self.md_config[4]
+        elif md == 0x04:
+            self.md_settings = bytes(data[:1024])
+
+    def md_read(self, md):
+        if md == 0x01:
+            return self.config()
+        if md == 0x04:
+            return self.md_settings
+        return None
+
     def config(self):
         """136-byte КОНФИГ as the simulated unit would report it (with CRC)."""
         import bos_protocol as bp
+        if self.md_config is not None:
+            c = bytearray(self.md_config)
+            c[2] |= 0x80                                  # user configuration
+            c[4] = self.time_snr
+            c[134:136] = bp.crc16(bytes(c[:134])).to_bytes(2, "little")
+            return bytes(c)
         c = bytearray(136)
         c[2] = 0x80 | 0x40 | 0x20                     # user config, external 10 MHz, randomisation
         c[3] = 0xE0

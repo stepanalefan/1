@@ -226,6 +226,13 @@ Pass|Conforme|Bestanden|Conforme|合格|Норма
 Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
 Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
 Control KTR|Contrôle KTR|KTR-Steuerung|Controllo KTR|KTR制御|Управление КТР
+New (defaults)|Nouveau (défauts)|Neu (Standard)|Nuovo (predefiniti)|新規 (既定値)|Новый (по умолчанию)
+Load file…|Charger un fichier…|Datei laden…|Carica file…|ファイル読込…|Загрузить файл…
+Save file…|Enregistrer le fichier…|Datei speichern…|Salva file…|ファイル保存…|Сохранить файл…
+⇣ Read from BOS|⇣ Lire du BOS|⇣ Vom BOS lesen|⇣ Leggi dal BOS|⇣ BOSから読込|⇣ Считать из БОС
+⇡ Send to BOS|⇡ Envoyer au BOS|⇡ An BOS senden|⇡ Invia al BOS|⇡ BOSへ送信|⇡ Отправить в БОС
+Save in BOS flash|Enregistrer en flash BOS|Im BOS-Flash speichern|Salva nella flash BOS|BOSフラッシュに保存|Сохранить во flash БОС
+Example (doc)|Exemple (doc)|Beispiel (Dok.)|Esempio (doc)|例 (文書)|Пример (документ)
 Basic commands|Commandes de base|Grundbefehle|Comandi di base|基本コマンド|Основные команды
 Session (СР) control commands|Commandes de session (СР)|Sitzungsbefehle (СР)|Comandi di sessione (СР)|セッション(СР)制御コマンド|Команды управления СР
 Technological commands|Commandes technologiques|Technologische Befehle|Comandi tecnologici|技術コマンド|Технологические команды

@@ -232,6 +232,24 @@ under the queue. *Stop on wrong / missing КВ* stops at the first unexpected an
 stops. Several named queues; stored in `ktr_control.json` next to the program. The tab does not send while the
 BOS Test Station is running a plan.
 
+### How do I create, load and send a CONFIG (MD_CONFIG) or MD_SETTINGS file?
+**Telemetry → BOS → MD_CONFIG / MD_SETTINGS.** Every field of table 4.4 (MD_CONFIG, 136 bytes) or tables 4.6 / 4.7
+(MD_SETTINGS, 1024 bytes) is listed with its byte, coded values and meaning; MD_SETTINGS is split into DAC pll_vco,
+DAC offsets (16 temperature ranges × qmc_offseta/b, qmc_gaina/b, qmc_phaseab, coarse_dac), power adjustment and
+OG DAC tables. Grey fields are set by the BOS (not checked when written).
+* **New (defaults)** — the document defaults (MD_CONFIG checksum 0xF372, as in §4.1.2); **Example (doc)** fills the
+  OG DAC example of MD_SETTINGS.
+* **Load file… / Save file…** — `.json` with named values (readable, editable), `.bin` raw bytes; loading also
+  takes an ИОК_КОНФИГ / ИОК_SETTINGS dump with its 8-byte header, or hex text.
+* **⇣ Read from BOS** — REQ_TM 0xFA / 0xFE: the values the BOS uses now.
+* **⇡ Send to BOS** — the array in 17 / 128 CAN packets (start / current / stop with КВ request, MD number
+  0x01 / 0x04, table 4.2) on the station's CAN line 1 and sender; the КВ is shown. The CONFIG checksum is
+  recomputed on every change; a wrong checksum or prohibited value asks before sending.
+* **Save in BOS flash** (MD_CONFIG) — SAVE_CONFIG_NEW: a sent CONFIG is only in RAM until then.
+MD_SETTINGS values are loaded into the DAC when a session starts; the OG DAC value in standby (it switches the
+10 MHz reference tuning off). The document page saying which command stores MD_SETTINGS in EPROM is cut off in
+the copy I have — check before relying on it surviving a power cycle.
+
 ### What is new in 0102 v2?
 Pause_SR 0x52 (delay of the physical session, OG tuning in session); session commands Send_UB_BERT 0xAE,
 Send_UB_Data_60 0xAD (BPSK index +60°), Send_BERT 0xAF (test mode); technological commands Change_DAC_1 0x50

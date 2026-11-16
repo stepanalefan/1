@@ -37,6 +37,7 @@ BOS_ARRAYS = [  # MD_BOS table
     (0xFD, "IOK SOST", 48),
     (0xFB, "IOK DOP", 32),          # MD_BOS table says 16 B; the unit sends Length 28 = 32 B
     (0xF9, "IOK ARCHIVE", 272),
+    (0xFE, "IOK SETTINGS", 1032),   # 0102 v2, table 4.60
 ]
 # unit, CAN ID prefix (bits 28-16 of the 29-bit ID), arrays. Arrays are routed by
 # prefix AND type: the BOS and the UPNG both send type 0xFC.
@@ -893,6 +894,8 @@ class TelemetryTab(QtWidgets.QTabWidget):
         super().__init__()
         self.rx = Reassembler()
         self.views = {}                  # (unit, type) -> view
+        self.host = None                 # main window (set by it): CAN tab, BOS station for the MD editors
+        self.md_editors = []
         self.array_listeners = []        # callables(unit, type, data, ts) for every decoded array
         self.prefix_unit = {p: u for u, p, _ in UNITS if p is not None}
         for unit, prefix, arrays in UNITS:
@@ -914,16 +917,30 @@ class TelemetryTab(QtWidgets.QTabWidget):
                     view = RawView(t, name, size)
                 self.views[key] = view
                 sub.addTab(view, f"{name} (0x{t:02X})")
+            if unit == "BOS":
+                try:
+                    import bos_mdfiles
+                    for kind in ("config", "settings"):
+                        ed = bos_mdfiles.MdEditor(kind, self)
+                        self.md_editors.append(ed)
+                        sub.addTab(ed, bos_mdfiles.KINDS[kind]["title"])
+                except Exception as e:                    # pragma: no cover
+                    sub.addTab(QtWidgets.QLabel(f"MD editors not available: {e}"), "MD_CONFIG")
             self.addTab(sub, f"{unit}  (ID 0x{prefix:04X}xxxx)")
         self.setCurrentIndex(0)
 
     def on_frames(self, frames):
         """Listener for canable_analyzer.SnifferWindow.ingest()."""
+        for ed in self.md_editors:
+            ed.on_frames(frames)
         for f in frames:
             r = self.rx.feed(f)
             if r is None:
                 continue
             base, t, data, ts = r
+            if self.prefix_unit.get(base >> 16) == "BOS":
+                for ed in self.md_editors:
+                    ed.on_array(t, data)
             view = self.views.get((self.prefix_unit.get(base >> 16), t))
             unit = self.prefix_unit.get(base >> 16)
             if view is not None:

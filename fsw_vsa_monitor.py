@@ -1780,6 +1780,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.telem = None
         if telemetry and self.can_win:
             self.telem = telemetry.TelemetryTab()
+            self.telem.host = self
             self.can_win.frame_listeners.append(self.telem.on_frames)
         for page in pages:
             scroll = QtWidgets.QScrollArea()
