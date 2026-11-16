@@ -89,7 +89,7 @@ diagram, all measurements, corrections, telemetry and plots.
 | **HMP4040** | R&S HMP4040 (USB or LAN): 4 channels, master output, power cycling, plot, daily `hmp_log` |
 | **N6701C** | Keysight N6701C (LAN / USB / GPIB): per output V, I, OVP, OCP, on/off, plot, daily `n6700_log` |
 | **IT6832** | ITECH IT6832 (IT6800 series, 32 V / 6 A / 192 W) on the rear TTL serial port via an Arduino USB-to-TTL bridge (`arduino/it6800_bridge`) or the ITECH adapter: frame protocol (IT6800) or SCPI (IT6800A/B), V / I / max. voltage, output, measured V / I / P, CV / CC, command console, plot, daily `it6832_log` |
-| **CAN** | Two CAN lines per unit: BOS / AFAR / UPNG × CAN1 / CAN2 (defaults BOS CAN1 = CANable, AFAR CAN1 = IXXAT ch 0, UPNG CAN1 = IXXAT ch 1; CAN2 lines: choose the adapter): trace, monitor, transmit, command library, scripts, record / open candump logs |
+| **CAN** | Two CAN lines per unit: BOS / AFAR / UPNG × CAN1 / CAN2 (defaults BOS CAN1 = CANable, AFAR CAN1 = IXXAT ch 0, UPNG CAN1 = IXXAT ch 1; CAN2 lines: choose the adapter; Marathon CAN-bus-USB through CHAI also selectable): trace, monitor, transmit, command library, scripts, record / open candump logs |
 | **Telemetry** | Decoded arrays of BOS, UPNG and AFAR with the meaning of every field |
 | **Logs** | Any CSV logs of the program on one time plot |
 | **Help** | FAQ / Readme / About |
@@ -138,7 +138,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bench_monitor.py` | HMP4040 tab, VISA / serial / socket helpers |
 | `n6700_supply.py`, `tfg_generator.py` | N6701C and TFG6806 tabs |
 | `it6800_supply.py`, `arduino/it6800_bridge/it6800_bridge.ino`, `arduino/it6800_probe/it6800_probe.ino` | IT6832 tab (frame / SCPI protocol), the Arduino USB-to-TTL bridge sketch and a stand-alone diagnosis sketch |
-| `canable_analyzer.py`, `can_commands.py` | CAN tab |
+| `canable_analyzer.py`, `can_commands.py`, `chai_can.py` | CAN tab (CANable, IXXAT, Marathon via CHAI, SocketCAN) |
 | `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
 | `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_TEST.exe` |
 

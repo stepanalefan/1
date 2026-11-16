@@ -30,6 +30,10 @@ The CANable is shipped with one of two firmwares, select the matching interface:
       sudo ip link set can0 up type can bitrate 500000 [listen-only on]
   then use the "SocketCAN" interface (bitrate is set by ip link, not here).
 
+Marathon CAN-bus-USB (2 channel) and other Marathon adapters: through Marathon's CHAI library
+  (chai.dll / libchai.so from the Marathon driver package, chai_can.py, ctypes). Channel 0 = CAN1,
+  1 = CAN2 of the first adapter (2, 3 = second adapter). Bit rates 10k...1M.
+
 IXXAT USB-to-CAN (python-can "ixxat" interface, needs the IXXAT VCI 4 driver on Windows):
   channel 0 = CAN1, 1 = CAN2. Each channel is its own CAN controller, so both are opened at the
   same time (one worker thread per channel). Several IXXAT devices: channel "0@HW123456".
@@ -140,6 +144,7 @@ INTERFACES = [  # key, label
     ("slcan", "CANable — slcan firmware (COM port)"),
     ("gs_usb", "CANable — candleLight firmware (gs_usb)"),
     ("ixxat", "IXXAT USB-to-CAN (VCI driver)"),
+    ("marathon", "Marathon CAN-bus-USB (CHAI driver)"),
     ("socketcan", "SocketCAN (Linux, e.g. can0)"),
     ("demo", "Demo — simulated bus"),
 ]
@@ -488,6 +493,33 @@ class PyCanBackend:
         self.bus.shutdown()
 
 
+class ChaiBackend:
+    """Marathon adapters through the CHAI library (chai_can.py)."""
+
+    def __init__(self, channel: str, bitrate: int, listen_only: bool):
+        import chai_can
+        try:
+            chan = int(str(channel or "0").split()[0])
+        except ValueError:
+            raise ValueError(f"Marathon channel must be a number (0 = CAN1, 1 = CAN2), not '{channel}'")
+        self.ch = chai_can.ChaiChannel(chan, bitrate, listen_only,
+                                       lambda ts, i, ext, rtr, dlc, data: Frame(ts, i, ext, rtr, dlc, data))
+        self.info = self.ch.info
+
+    @property
+    def errors(self):
+        return self.ch.errors
+
+    def recv(self) -> list[Frame]:
+        return self.ch.recv()
+
+    def send(self, f: Frame):
+        self.ch.send(f.can_id, f.ext, f.rtr, f.dlc, f.data)
+
+    def close(self):
+        self.ch.close()
+
+
 class DemoBackend:
     """Simulated vehicle-like bus; answers OBD-II requests sent to 7DF / 7E0."""
 
@@ -651,6 +683,8 @@ def make_backend(kind: str, channel: str, bitrate: int, listen_only: bool):
         return SlcanBackend(channel, bitrate, listen_only)
     if kind in ("gs_usb", "socketcan", "ixxat"):
         return PyCanBackend(kind, channel, bitrate, listen_only)
+    if kind == "marathon":
+        return ChaiBackend(channel, bitrate, listen_only)
     return DemoBackend(bitrate, listen_only, channel)
 
 
@@ -686,6 +720,13 @@ def list_channels(kind: str) -> list[tuple[str, str]]:
             ch, hw = int(c.get("channel", 0)), c.get("unique_hardware_id")
             out.append((f"{ch}@{hw}" if len(hwids) > 1 else str(ch), f"CAN{ch + 1}  {hw or ''}"))
         return out or [("0", "CAN1 (no IXXAT device detected)"), ("1", "CAN2 (no IXXAT device detected)")]
+    if kind == "marathon":
+        try:
+            import chai_can
+            note = f"CHAI {chai_can.lib_version()}"
+        except Exception as e:
+            note = f"CHAI library not found ({type(e).__name__})"
+        return [(str(c), f"adapter {c // 2 + 1}, CAN{c % 2 + 1}  [{note}]") for c in range(4)]
     if kind == "socketcan":
         try:
             names = sorted(n for n in os.listdir("/sys/class/net") if "can" in n)
@@ -1349,6 +1390,9 @@ class SnifferWindow(QtWidgets.QMainWindow):
         if kind == "ixxat":
             n = ch.partition("@")[0]
             return f"IXXAT CAN{int(n) + 1}" if n.isdigit() else "IXXAT"
+        if kind == "marathon":
+            n = ch.split()[0] if ch else ""
+            return f"Marathon CAN{int(n) % 2 + 1}" if n.isdigit() else "Marathon"
         return {"slcan": "CANable", "gs_usb": "CANable", "socketcan": ch or "SocketCAN",
                 "demo": "demo"}.get(kind, kind)
 

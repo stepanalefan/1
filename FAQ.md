@@ -468,6 +468,14 @@ request came from (ПИЛВ 4.2.3.6). After that the whole plan uses **CAN1 only
 SET_CAN = 01 so the BOS also transmits only on CAN1 (standby only, not saved - power cycle or SET_CAN = 11 restores
 both).
 
+### Can I use a Marathon CAN-bus-USB adapter?
+Yes: CAN tab → *CAN lines* → interface **Marathon CAN-bus-USB (CHAI driver)** on any line. Install Marathon's
+driver package (it brings the CHAI library `chai.dll`; on Linux `libchai.so`). Channel **0 = CAN1, 1 = CAN2** of the
+adapter (a second Marathon adapter: 2 and 3), so a 2-channel adapter can carry e.g. *BOS CAN1* and *BOS CAN2*.
+Bit rates 10 kbit/s ... 1 Mbit/s; listen-only only if the CHAI version has it. If the library is not found, put
+`chai.dll` next to the program / KTR_TEST.exe or set the environment variable `CHAI_LIB` to its full path. It can
+be combined freely with the CANable and the IXXAT on the other lines.
+
 ### Can the IXXAT read both channels at once?
 Yes — CAN1 and CAN2 are separate controllers; each line has its own reader. A single-channel
 IXXAT model has only CAN1. The IXXAT driver has **no listen-only mode**.
