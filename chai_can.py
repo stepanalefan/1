@@ -1,23 +1,33 @@
 # -*- coding: utf-8 -*-
-"""
+r"""
 chai_can.py
 ===========
 Marathon CAN adapters (CAN-bus-USB, 2 channel, and others) through Marathon's CHAI library
 (CAN Hardware Abstraction Interface, chai.dll on Windows / libchai.so on Linux, installed with the
 Marathon driver package from can.marathon.ru). ctypes only, no extra Python package.
 
+Checked against the CHAI 2.14.0 software design guide (Marathon). CAN-bus-USB (2 channels): both channels on
+ONE 9-pin D-sub (CAN1: L pin 2, H pin 7, GND 3 / 6; CAN2: L pin 4, H pin 8, GND 5) - use Marathon's branch
+cable for two standard CiA DS 102 connectors; 120 Ohm terminators are jumpers P6 (CAN1) / P7 (CAN2) inside.
+
 CHAI 2.x calls used:
     CiInit()                                   once per process
     CiOpen(chan, CIO_CAN11 | CIO_CAN29)        open a channel for 11- and 29-bit frames
     CiSetBaud(chan, bt0, bt1)                  SJA1000-style bit timing (16 MHz clock, see BAUD)
     CiStart(chan) / CiStop(chan) / CiClose(chan)
-    CiTransmit(chan, canmsg_t *)               queue one frame
+    CiTransmit(chan, canmsg_t *)               queue one frame (CHAI >= 2.10; not on CAN-bus-USBnp firmware
+                                               <= 1.3 -> CiWrite(chan, canmsg_t *, 1) is used instead)
     CiRead(chan, canmsg_t *buf, count)         non-blocking: number of frames read, < 0 = error
     CiSetLom(chan, 1)                          listen-only mode, if the library has it
-    CiGetLibVer()                              library version (u32)
+    CiGetLibVer()                              library version (u32: major byte 2, minor byte 1, sub byte 0)
+    CiBoardInfo(canboard_t *)                  adapters and their channel numbers (brdnum 0...7)
+    CiStrError(errno, buf, n)                  error text (errors are returned as -errno)
 canmsg_t:  u32 id; u8 data[8]; u8 len; u16 flags (bit 0 RTR, bit 2 EFF = 29-bit id); u32 ts (µs)
-Channels are numbered over all Marathon adapters: first adapter CAN1 = 0, CAN2 = 1, second adapter 2, 3 ...
-Set the environment variable CHAI_LIB to the full path of chai.dll / libchai.so if it is not found.
+Channels are numbered from 0 over all CAN controllers in the computer (up to 8): first adapter CAN1 = 0,
+CAN2 = 1, ... - CiBoardInfo gives the real numbers. The numeric values of CIO_CAN11 / CIO_CAN29 / CI_LOM_ON are
+not in the guide (only in chai.h): the values below are the CHAI ones as known; check CHAI_INSTALL_DIR\include\chai.h.
+chai.dll: CHAI_INSTALL_DIR\x64 (64-bit Python) or \x32 (32-bit Python), also copied to the Windows system folder
+by the installer. Set the environment variable CHAI_LIB to the full path if it is not found.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import time
 
 CIO_CAN11 = 0x2
 CIO_CAN29 = 0x4
+CI_LOM_ON = 1
 FRAME_RTR = 0x1
 FRAME_EFF = 0x4
 
@@ -47,6 +58,11 @@ class canmsg_t(ctypes.Structure):
                 ("flags", ctypes.c_uint16), ("ts", ctypes.c_uint32)]
 
 
+class canboard_t(ctypes.Structure):
+    _fields_ = [("brdnum", ctypes.c_uint8), ("hwver", ctypes.c_uint32), ("chip", ctypes.c_int16 * 4),
+                ("name", ctypes.c_char * 64), ("manufact", ctypes.c_char * 64)]
+
+
 _lib = None
 _lock = threading.Lock()
 _inited = False
@@ -57,11 +73,15 @@ def lib_candidates() -> list[str]:
     if env:
         return [env]
     if sys.platform.startswith("win"):
+        import glob
+        import struct
+        arch = "x64" if struct.calcsize("P") == 8 else "x32"     # must match the Python bitness
         names = ["chai.dll"]
         for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-                     os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
-            for sub in ("CHAI", "Marathon\\CHAI", "chai-2.14.0", "CHAI-2.14.0"):
-                names.append(os.path.join(base, sub, "chai.dll"))
+                     os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "C:\\"):
+            for d in glob.glob(os.path.join(base, "*[Cc][Hh][Aa][Ii]*")) + \
+                    glob.glob(os.path.join(base, "*[Mm]arathon*", "*[Cc][Hh][Aa][Ii]*")):
+                names += [os.path.join(d, arch, "chai.dll"), os.path.join(d, "chai.dll")]
         for here in (os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else "",
                      os.path.dirname(os.path.abspath(__file__))):
             if here:
@@ -81,7 +101,11 @@ def load():
                     _lib = ctypes.CDLL(name)
                     break
                 except OSError as e:
-                    err = e
+                    if getattr(e, "winerror", None) == 193:          # 32 / 64-bit mismatch
+                        err = f"{name} does not match this {8 * ctypes.sizeof(ctypes.c_void_p)}-bit Python - use " \
+                              f"the chai.dll from the x64 / x32 folder of the CHAI installation"
+                    elif err is None or "193" not in str(err):
+                        err = e
             if _lib is None:
                 raise RuntimeError("Marathon CHAI library not found (chai.dll / libchai.so): install the Marathon "
                                    "driver package, or set CHAI_LIB to its full path" + (f" ({err})" if err else ""))
@@ -91,15 +115,25 @@ def load():
                                   ("CiStart", ctypes.c_int16, [ctypes.c_uint8]),
                                   ("CiStop", ctypes.c_int16, [ctypes.c_uint8]),
                                   ("CiSetBaud", ctypes.c_int16, [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]),
-                                  ("CiTransmit", ctypes.c_int16, [ctypes.c_uint8, ctypes.POINTER(canmsg_t)]),
                                   ("CiRead", ctypes.c_int16, [ctypes.c_uint8, ctypes.POINTER(canmsg_t),
                                                               ctypes.c_int16])):
                 f = getattr(_lib, fn)
                 f.restype, f.argtypes = res, args
+            if hasattr(_lib, "CiTransmit"):
+                _lib.CiTransmit.restype = ctypes.c_int16
+                _lib.CiTransmit.argtypes = [ctypes.c_uint8, ctypes.POINTER(canmsg_t)]
             if hasattr(_lib, "CiGetLibVer"):
                 _lib.CiGetLibVer.restype, _lib.CiGetLibVer.argtypes = ctypes.c_uint32, []
             if hasattr(_lib, "CiSetLom"):
                 _lib.CiSetLom.restype, _lib.CiSetLom.argtypes = ctypes.c_int16, [ctypes.c_uint8, ctypes.c_uint8]
+            if hasattr(_lib, "CiWrite"):
+                _lib.CiWrite.restype = ctypes.c_int16
+                _lib.CiWrite.argtypes = [ctypes.c_uint8, ctypes.POINTER(canmsg_t), ctypes.c_int16]
+            if hasattr(_lib, "CiBoardInfo"):
+                _lib.CiBoardInfo.restype, _lib.CiBoardInfo.argtypes = ctypes.c_int16, [ctypes.POINTER(canboard_t)]
+            if hasattr(_lib, "CiStrError"):
+                _lib.CiStrError.restype = None
+                _lib.CiStrError.argtypes = [ctypes.c_int16, ctypes.c_char_p, ctypes.c_int16]
         if not _inited:
             r = _lib.CiInit()
             if r < 0:
@@ -116,10 +150,43 @@ def lib_version() -> str:
     return f"{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}"
 
 
+def err_text(r: int) -> str:
+    """CHAI error text (functions return -errno)."""
+    lib = _lib
+    if lib is not None and hasattr(lib, "CiStrError"):
+        buf = ctypes.create_string_buffer(128)
+        try:
+            lib.CiStrError(-r, buf, len(buf))
+            if buf.value:
+                return f"{buf.value.decode(errors='replace')} ({r})"
+        except Exception:
+            pass
+    return f"CHAI error {r}"
+
+
 def _check(r, what):
     if r < 0:
-        raise RuntimeError(f"{what} failed (CHAI error {r})")
+        raise RuntimeError(f"{what} failed: {err_text(r)}")
     return r
+
+
+def boards() -> list[dict]:
+    """Connected Marathon adapters: [{board, name, manufacturer, hw, channels: [chan, ...]}]."""
+    lib = load()
+    out = []
+    if not hasattr(lib, "CiBoardInfo"):
+        return out
+    for b in range(8):
+        bi = canboard_t()
+        bi.brdnum = b
+        if lib.CiBoardInfo(ctypes.byref(bi)) < 0:
+            continue
+        v = bi.hwver
+        out.append({"board": b, "name": bi.name.decode(errors="replace").strip(),
+                    "manufacturer": bi.manufact.decode(errors="replace").strip(),
+                    "hw": f"{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}",
+                    "channels": [int(c) for c in bi.chip if c >= 0]})
+    return out
 
 
 class ChaiChannel:
@@ -140,7 +207,8 @@ class ChaiChannel:
             lo = ""
             if listen_only:
                 if hasattr(self.lib, "CiSetLom"):
-                    lo = ", listen-only" if self.lib.CiSetLom(self.chan, 1) >= 0 else ", listen-only failed"
+                    r = self.lib.CiSetLom(self.chan, CI_LOM_ON)       # must be set before CiStart (CAN_INIT)
+                    lo = ", listen-only" if r >= 0 else f", listen-only failed: {err_text(r)}"
                 else:
                     lo = ", listen-only not available in this CHAI version"
             _check(self.lib.CiStart(self.chan), "CiStart")
@@ -148,6 +216,7 @@ class ChaiChannel:
             self.lib.CiClose(self.chan)
             raise
         self.buf = (canmsg_t * 64)()
+        self.use_write = not hasattr(self.lib, "CiTransmit")         # CHAI < 2.10
         self.info = f"Marathon CHAI {lib_version()} channel {self.chan} (CAN{self.chan % 2 + 1}), " \
                     f"{bitrate // 1000} kbit/s{lo}"
 
@@ -159,7 +228,7 @@ class ChaiChannel:
             n = self.lib.CiRead(self.chan, self.buf, len(self.buf))
             if n < 0:
                 self.errors += 1
-                raise RuntimeError(f"CiRead failed (CHAI error {n})")
+                raise RuntimeError(f"CiRead failed: {err_text(n)}")
             now = time.time()
             for k in range(n):
                 m = self.buf[k]
@@ -178,7 +247,14 @@ class ChaiChannel:
         m.flags = (FRAME_EFF if ext else 0) | (FRAME_RTR if rtr else 0)
         for k, b in enumerate(bytes(data)[:8]):
             m.data[k] = b
-        _check(self.lib.CiTransmit(self.chan, ctypes.byref(m)), "CiTransmit")
+        if not self.use_write:
+            r = self.lib.CiTransmit(self.chan, ctypes.byref(m))
+            if r >= 0:
+                return
+            if not hasattr(self.lib, "CiWrite"):
+                _check(r, "CiTransmit")
+            self.use_write = True          # CAN-bus-USBnp firmware <= 1.3 has no CiTransmit: use CiWrite from now on
+        _check(self.lib.CiWrite(self.chan, ctypes.byref(m), 1), "CiWrite")
 
     def close(self):
         try:

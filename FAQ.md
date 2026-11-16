@@ -470,11 +470,19 @@ both).
 
 ### Can I use a Marathon CAN-bus-USB adapter?
 Yes: CAN tab → *CAN lines* → interface **Marathon CAN-bus-USB (CHAI driver)** on any line. Install Marathon's
-driver package (it brings the CHAI library `chai.dll`; on Linux `libchai.so`). Channel **0 = CAN1, 1 = CAN2** of the
-adapter (a second Marathon adapter: 2 and 3), so a 2-channel adapter can carry e.g. *BOS CAN1* and *BOS CAN2*.
-Bit rates 10 kbit/s ... 1 Mbit/s; listen-only only if the CHAI version has it. If the library is not found, put
-`chai.dll` next to the program / KTR_TEST.exe or set the environment variable `CHAI_LIB` to its full path. It can
-be combined freely with the CANable and the IXXAT on the other lines.
+driver package (CHAI: `chai.dll`, copied to the Windows system folder by the installer; on Linux `libchai.so`).
+The channel list shows the detected adapters and their channels (CAN1 = channel 0, CAN2 = channel 1 for the first
+adapter), so a 2-channel adapter can carry e.g. *BOS CAN1* and *BOS CAN2*. Bit rates 10 kbit/s ... 1 Mbit/s,
+listen-only supported. It can be combined freely with the CANable and the IXXAT on the other lines.
+
+**Connector:** the CAN-bus-USB has **both channels on one 9-pin D-sub** with non-standard pins - CAN1: L pin 2,
+H pin 7, GND 3 / 6; CAN2: L pin 4, H pin 8, GND 5. Use Marathon's **branch cable** (supplied) to get two standard
+CiA DS 102 connectors (L 2, H 7, GND 3 / 6). The **120 Ω terminators** are jumpers inside: P6 for CAN1, P7 for CAN2
+(the device is supplied without termination).
+
+**If the library is not found:** put the `chai.dll` matching the Python / program bitness (CHAI installation folder
+`x64` for 64-bit, `x32` for 32-bit) next to the program / KTR_TEST.exe, or set `CHAI_LIB` to its full path.
+CAN-bus-USBnp adapters with firmware ≤ 1.3 have no CiTransmit - the program then sends with CiWrite automatically.
 
 ### Can the IXXAT read both channels at once?
 Yes — CAN1 and CAN2 are separate controllers; each line has its own reader. A single-channel

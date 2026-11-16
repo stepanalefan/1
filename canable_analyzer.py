@@ -724,9 +724,13 @@ def list_channels(kind: str) -> list[tuple[str, str]]:
         try:
             import chai_can
             note = f"CHAI {chai_can.lib_version()}"
+            found = chai_can.boards()
         except Exception as e:
-            note = f"CHAI library not found ({type(e).__name__})"
-        return [(str(c), f"adapter {c // 2 + 1}, CAN{c % 2 + 1}  [{note}]") for c in range(4)]
+            note, found = f"CHAI library not found: {e}", []
+        out = [(str(ch), f"{b['name'] or 'Marathon'} #{b['board']}, CAN{k + 1}  (channel {ch}, {note})")
+               for b in found for k, ch in enumerate(b["channels"])]
+        return out or [(str(ch), f"CAN{ch % 2 + 1} of adapter {ch // 2 + 1} - no adapter detected  [{note}]")
+                       for ch in range(4)]
     if kind == "socketcan":
         try:
             names = sorted(n for n in os.listdir("/sys/class/net") if "can" in n)
