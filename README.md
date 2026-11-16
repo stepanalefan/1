@@ -133,6 +133,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, streamed multi-core chip receiver (any sample rate ≥ 1.25 × 131 Msym/s, e.g. 275 MS/s), despreading |
 | `bos_iqfile.py` | I/Q files: read .iq.tar / .iqw / .csv / raw (memory-mapped: multi-GB recordings open instantly), write .iq.tar |
 | `bos_protocol.py` | BOS CAN protocol: identifiers, command codes and parameters, acknowledgements, CRC-16, КОНФИГ decoding |
+| `bos_commands_0102.json` | All BOS commands of ПИЛВ 0102-004 (tables 4.6 / 4.7 / 4.8): codes, data-field layouts and allowed values (tables 4.9-4.35), presets; used by the station tests, the simulator and the CAN tab (*+ BOS 0102…*). `python bos_protocol.py --list` prints every frame |
 | `iq_demod.py` | Software demodulator (BPSK / QPSK / OQPSK / 8PSK / 16QAM) |
 | `dashboard.py` | Main tab, sequences |
 | `bench_monitor.py` | HMP4040 tab, VISA / serial / socket helpers |

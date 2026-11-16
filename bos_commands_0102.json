@@ -1,0 +1,2228 @@
+{
+ "document": "ПИЛВ 0102-004, part 1 — BOS control commands over CAN 2.0B",
+ "tables": "4.6 / 4.7 (commands to the BOS), 4.8 (commands sent by the BOS); data fields: tables 4.9-4.35",
+ "format": {
+  "id": "29-bit: (sender<<22)|(receiver<<16)|(ack request<<14)|(has data<<13)|code",
+  "addresses": {
+   "BOS": "0x29",
+   "group": "0x0D",
+   "sender_default": "0x18"
+  },
+  "data": "commands with data always carry 8 bytes (unused bytes 0x00); multi-byte values little-endian",
+  "modes": "ДЖР = executed only in standby (the BOS rejects / ignores it during a session); all = any mode",
+  "fields": "byte = first byte, len = bytes (LE), bits = [hi, lo] within the byte, scale = units per LSB, values = allowed codes, strict = other codes prohibited, zero_bits = must be 0"
+ },
+ "commands": [
+  {
+   "code": "0x00",
+   "mnemonic": "NOP",
+   "name": "Empty command (link check)",
+   "bytes": 0,
+   "section": "4.2.3.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "presets": [
+    {
+     "name": "NOP",
+     "params": {},
+     "test": true
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x01",
+   "mnemonic": "MODE_D",
+   "name": "Standby mode (ДЖР): ends any session, RF off",
+   "bytes": 0,
+   "section": "4.2.3.2",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "presets": [
+    {
+     "name": "MODE_D",
+     "params": {},
+     "test": true
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x02",
+   "mnemonic": "SET_Sour_10MHz",
+   "name": "10 MHz reference source",
+   "bytes": 1,
+   "section": "4.2.3.3",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "With 'external' the BOS checks the input (10 000 000 ± 1000 pulses); if absent or invalid it runs from the internal generator. Err_Ref_LO in ИОК_ОСН shows the tuning.",
+   "fields": [
+    {
+     "name": "source",
+     "byte": 0,
+     "bits": [
+      0,
+      0
+     ],
+     "values": {
+      "0": "internal generator",
+      "1": "external generator"
+     }
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      1
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Sour_10MHz external",
+     "params": {
+      "source": 1
+     },
+     "test": true
+    },
+    {
+     "name": "SET_Sour_10MHz internal",
+     "params": {
+      "source": 0
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x03",
+   "mnemonic": "SET_Data_Randomiz",
+   "name": "Randomisation (ШР/КБД only, CCSDS 131.0-B-3)",
+   "bytes": 1,
+   "section": "4.2.3.4",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "randomize",
+     "byte": 0,
+     "bits": [
+      0,
+      0
+     ],
+     "values": {
+      "0": "off",
+      "1": "on"
+     }
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      1
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Data_Randomiz on",
+     "params": {
+      "randomize": 1
+     },
+     "test": true
+    },
+    {
+     "name": "SET_Data_Randomiz off",
+     "params": {
+      "randomize": 0
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x04",
+   "mnemonic": "SET_Time_SNR",
+   "name": "Session (СР) duration limit",
+   "bytes": 1,
+   "section": "4.2.3.5",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "seconds",
+     "byte": 0,
+     "min": 0,
+     "max": 255,
+     "unit": "s",
+     "note": "0 = no limit"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Time_SNR 255 s",
+     "params": {
+      "seconds": 255
+     },
+     "test": true
+    },
+    {
+     "name": "SET_Time_SNR 30 s",
+     "params": {
+      "seconds": 30
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x06",
+   "mnemonic": "SET_CAN",
+   "name": "CAN buses used for transmission",
+   "bytes": 1,
+   "section": "4.2.3.6",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "buses",
+     "byte": 0,
+     "bits": [
+      1,
+      0
+     ],
+     "values": {
+      "1": "CAN1 only",
+      "2": "CAN2 only",
+      "3": "CAN1 + CAN2"
+     },
+     "strict": true
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      2
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_CAN both",
+     "params": {
+      "buses": 3
+     },
+     "test": true
+    },
+    {
+     "name": "SET_CAN CAN1 only",
+     "params": {
+      "buses": 1
+     }
+    },
+    {
+     "name": "SET_CAN CAN2 only",
+     "params": {
+      "buses": 2
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x07",
+   "mnemonic": "reserve_07",
+   "name": "Reserved command (BOS answers КВ-: command does not exist)",
+   "bytes": 0,
+   "section": "4.2.3.7",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "reserved": true,
+   "presets": [
+    {
+     "name": "reserve 0x07 (expect КВ-)",
+     "params": {},
+     "test": true,
+     "expect": "КВ-"
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x08",
+   "mnemonic": "SET_BPU_AFAR_mode",
+   "name": "АФАР БПУ set selection",
+   "bytes": 1,
+   "section": "4.2.3.8",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "bpu",
+     "byte": 0,
+     "bits": [
+      1,
+      0
+     ],
+     "values": {
+      "1": "БПУ1",
+      "2": "БПУ2",
+      "3": "automatic selection"
+     },
+     "strict": true
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      2
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_BPU_AFAR_mode auto",
+     "params": {
+      "bpu": 3
+     }
+    },
+    {
+     "name": "SET_BPU_AFAR_mode BPU1",
+     "params": {
+      "bpu": 1
+     }
+    },
+    {
+     "name": "SET_BPU_AFAR_mode BPU2",
+     "params": {
+      "bpu": 2
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0A",
+   "mnemonic": "TurnOff_BPU_AFAR",
+   "name": "Hardware reset of the АФАР control units (both off for TetBPU_Off, then on per КОНФИГ)",
+   "bytes": 0,
+   "section": "4.2.3.9",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Ends a running session (→ ДЖР), sends 'Disable BARL PRD lock'.",
+   "presets": [
+    {
+     "name": "TurnOff_BPU_AFAR",
+     "params": {}
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0B",
+   "mnemonic": "SET_QuickOn_mode",
+   "name": "АФАР fast session switch-on control mode",
+   "bytes": 1,
+   "section": "4.2.3.10",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "mode",
+     "byte": 0,
+     "bits": [
+      1,
+      0
+     ],
+     "values": {
+      "1": "QuickOn signal only",
+      "2": "CAN commands only",
+      "3": "signal + command"
+     },
+     "strict": true
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      2
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_QuickOn_mode signal+command",
+     "params": {
+      "mode": 3
+     }
+    },
+    {
+     "name": "SET_QuickOn_mode signal",
+     "params": {
+      "mode": 1
+     }
+    },
+    {
+     "name": "SET_QuickOn_mode command",
+     "params": {
+      "mode": 2
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x05",
+   "mnemonic": "reserve_05",
+   "name": "Reserved command (BOS answers КВ-: command does not exist)",
+   "bytes": 0,
+   "section": "4.2.3.11",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "reserved": true,
+   "presets": [
+    {
+     "name": "reserve 0x05 (expect КВ-)",
+     "params": {},
+     "test": true,
+     "expect": "КВ-"
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x80",
+   "mnemonic": "Time_KA",
+   "name": "БШВ time (seconds since 01.01.1970 UTC of the previous 1C mark)",
+   "bytes": 4,
+   "section": "4.2.3.12",
+   "modes": "all",
+   "receiver": "broadcast",
+   "ack": false,
+   "sender_hint": "БКУ",
+   "note": "Cyclic every second alternating CAN buses, no acknowledgement. The broadcast receiver address is not given in this part of the document; the station sends it to the BOS address (0x29) without acknowledgement request.",
+   "fields": [
+    {
+     "name": "bshv",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295,
+     "unit": "s",
+     "note": "little-endian; example 0x52F02B58 → 58 2B F0 52 00 00 00 00"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Time_KA 02.03.2014 23:50:48",
+     "params": {
+      "bshv": 1391471448
+     }
+    },
+    {
+     "name": "Time_KA current time (taken when encoded)",
+     "params": {
+      "bshv": "now"
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x10",
+   "mnemonic": "SET_PeriodTM",
+   "name": "Telemetry array output period",
+   "bytes": 5,
+   "section": "4.2.3.13",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "tm",
+     "byte": 0,
+     "values": {
+      "0xFC": "ИОК_ОСН (main)",
+      "0xFB": "ИОК_ДОП (additional)",
+      "0xFD": "ИОК_СОСТОЯНИЕ (state)",
+      "0xFA": "ИОК_КОНФИГ (config)",
+      "0xF9": "ИОК_АРХИВ (archive)"
+     },
+     "strict": true
+    },
+    {
+     "name": "tm_exp",
+     "byte": 1,
+     "min": 0,
+     "max": 0,
+     "default": 0
+    },
+    {
+     "name": "period",
+     "byte": 4,
+     "len": 2,
+     "min": 0,
+     "max": 255.9375,
+     "scale": 0.0625,
+     "unit": "s",
+     "note": "1/16 s per LSB, 0 = output off; the BOS rounds down to whole seconds, max 255 s"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_PeriodTM ИОК_ОСН 1 s",
+     "params": {
+      "tm": 252,
+      "period": 1.0
+     },
+     "test": true
+    },
+    {
+     "name": "SET_PeriodTM ИОК_ДОП 1 s",
+     "params": {
+      "tm": 251,
+      "period": 1.0
+     },
+     "test": true
+    },
+    {
+     "name": "SET_PeriodTM ИОК_СОСТОЯНИЕ 10 s",
+     "params": {
+      "tm": 253,
+      "period": 10.0
+     },
+     "test": true
+    },
+    {
+     "name": "SET_PeriodTM ИОК_ОСН 1 min",
+     "params": {
+      "tm": 252,
+      "period": 60.0
+     }
+    },
+    {
+     "name": "SET_PeriodTM ИОК_ОСН off",
+     "params": {
+      "tm": 252,
+      "period": 0
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x11",
+   "mnemonic": "REQ_TM",
+   "name": "Extraordinary telemetry request",
+   "bytes": 2,
+   "section": "4.2.3.14",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "tm",
+     "byte": 0,
+     "values": {
+      "0xFC": "ИОК_ОСН (main)",
+      "0xFB": "ИОК_ДОП (additional)",
+      "0xFD": "ИОК_СОСТОЯНИЕ (state)",
+      "0xFA": "ИОК_КОНФИГ (config)",
+      "0xF9": "ИОК_АРХИВ (archive)"
+     },
+     "strict": true
+    },
+    {
+     "name": "tm_exp",
+     "byte": 1,
+     "min": 0,
+     "max": 0,
+     "default": 0
+    }
+   ],
+   "presets": [
+    {
+     "name": "REQ_TM ИОК_ОСН",
+     "params": {
+      "tm": 252
+     },
+     "test": true
+    },
+    {
+     "name": "REQ_TM ИОК_ДОП",
+     "params": {
+      "tm": 251
+     },
+     "test": true
+    },
+    {
+     "name": "REQ_TM ИОК_СОСТОЯНИЕ",
+     "params": {
+      "tm": 253
+     },
+     "test": true
+    },
+    {
+     "name": "REQ_TM ИОК_КОНФИГ",
+     "params": {
+      "tm": 250
+     },
+     "test": true
+    },
+    {
+     "name": "REQ_TM ИОК_АРХИВ",
+     "params": {
+      "tm": 249
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x09",
+   "mnemonic": "SET_Sour_Angle",
+   "name": "Target designation source for starting a session",
+   "bytes": 1,
+   "section": "4.2.3.15",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "source",
+     "byte": 0,
+     "bits": [
+      1,
+      0
+     ],
+     "values": {
+      "1": "УПНГ only",
+      "2": "БКУ only",
+      "3": "both"
+     },
+     "strict": true
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 0,
+     "bits": [
+      7,
+      2
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Sour_Angle both",
+     "params": {
+      "source": 3
+     }
+    },
+    {
+     "name": "SET_Sour_Angle UPNG",
+     "params": {
+      "source": 1
+     }
+    },
+    {
+     "name": "SET_Sour_Angle BKU",
+     "params": {
+      "source": 2
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0D",
+   "mnemonic": "SET_Angle_ErdStation_Err",
+   "name": "Permissible target designation angle",
+   "bytes": 1,
+   "section": "4.2.3.16",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "angle",
+     "byte": 0,
+     "min": 0,
+     "max": 25.0,
+     "scale": 0.2,
+     "unit": "°",
+     "note": "0.2° per LSB, 0…25°"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Angle_ErdStation_Err 15°",
+     "params": {
+      "angle": 15.0
+     }
+    },
+    {
+     "name": "SET_Angle_ErdStation_Err 25°",
+     "params": {
+      "angle": 25.0
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0C",
+   "mnemonic": "Angle_ErdStation_BKU",
+   "name": "Target designation to the ground station from the БКУ",
+   "bytes": 2,
+   "section": "4.2.3.17",
+   "modes": "all",
+   "receiver": "group",
+   "ack": false,
+   "note": "Cyclic with alternating CAN buses (period Tugol_BKU), no acknowledgement; valid for 3 s.",
+   "fields": [
+    {
+     "name": "angx",
+     "byte": 0,
+     "signed": true,
+     "min": -25.0,
+     "max": 25.0,
+     "scale": 0.2,
+     "unit": "°",
+     "none": 128,
+     "note": "0.2° per LSB, two's complement; 0x80 = no direction / more than 25°"
+    },
+    {
+     "name": "angy",
+     "byte": 1,
+     "signed": true,
+     "min": -25.0,
+     "max": 25.0,
+     "scale": 0.2,
+     "unit": "°",
+     "none": 128
+    }
+   ],
+   "presets": [
+    {
+     "name": "Angle_ErdStation_BKU 0°/0°",
+     "params": {
+      "angx": 0.0,
+      "angy": 0.0
+     }
+    },
+    {
+     "name": "Angle_ErdStation_BKU 15°/-15°",
+     "params": {
+      "angx": 15.0,
+      "angy": -15.0
+     }
+    },
+    {
+     "name": "Angle_ErdStation_BKU no direction",
+     "params": {
+      "angx": null,
+      "angy": null
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x30",
+   "mnemonic": "Angle_ErdStation_UPNG",
+   "name": "Target designation to the ground station from the УПНГ",
+   "bytes": 3,
+   "section": "4.2.3.18",
+   "modes": "all",
+   "receiver": "group",
+   "ack": false,
+   "sender_hint": "УПНГ 0x2A",
+   "fields": [
+    {
+     "name": "angx",
+     "byte": 0,
+     "signed": true,
+     "min": -15.0,
+     "max": 15.0,
+     "scale": 0.2,
+     "unit": "°",
+     "none": 128,
+     "note": "0.2° per LSB, two's complement, ±15°; 0x80 = direction not determined"
+    },
+    {
+     "name": "angy",
+     "byte": 1,
+     "signed": true,
+     "min": -15.0,
+     "max": 15.0,
+     "scale": 0.2,
+     "unit": "°",
+     "none": 128
+    },
+    {
+     "name": "valid",
+     "byte": 2,
+     "values": {
+      "0": "invalid",
+      "1": "valid"
+     },
+     "strict": true
+    }
+   ],
+   "presets": [
+    {
+     "name": "Angle_ErdStation_UPNG 0°/0° valid",
+     "params": {
+      "angx": 0.0,
+      "angy": 0.0,
+      "valid": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x12",
+   "mnemonic": "SET_ID_KA",
+   "name": "Spacecraft identifier (10 bits, used in idle КБД frames)",
+   "bytes": 2,
+   "section": "4.2.3.19",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "id",
+     "byte": 0,
+     "len": 2,
+     "min": 0,
+     "max": 1023
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_ID_KA 0x300 (default)",
+     "params": {
+      "id": 768
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x14",
+   "mnemonic": "SET_#Preamb",
+   "name": "Preamble value (ШР)",
+   "bytes": 4,
+   "section": "4.2.3.20",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "value",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_#Preamb 0xC6DFA611",
+     "params": {
+      "value": 3336545809
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x13",
+   "mnemonic": "SET_Numb_Preamb",
+   "name": "Number of preambles in ШР/ПООСШ and ШР/КБД",
+   "bytes": 1,
+   "section": "4.2.3.21",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "n",
+     "byte": 0,
+     "min": 0,
+     "max": 255,
+     "note": "0 = 1 preamble … 255 = 256 preambles"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Numb_Preamb 5 preambles (default)",
+     "params": {
+      "n": 4
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x15",
+   "mnemonic": "SET_Registr_Preamb",
+   "name": "Preamble PRS register start value",
+   "bytes": 4,
+   "section": "4.2.3.22",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "reg",
+     "byte": 0,
+     "len": 4,
+     "min": 1,
+     "max": 4294967295,
+     "note": "0 prohibited; the BOS uses the lower 2 bytes"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Registr_Preamb 1",
+     "params": {
+      "reg": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x16",
+   "mnemonic": "SET_Polyn_Preamb",
+   "name": "Preamble PRS polynomial coefficients",
+   "bytes": 5,
+   "section": "4.2.3.23",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "coeffs",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295,
+     "note": "bit k = term x^k (x^10+x^6+1 → 0x00000220); degree ≤ 16 for the ground station; the BOS uses the lower 2 bytes"
+    },
+    {
+     "name": "index",
+     "byte": 4,
+     "bits": [
+      2,
+      0
+     ],
+     "min": 0,
+     "max": 7,
+     "note": "polynomial number 1…7 (0 = factory, cannot be changed)"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Polyn_Preamb #1 = 0x8805",
+     "params": {
+      "coeffs": 34821,
+      "index": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1A",
+   "mnemonic": "SET_Registr12_KBD",
+   "name": "КБД / ПООСШ PRS registers 1 and 2 start values",
+   "bytes": 8,
+   "section": "4.2.3.24",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "rules": [
+    "not_both_zero:reg1,reg2"
+   ],
+   "fields": [
+    {
+     "name": "reg1",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295
+    },
+    {
+     "name": "reg2",
+     "byte": 4,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Registr12_KBD 1 / 1 (default)",
+     "params": {
+      "reg1": 1,
+      "reg2": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1B",
+   "mnemonic": "SET_PolynX.1_KBD",
+   "name": "КБД / ПООСШ PRS polynomial X.1 coefficients",
+   "bytes": 5,
+   "section": "4.2.3.25",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "coeffs",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295,
+     "note": "bit k = term x^k, degree ≤ 32"
+    },
+    {
+     "name": "index",
+     "byte": 4,
+     "bits": [
+      2,
+      0
+     ],
+     "min": 0,
+     "max": 7,
+     "note": "polynomial number 1…7 (0 = factory, cannot be changed)"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_PolynX.1_KBD #1 = factory 0.1",
+     "params": {
+      "coeffs": 8388675,
+      "index": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1C",
+   "mnemonic": "SET_PolynX.2_KBD",
+   "name": "КБД / ПООСШ PRS polynomial X.2 coefficients",
+   "bytes": 5,
+   "section": "4.2.3.26",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "coeffs",
+     "byte": 0,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295,
+     "note": "bit k = term x^k, degree ≤ 32"
+    },
+    {
+     "name": "index",
+     "byte": 4,
+     "bits": [
+      2,
+      0
+     ],
+     "min": 0,
+     "max": 7,
+     "note": "polynomial number 1…7 (0 = factory, cannot be changed)"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_PolynX.2_KBD #1 = factory 0.2",
+     "params": {
+      "coeffs": 4194308,
+      "index": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x17",
+   "mnemonic": "SET_Temp_mode",
+   "name": "Over-temperature automatic shutdown mode",
+   "bytes": 1,
+   "section": "4.2.3.27",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "sensors",
+     "byte": 0,
+     "bits": [
+      3,
+      0
+     ],
+     "min": 0,
+     "max": 15,
+     "note": "0 = auto shutdown off; bit0 FPGA, bit1 DAC, bit2 modulator, bit3 not used (logical only); 0b1111 = any sensor"
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Temp_mode any sensor",
+     "params": {
+      "sensors": 15
+     }
+    },
+    {
+     "name": "SET_Temp_mode off",
+     "params": {
+      "sensors": 0
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x18",
+   "mnemonic": "SET_Temp_Max",
+   "name": "Maximum (shutdown) temperature of one sensor",
+   "bytes": 1,
+   "section": "4.2.3.28",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Table 4.6 lists 1 data byte, table 4.30 defines bytes 0 (temperature) and 1 (sensor); both are sent.",
+   "fields": [
+    {
+     "name": "temp",
+     "byte": 0,
+     "min": -128,
+     "max": 127,
+     "unit": "°C",
+     "encoding": "signmag_minus1",
+     "note": "0x00…0x7F = 0…127 °C, 0x80 = −1 °C … 0xFF = −128 °C"
+    },
+    {
+     "name": "sensor",
+     "byte": 1,
+     "bits": [
+      3,
+      0
+     ],
+     "values": {
+      "1": "sensor 1 (FPGA)",
+      "2": "sensor 2 (DAC)",
+      "4": "sensor 3 (modulator)",
+      "8": "sensor 4 (not used, logical)"
+     },
+     "strict": true
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_Temp_Max FPGA 70 °C",
+     "params": {
+      "temp": 70,
+      "sensor": 1
+     }
+    },
+    {
+     "name": "SET_Temp_Max DAC 70 °C",
+     "params": {
+      "temp": 70,
+      "sensor": 2
+     }
+    },
+    {
+     "name": "SET_Temp_Max modulator 70 °C",
+     "params": {
+      "temp": 70,
+      "sensor": 4
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0E",
+   "mnemonic": "SAVE_CONFIG_NEW",
+   "name": "Save the current settings into the КОНФИГ file (Confiq_Number + 1)",
+   "bytes": 0,
+   "section": "4.2.3.29",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Writes EPROM — not part of the automatic command test.",
+   "presets": [
+    {
+     "name": "SAVE_CONFIG_NEW",
+     "params": {}
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x19",
+   "mnemonic": "Park",
+   "name": "Data parking: save the ИОК_STATE counters (send before power-off)",
+   "bytes": 0,
+   "section": "4.2.3.30",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "presets": [
+    {
+     "name": "Park",
+     "params": {}
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x0F",
+   "mnemonic": "CLR_Flash_Cmd_SNR",
+   "name": "Erase the archive of executed session commands",
+   "bytes": 0,
+   "section": "4.2.3.31",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Erases flash — not part of the automatic command test.",
+   "presets": [
+    {
+     "name": "CLR_Flash_Cmd_SNR",
+     "params": {}
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1D",
+   "mnemonic": "READ_FlashSNR_Cmd",
+   "name": "Read the session archive: number of latest sessions",
+   "bytes": 2,
+   "section": "4.2.3.32",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "count",
+     "byte": 0,
+     "len": 2,
+     "min": 0,
+     "max": 65535,
+     "note": "0 = no ИОК_АРХИВ; more than 1024 → 1024"
+    }
+   ],
+   "presets": [
+    {
+     "name": "READ_FlashSNR_Cmd last 1",
+     "params": {
+      "count": 1
+     }
+    },
+    {
+     "name": "READ_FlashSNR_Cmd last 10",
+     "params": {
+      "count": 10
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1E",
+   "mnemonic": "READ_FlashSNR_Page",
+   "name": "Read the session archive page by page",
+   "bytes": 2,
+   "section": "4.2.3.32",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "start",
+     "byte": 0,
+     "min": 0,
+     "max": 255,
+     "note": "0…0x3F; other values → 0x3F"
+    },
+    {
+     "name": "pages",
+     "byte": 1,
+     "min": 0,
+     "max": 255,
+     "note": "0 = no ИОК_АРХИВ"
+    }
+   ],
+   "presets": [
+    {
+     "name": "READ_FlashSNR_Page 0, 1 page",
+     "params": {
+      "start": 0,
+      "pages": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xFF",
+   "mnemonic": "SET_CONFIG_PROM",
+   "name": "Select the configuration source (load КОНФИГ into RAM)",
+   "bytes": 1,
+   "section": "4.2.3.33",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "'user' reloads the stored КОНФИГ (factory if none) — used by the station to restore the settings after the command test.",
+   "fields": [
+    {
+     "name": "source",
+     "byte": 0,
+     "values": {
+      "1": "factory configuration",
+      "2": "user configuration"
+     },
+     "strict": true
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 1,
+     "bits": [
+      7,
+      0
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "SET_CONFIG_PROM user (restore saved settings)",
+     "params": {
+      "source": 2
+     },
+     "test": true
+    },
+    {
+     "name": "SET_CONFIG_PROM factory",
+     "params": {
+      "source": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x1F",
+   "mnemonic": "TurnOn_Time_QuickOn",
+   "name": "АФАР fast switch-on signal / command for a given time (no RF)",
+   "bytes": 1,
+   "section": "4.2.3.34",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "seconds",
+     "byte": 0,
+     "min": 0,
+     "max": 255,
+     "unit": "s",
+     "note": "0 = not switched on"
+    }
+   ],
+   "presets": [
+    {
+     "name": "TurnOn_Time_QuickOn 5 s",
+     "params": {
+      "seconds": 5
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA0",
+   "mnemonic": "Send_Carrier",
+   "name": "Session: transmit carrier",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    8,
+    1592
+   ],
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 8,
+     "max": 1592,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_Carrier N=800",
+     "params": {
+      "freq_n": 800,
+      "count": 30
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA1",
+   "mnemonic": "Send_UB_Data",
+   "name": "Session: narrowband (УР) КБД",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    8,
+    1592
+   ],
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 8,
+     "max": 1592,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_UB_Data N=800",
+     "params": {
+      "freq_n": 800,
+      "rate": 2,
+      "reg": 5
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA2",
+   "mnemonic": "Send_Preamb",
+   "name": "Session: wideband (ШР) preambles",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_Preamb N=800",
+     "params": {
+      "freq_n": 800,
+      "count": 4
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA3",
+   "mnemonic": "Send_SNR_Sequens",
+   "name": "Session: ШР ПООСШ",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_SNR_Sequens N=800",
+     "params": {
+      "freq_n": 800,
+      "count": 100
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA4",
+   "mnemonic": "Send_KBD",
+   "name": "Session: ШР КБД",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_KBD N=800",
+     "params": {
+      "freq_n": 800,
+      "coding": 1,
+      "rate": 2,
+      "count": 2,
+      "reg": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA5",
+   "mnemonic": "Send_Time_Preamb",
+   "name": "Session at the set time: ШР preambles",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "note": "Timed variant: executed at the time set by Set_TimeSend (0xAA).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_Time_Preamb N=800 (timed)",
+     "params": {
+      "freq_n": 800,
+      "count": 4
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA6",
+   "mnemonic": "Send_Time_SNR_Sequens",
+   "name": "Session at the set time: ШР ПООСШ",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "note": "Timed variant: executed at the time set by Set_TimeSend (0xAA).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_Time_SNR_Sequens N=800 (timed)",
+     "params": {
+      "freq_n": 800,
+      "count": 100
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xA7",
+   "mnemonic": "Send_Time_KBD",
+   "name": "Session at the set time: ШР КБД",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "note": "Timed variant: executed at the time set by Set_TimeSend (0xAA).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_Time_KBD N=800 (timed)",
+     "params": {
+      "freq_n": 800,
+      "coding": 1,
+      "rate": 2,
+      "count": 2,
+      "reg": 1
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xAA",
+   "mnemonic": "Set_TimeSend",
+   "name": "Session transmission time",
+   "bytes": 5,
+   "section": "4.2.4.2",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "fields": [
+    {
+     "name": "raw",
+     "byte": 0,
+     "len": 5,
+     "min": 0,
+     "max": 1099511627775,
+     "note": "data field per §4.2.4.2 (entered as raw value)"
+    }
+   ],
+   "presets": [],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0xE0",
+   "mnemonic": "Chang_FlashTM",
+   "name": "Technological: change parameters in EPROM",
+   "bytes": 8,
+   "section": "4.2.5.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Manufacturer use only.",
+   "fields": [
+    {
+     "name": "raw",
+     "byte": 0,
+     "len": 8,
+     "min": 0,
+     "max": 18446744073709551615,
+     "note": "technological data per §4.2.5.1"
+    }
+   ],
+   "presets": [],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x33",
+   "mnemonic": "Cmd_QuickOn",
+   "name": "Quick switch of the АФАР to session mode",
+   "bytes": 1,
+   "section": "4.2.6.1",
+   "modes": "all",
+   "receiver": "AFAR/БАРЛ",
+   "ack": false,
+   "direction": "from_bos",
+   "presets": []
+  },
+  {
+   "code": "0x60",
+   "mnemonic": "Block_BARL",
+   "name": "Enable the БАРЛ PRD lock",
+   "bytes": 0,
+   "section": "4.2.6.2",
+   "modes": "all",
+   "receiver": "AFAR/БАРЛ",
+   "ack": false,
+   "direction": "from_bos",
+   "presets": []
+  },
+  {
+   "code": "0x61",
+   "mnemonic": "UnBlock_BARL",
+   "name": "Disable the БАРЛ PRD lock",
+   "bytes": 0,
+   "section": "4.2.6.2",
+   "modes": "all",
+   "receiver": "AFAR/БАРЛ",
+   "ack": false,
+   "direction": "from_bos",
+   "presets": []
+  },
+  {
+   "code": "0x24",
+   "mnemonic": "REQ_BARL_KBD",
+   "name": "КБД request from the БАРЛ",
+   "bytes": 1,
+   "section": "4.2.6.3",
+   "modes": "all",
+   "receiver": "AFAR/БАРЛ",
+   "ack": false,
+   "direction": "from_bos",
+   "presets": []
+  }
+ ]
+}

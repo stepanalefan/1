@@ -75,8 +75,9 @@ def _sps(fs):
 
 
 # ------------------------------------------------------------------------------------------- CAN
-def can_frame(st, code, data=b"", ack=True, receiver=bp.BOS):
+def can_frame(st, code, data=b"", ack=True, receiver=None):
     """'0x01 MODE_D  ID 0x06290001  data —' with the station's sender address."""
+    receiver = bp.receiver_of(code) if receiver is None else receiver
     cid, payload = bp.command(code, st.ctl.get("sender", 0x18), data, ack, receiver)
     name = bp.COMMANDS.get(code, ("?",))[0]
     hexd = " ".join(f"{b:02X}" for b in payload) if payload else "—"
@@ -600,7 +601,44 @@ def t_ber(st, demo, state):
     return out
 
 
-TESTS = {"ref": t_ref, "can12": t_can12, "link": t_link, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
+def t_cmds(st, demo, state):
+    if st.ctl.get("method", "protocol") != "protocol":
+        return [Step("info", L("skipped — needs protocol control", "пропуск — нужно управление по протоколу"))]
+    n = len(bp.DEFS)
+    out = [Step("info", L(f"bos_commands_0102.json: {n} commands, {len(bp.presets())} presets encoded and checked "
+                          f"against the document rules (ranges, prohibited codes, zero bits)",
+                          f"bos_commands_0102.json: {n} команд, {len(bp.presets())} вариантов кодируются и "
+                          f"проверяются по правилам документа (диапазоны, запрещённые коды, нулевые биты)"))]
+    out += proto(st, 0x01, what=L("MODE_D — standby (setup commands only in ДЖР)",
+                                  "MODE_D — дежурный режим (команды настройки только в ДЖР)"))
+    out.append(Step("can", L("REQ_TM ИОК_КОНФИГ — settings before", "REQ_TM ИОК_КОНФИГ — настройки до проверки"),
+                    [Step("info", can_frame(st, 0x11, bp.p_req_tm(0xFA)))]))
+    todo = [(c, p) for c, p in bp.presets() if p.get("test") and c not in (0x00, 0x01, 0xFF)]
+    todo += [(c, p) for c, p in bp.presets(0xFF) if p.get("test")]
+    sub = []
+    for c, p in todo:
+        data = bp.encode(c, p.get("params"))
+        sub.append(Step("can", f"0x{c:02X} {p['name']}  →  {p.get('expect', 'КВ+')}",
+                        [Step("info", can_frame(st, c, data, ack=bp.wants_ack(c)))]))
+    out.append(Step("can", L(f"{len(todo)} commands, each must be answered as the document says",
+                             f"{len(todo)} команд, на каждую ответ по документу"), sub))
+    if st.ctl.get("can1_only", False):
+        out += proto(st, 0x06, bytes([0x01]), L("SET_CAN = 01 re-applied", "SET_CAN = 01 повторно"))
+    ts = int(st.ctl.get("time_snr", 255))
+    if ts:
+        out += proto(st, 0x04, bp.p_byte(ts), L(f"SET_Time_SNR {ts} s re-applied (КОНФИГ was reloaded)",
+                                                f"SET_Time_SNR {ts} с повторно (КОНФИГ перезагружен)"))
+    if st.ctl.get("tm_enable", True):
+        for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
+            out += proto(st, 0x10, bp.p_period_tm(tm, per), f"SET_PeriodTM {bp.TM_TYPES[tm]} {per:g} "
+                                                            f"{L('s', 'с')} " + L("re-applied", "повторно"))
+    out.append(Step("can", L("REQ_TM ИОК_КОНФИГ — settings after; must equal the ones before",
+                             "REQ_TM ИОК_КОНФИГ — настройки после; должны совпасть с исходными"),
+                    [Step("info", can_frame(st, 0x11, bp.p_req_tm(0xFA)))]))
+    return out
+
+
+TESTS = {"ref": t_ref, "can12": t_can12, "link": t_link, "cmds": t_cmds, "pre": t_pre, "supply": t_supply, "cw": t_cw, "bpsk": t_mod("BPSK"),
          "oqpsk": t_mod("OQPSK"), "shr": t_shr, "att": t_att, "lin": t_lin, "harm": t_harm, "drift": t_drift,
          "ber": t_ber}
 

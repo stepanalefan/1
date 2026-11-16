@@ -232,7 +232,12 @@ class CommandPanel(QtWidgets.QGroupBox):
         b_tx.clicked.connect(self.add_from_tx)
         b_new = QtWidgets.QPushButton("+ New…")
         b_new.clicked.connect(self.add_new)
-        for b in (b_sel, b_tx, b_new):
+        b_lib = QtWidgets.QPushButton("+ BOS 0102…")
+        b_lib.setToolTip("Add BOS commands from bos_commands_0102.json (ПИЛВ 0102-004 tables 4.6 / 4.7): every "
+                         "preset, data field encoded per the document, for the chosen sender and CAN line. "
+                         "Commands already in the list (same ID and data) are skipped.")
+        b_lib.clicked.connect(self.add_from_library)
+        for b in (b_sel, b_tx, b_new, b_lib):
             add.addWidget(b)
         v.addLayout(add)
 
@@ -316,6 +321,54 @@ class CommandPanel(QtWidgets.QGroupBox):
                        line=bus if bus in self._lines() else "")
 
     # ---------------------------------------------------------- actions ---
+    def add_from_library(self):
+        try:
+            import bos_protocol as bp
+        except Exception as e:                                   # pragma: no cover
+            self.host.logmsg(f"bos_protocol not available: {e}", "err")
+            return
+        if not bp.DEFS:
+            self.host.logmsg(f"BOS command library not found: {bp.LIBRARY_FILE}", "err")
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("BOS commands (0102)")
+        f = QtWidgets.QFormLayout(dlg)
+        snd = QtWidgets.QComboBox()
+        for a, n in bp.SENDERS:
+            snd.addItem(f"0x{a:02X}  {n}", a)
+        ln = QtWidgets.QComboBox()
+        lines = [x for x in self._lines() if x.upper().startswith("BOS")] or self._lines() or ["BOS CAN1"]
+        ln.addItems(lines)
+        grp = QtWidgets.QComboBox()
+        grp.addItems(["All presets", "Test set only (as in the station's 'Command set' test)"])
+        f.addRow("Sender", snd)
+        f.addRow("CAN line", ln)
+        f.addRow("Commands", grp)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        f.addRow(bb)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        only_test = grp.currentIndex() == 1
+        names = {p["name"] for _, p in bp.presets() if p.get("test")}
+        have = {(c.can_id, c.data) for c in self.store.commands} | {(c.can_id, c.name) for c in self.store.commands}
+        new = []
+        for d in bp.library(snd.currentData(), ln.currentText()):
+            if only_test and d["name"] not in names:
+                continue
+            c = Command.from_dict({**d, "uid": None})
+            if (c.can_id, c.data) not in have and (c.can_id, c.name) not in have:
+                have |= {(c.can_id, c.data), (c.can_id, c.name)}
+                new.append(c)
+        if not new:
+            self.host.logmsg("BOS 0102 library: every command is already in the list", "info")
+            return
+        self.store.commands.extend(new)
+        self._commit({c.uid for c in new})
+        self.host.logmsg(f"BOS 0102 library: {len(new)} command(s) added (sender 0x{snd.currentData():02X}, "
+                         f"{ln.currentText()})", "ok")
+
     def add_from_selection(self):
         frames = self.host.selected_frames()
         if not frames:

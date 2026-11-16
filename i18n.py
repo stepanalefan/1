@@ -186,6 +186,15 @@ Quick check|Contrôle rapide|Schnellprüfung|Controllo rapido|簡易試験|Бы�
 Modulation only|Modulation seule|Nur Modulation|Solo modulazione|変調のみ|Только модуляция
 Data decoding|Décodage des données|Datendekodierung|Decodifica dati|データ復号|Декодирование данных
 Burn-in (stability)|Rodage (stabilité)|Einbrennen (Stabilität)|Rodaggio (stabilità)|エージング(安定度)|Прогон (стабильность)
+Command set (0102)|Jeu de commandes (0102)|Befehlssatz (0102)|Set di comandi (0102)|コマンドセット (0102)|Набор команд (0102)
++ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ БОС 0102…
+BOS commands (0102)|Commandes BOS (0102)|BOS-Befehle (0102)|Comandi BOS (0102)|BOSコマンド (0102)|Команды БОС (0102)
+Sender|Émetteur|Absender|Mittente|送信元|Отправитель
+All presets|Tous les préréglages|Alle Vorgaben|Tutti i preset|全プリセット|Все варианты
+Test set only (as in the station's 'Command set' test)|Jeu de test seulement (comme le test « Jeu de commandes »)|Nur Testsatz (wie im Test „Befehlssatz“)|Solo set di prova (come nel test «Set di comandi»)|試験セットのみ(「コマンドセット」試験と同じ)|Только проверочный набор (как в проверке «Набор команд»)
+Library encoded (all presets)|Bibliothèque encodée (tous les préréglages)|Bibliothek kodiert (alle Vorgaben)|Libreria codificata (tutti i preset)|ライブラリ符号化(全プリセット)|Библиотека закодирована (все варианты)
+Settings restored (КОНФИГ before / after)|Réglages restaurés (КОНФИГ avant / après)|Einstellungen wiederhergestellt (КОНФИГ vorher / nachher)|Impostazioni ripristinate (КОНФИГ prima / dopo)|設定復元 (КОНФИГ 前/後)|Настройки восстановлены (КОНФИГ до / после)
+Station link setup re-applied|Réglage de liaison de la station réappliqué|Stations-Verbindungseinstellung erneut gesetzt|Impostazione collegamento stazione riapplicata|ステーションのリンク設定を再適用|Настройка связи стенда применена повторно
 Pre-check (telemetry)|Pré-contrôle (télémesure)|Vorprüfung (Telemetrie)|Pre-controllo (telemetria)|事前確認(テレメトリ)|Предварительная проверка (телеметрия)
 Supply current|Courant d'alimentation|Versorgungsstrom|Corrente di alimentazione|電源電流|Ток питания
 BPSK modulation|Modulation BPSK|BPSK-Modulation|Modulazione BPSK|BPSK変調|Модуляция BPSK

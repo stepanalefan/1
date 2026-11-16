@@ -156,6 +156,10 @@ TESTS = [  # id, name, description
                                    "(protocol control, added automatically)"),
     ("link", "Control link & BOS setup", "NOP acknowledgement, standby, session limit, telemetry periods, "
                                          "stored КОНФИГ read back (protocol control only, added automatically)"),
+    ("cmds", "Command set (0102)", "Every command of bos_commands_0102.json marked for test sent in standby with its "
+                                   "document-encoded data field: КВ+ expected (КВ- for the reserved codes), then "
+                                   "SET_CONFIG_PROM user restores the stored settings and КОНФИГ is compared "
+                                   "(protocol control only)"),
     ("pre", "Pre-check (telemetry)", "BOS telemetry present, PLLs locked, JESD OK, rails, temperatures, reference"),
     ("supply", "Supply current", "Bench supply current with RF off and RF on (PA bias)"),
     ("cw", "Carrier (CW)", "Carrier frequency, power, integrated phase noise, spurs"),
@@ -178,6 +182,7 @@ DEFAULT_PLANS = {
     "Data decoding": ["bpsk", "shr", "ber"],
     "Attenuator": ["att"],
     "Burn-in (stability)": ["pre", "drift"],
+    "Command set (0102)": ["cmds"],
 }
 CTL_MODES = [("rf_off", "RF off"), ("cw", "Carrier (CW)"), ("bpsk", "BPSK"), ("oqpsk", "OQPSK")]
 
@@ -857,6 +862,7 @@ class BosStation(QtWidgets.QWidget):
                 self.data[k] = d.get(k, self.data[k])
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
+                self.data["plans"].setdefault("Command set (0102)", ["cmds"])
             for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
                 if self.data["ctl"].get(k) in ("BOS", "AFAR", "UPNG"):
                     self.data["ctl"][k] += " CAN1"
@@ -2292,7 +2298,7 @@ class BosStation(QtWidgets.QWidget):
         if self._is_demo():
             self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
             return True
-        ok = self._frame(code, data, ack=False, receiver=bp.GROUP_ANGLE if code == 0x0C else bp.BOS)
+        ok = self._frame(code, data, ack=False, receiver=bp.receiver_of(code))
         if code == 0x01:
             self.log("BOS station: MODE_D (standby, RF off) sent" if ok else
                      "BOS station: MODE_D not sent - BOS CAN line not connected", "info" if ok else "err")
@@ -2303,10 +2309,15 @@ class BosStation(QtWidgets.QWidget):
                 self.cur_mode not in (None, "rf_off"):
             self._send_now(0x0C, bp.p_angle(0.0, 0.0))
 
-    def _proto(self, code, data=b"", what="", line=None):
+    def _proto(self, code, data=b"", what="", line=None, expect_neg=False):
         """Send a command with acknowledgement request (on `line`, default CAN line 1); returns the
-        acknowledgement dict (with "bus" = the line it came back on)."""
+        acknowledgement dict (with "bus" = the line it came back on). The data field is checked against the
+        0102 library first (a prohibited value would make the BOS ignore the command). expect_neg: КВ- is the
+        expected answer (reserved codes) and is returned instead of raising."""
         name = bp.COMMANDS[code][0]
+        bad = bp.validate(code, data) if data else ""
+        if bad:
+            raise _TestError(f"{name}: data field rejected by the 0102 rules - {bad}")
         line = line or self.ctl.get("line", "BOS CAN1")
         if self._is_demo():
             ok = self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
@@ -2324,7 +2335,10 @@ class BosStation(QtWidgets.QWidget):
         if a is None:
             raise _TestError(f"{name}: no acknowledgement within 300 ms (BOS off, wrong CAN line, "
                              f"or bus problem - check the CAN tab)")
-        self.log(f"BOS station: {what or name} → {bp.ack_text(a)}", "info" if not a["negative"] else "err")
+        self.log(f"BOS station: {what or name} → {bp.ack_text(a)}",
+                 "info" if a["negative"] == expect_neg else "err")
+        if expect_neg:
+            return a
         if a["negative"]:
             hint = "" if a["unknown"] else (" — the sender address may not be allowed, or the command is only "
                                              "executed in standby (ДЖР); try sender ВМ 1 (0x20)")
@@ -2605,18 +2619,10 @@ class BosStation(QtWidgets.QWidget):
             return
         for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
             yield from self._proto(0x10, bp.p_period_tm(tm, per), f"SET_Period_TM {bp.TM_TYPES[tm]} {per:g} s")
-        self.cfg_rx = None
-        yield from self._proto(0x11, bp.p_req_tm(0xFA), "REQ_TM ИОК_КОНФИГ")
-        if self._is_demo():
-            self.cfg_rx = (time.time(), bp.decode_config(self.sim.config()))
-        for _ in range(30):                                  # ИОК_КОНФИГ: 18 CAN frames, after the current ИОК
-            if self.cfg_rx:
-                break
-            yield ("sleep", 0.1)
-        if not self.cfg_rx:
+        c = yield from self._read_config()
+        if c is None:
             self._row(T, "ИОК_КОНФИГ received", None, "", "within 3 s", "FAIL", text="not received")
             return
-        c = self.cfg_rx[1]
         self.res["config"] = c
         self._row(T, "ИОК_КОНФИГ checksum", None, "", "CRC-16 ok", "PASS" if c["crc_ok"] else "FAIL",
                   text=f"0x{c['Checksum']:04X}" + ("" if c["crc_ok"] else f" (calc 0x{c['crc_calc']:04X})"))
@@ -2627,6 +2633,86 @@ class BosStation(QtWidgets.QWidget):
                   "Temp_Max_DT2", "Temp_Max_DT3"):
             self._row(T, k, c[k], "", "", "INFO", spec="{:.0f}")
         self._row(T, "Preamble", None, "", "", "INFO", text=f"0x{c['Preamb']:08X}")
+
+    def _read_config(self):
+        """REQ_TM ИОК_КОНФИГ → decoded КОНФИГ dict, or None when it does not arrive within 3 s."""
+        self.cfg_rx = None
+        yield from self._proto(0x11, bp.p_req_tm(0xFA), "REQ_TM ИОК_КОНФИГ")
+        if self._is_demo():
+            self.cfg_rx = (time.time(), bp.decode_config(self.sim.config()))
+        for _ in range(30):                                  # ИОК_КОНФИГ: 18 CAN frames, after the current ИОК
+            if self.cfg_rx:
+                break
+            yield ("sleep", 0.1)
+        return self.cfg_rx[1] if self.cfg_rx else None
+
+    CFG_KEYS = ("Config_Type", "Sour_10MHz", "Data_Random", "Time_SNR", "Numb_Preamb", "Preamb", "Temp_Max_DT1",
+                "Temp_Max_DT2", "Temp_Max_DT3")
+
+    def _t_cmds(self):
+        """0102 command set: the library is encoded offline (every preset must pass the document rules), then each
+        command marked "test" is sent in standby and must be acknowledged as the document says; finally
+        SET_CONFIG_PROM user reloads the stored КОНФИГ and the settings are compared with the ones before."""
+        T = TEST_NAME["cmds"]
+        if self.ctl.get("method") != "protocol":
+            raise _Skip("needs protocol control (Control: method = protocol)")
+        n_def = len(bp.DEFS)
+        if not n_def:
+            self._row(T, "Command library", None, "", "bos_commands_0102.json", "FAIL", text="not found / unreadable")
+            return
+        bad = []
+        for code, p in bp.presets():
+            try:
+                bp.encode(code, p.get("params"))
+            except (ValueError, KeyError) as e:
+                bad.append(f"{p['name']}: {e}")
+        self._row(T, "Library encoded (all presets)", len(bp.presets()), "", "0102 rules",
+                  "FAIL" if bad else "PASS", spec="{:.0f}", text=f"{n_def} commands, {len(bp.presets())} presets",
+                  note="; ".join(bad[:3]))
+        yield from self._proto(0x01, what="MODE_D (standby) - setup commands are executed only in ДЖР")
+        self.cur_mode = "rf_off"
+        before = yield from self._read_config()
+        todo = [(c, p) for c, p in bp.presets() if p.get("test") and c not in (0x00, 0x01, 0xFF)]
+        todo += [(c, p) for c, p in bp.presets(0xFF) if p.get("test")]       # restore the stored settings last
+        for code, p in todo:
+            name = bp.COMMANDS[code][0]
+            data = bp.encode(code, p.get("params"))
+            want_neg = p.get("expect") == "КВ-"
+            label = f"0x{code:02X} {p['name']}"
+            hexd = data.hex(" ").upper() if data else "-"
+            if not bp.wants_ack(code):
+                ok = self._send_now(code, data)
+                self._row(T, label, None, "", "sent (no КВ)", "PASS" if ok else "FAIL", text=hexd)
+                continue
+            try:
+                a = yield from self._proto(code, data, p["name"], expect_neg=want_neg)
+            except _TestError as e:
+                self._row(T, label, None, "", p.get("expect", "КВ+"), "FAIL", text="no КВ / КВ-", note=str(e))
+                continue
+            got = "КВ-" if a["negative"] else "КВ+"
+            self._row(T, label, None, "", p.get("expect", "КВ+"), "PASS" if got == p.get("expect", "КВ+") else "FAIL",
+                      text=f"{got}  [{hexd}]", note="" if got == p.get("expect", "КВ+") else
+                      f"{name}: expected {p.get('expect', 'КВ+')}")
+        # SET_CONFIG_PROM reloads the stored КОНФИГ: the station's own (unsaved) link setup is applied again
+        if self.ctl.get("can1_only", False):
+            yield from self._proto(0x06, bytes([0x01]), "SET_CAN - transmission via CAN1 only (re-applied)")
+        ts = int(self.ctl.get("time_snr", 255))
+        if ts:
+            yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s (re-applied)")
+        if self.ctl.get("tm_enable", True):
+            for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
+                yield from self._proto(0x10, bp.p_period_tm(tm, per), f"SET_PeriodTM {bp.TM_TYPES[tm]} {per:g} s "
+                                                                      f"(re-applied)")
+        self._row(T, "Station link setup re-applied", None, "", "", "INFO",
+                  text=f"Time_SNR {ts} s, telemetry periods" + (", SET_CAN 01" if self.ctl.get("can1_only") else ""))
+        after = yield from self._read_config()
+        if before is None or after is None:
+            self._row(T, "Settings restored (КОНФИГ before / after)", None, "", "equal", "FAIL",
+                      text="ИОК_КОНФИГ not received")
+            return
+        diff = [k for k in self.CFG_KEYS if before.get(k) != after.get(k)]
+        self._row(T, "Settings restored (КОНФИГ before / after)", None, "", "equal", "FAIL" if diff else "PASS",
+                  text="equal" if not diff else ", ".join(f"{k} {before.get(k)}→{after.get(k)}" for k in diff))
 
     def _set_mode(self, mode):
         """mode: rf_off / cw / bpsk / oqpsk."""

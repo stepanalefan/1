@@ -24,7 +24,7 @@ if exist dist rmdir /s /q dist
 set ICONARGS=
 if exist app.ico set ICONARGS=--icon app.ico --add-data "app.ico;."
 if exist lupa.ico set ICONARGS=%ICONARGS% --add-data "lupa.ico;."
-for %%F in (FAQ.md README.md ABOUT.md) do if exist %%F set ICONARGS=!ICONARGS! --add-data "%%F;."
+for %%F in (FAQ.md README.md ABOUT.md bos_commands_0102.json) do if exist %%F set ICONARGS=!ICONARGS! --add-data "%%F;."
 
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --name KTR_TEST %ICONARGS% ^

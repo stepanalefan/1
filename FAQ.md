@@ -518,6 +518,30 @@ Untick the other lines under *Show lines* next to the ID filter. The ID filter a
 A library command with a fixed line (*Send on line* in its dialog) always goes there; otherwise the
 line selected in the Transmit panel. Commands captured from received frames take that frame's line.
 
+### Where do the BOS commands come from? (bos_commands_0102.json)
+`bos_commands_0102.json` holds every command of ПИЛВ 0102-004 part 1: tables 4.6 / 4.7 (49 codes to the BOS,
+incl. the session commands 0xA0-0xA7, Set_TimeSend 0xAA, Chang_FlashTM 0xE0) and table 4.8 (commands the BOS
+sends to the АФАР). For each command: code, mnemonic, data bytes, section, whether it runs only in standby (ДЖР),
+receiver (BOS / group 0x0D), acknowledgement, and the data-field layout with allowed values (tables 4.9-4.35).
+
+* **Station tests** build every data field from this file and check it against the document before sending (a
+  prohibited value would make the BOS silently ignore the command — the test stops with the reason instead).
+* **Command set (0102)** plan / test: in standby, every preset marked `"test": true` is sent and must be answered
+  as the document says (КВ+, or КВ- for the reserved codes 0x05 / 0x07); then *SET_CONFIG_PROM user* reloads the
+  stored КОНФИГ, the station's own link setup (Time_SNR, telemetry periods, SET_CAN) is applied again and
+  ИОК_КОНФИГ must equal the one read before. EPROM / flash writers (SAVE_CONFIG_NEW, CLR_Flash_Cmd_SNR) and
+  TurnOff_BPU_AFAR are never sent automatically.
+* **CAN tab**: *+ BOS 0102…* adds the presets as library commands for the chosen sender and line (duplicates
+  skipped). They can then be sent, given hotkeys or used in scripts.
+* **Command line**: `python bos_protocol.py --list` prints every preset frame;
+  `python bos_protocol.py SET_Temp_Max temp=-5 sensor=2` encodes one command;
+  `python bos_protocol.py --export lib.json` writes a can_commands.json-style file.
+
+Add your own presets by editing the `presets` list of a command (`"params"` use the field names; add
+`"test": true` to include it in the Command set test). A copy next to `KTR_TEST.exe` overrides the built-in one.
+Assumptions to confirm against the full document: the broadcast address of *Time_KA* (sent to the BOS address
+without acknowledgement) and the data layout of *Set_TimeSend* (entered as a raw value).
+
 ### Telemetry shows nothing.
 Telemetry is decoded from the CAN frames of BOS (`0x1A46…`), UPNG (`0x1A86…`) and AFAR (`0x1AC6…`).
 Check that the line carrying the unit is connected and frames arrive (Monitor view).

@@ -29,7 +29,8 @@ SENDERS = [  # address, name
     (0x1C, "БИОС 1.1"), (0x1D, "БИОС 1.2"), (0x1E, "БИОС 2.1"), (0x1F, "БИОС 2.2"), (0x16, "БЭС"),
 ]
 
-# code: (mnemonic, data bytes, description)
+# code: (mnemonic, data bytes, description). Built-in fallback; the full list (tables 4.6 / 4.7 / 4.8 with the
+# data-field layouts of tables 4.9-4.35) is loaded from bos_commands_0102.json below.
 COMMANDS = {
     0x00: ("NOP", 0, "Empty command (link check, acknowledged)"),
     0x01: ("MODE_D", 0, "Standby mode (ДЖР): ends any session, RF off"),
@@ -196,3 +197,234 @@ STATUS_FIELDS = [(0, 2, "Cnt_Config_Save"), (2, 2, "Cnt_Data_Save"), (4, 2, "Cnt
                  (6, 2, "Cnt_Turn_ON"), (8, 3, "Cnt_SNR_Cmd_All"), (11, 3, "Cnt_SNR_Sgnl_All"),
                  (14, 3, "Cnt_SNR_BB_Sgnl_All"), (17, 4, "Cnt_TX_KBD_All"), (21, 4, "Cnt_TX_KBD_BB_All"),
                  (25, 4, "Work_Time"), (29, 4, "T_SNR_All"), (33, 4, "T_SNR_BB_All")]
+
+
+# ---- command library from the 0102 document (bos_commands_0102.json) ------------------------------
+import json as _json
+import os as _os
+import time as _time
+
+def _library_path() -> str:
+    """bos_commands_0102.json next to the program (editable copy beside KTR_TEST.exe wins), else the bundled one."""
+    import sys
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    dirs = ([_os.path.dirname(sys.executable)] if getattr(sys, "frozen", False) else []) + [here]
+    for d in dirs:
+        f = _os.path.join(d, "bos_commands_0102.json")
+        if _os.path.exists(f):
+            return f
+    return _os.path.join(here, "bos_commands_0102.json")
+
+
+LIBRARY_FILE = _library_path()
+DEFS: dict[int, dict] = {}          # code -> command definition (to the BOS)
+FROM_BOS: dict[int, dict] = {}      # code -> commands the BOS sends (table 4.8)
+
+
+def load_library(path: str = LIBRARY_FILE) -> int:
+    """Load the 0102 command definitions; COMMANDS gains every command of tables 4.6 / 4.7.
+    Returns the number of commands to the BOS (0 if the file is missing; the built-in list stays)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = _json.load(f)
+    except (OSError, ValueError):
+        return 0
+    DEFS.clear()
+    FROM_BOS.clear()
+    for d in doc.get("commands", []):
+        code = int(d["code"], 16)
+        if d.get("direction") == "from_bos":
+            FROM_BOS[code] = d
+            continue
+        DEFS[code] = d
+        nb = 8 if d.get("encoder") == "session" else int(d.get("bytes", 0))
+        COMMANDS[code] = (d["mnemonic"], nb, d["name"])
+    for code in [c for c in COMMANDS if c not in DEFS and DEFS]:
+        COMMANDS.pop(code)
+    return len(DEFS)
+
+
+def code_of(name_or_code) -> int:
+    """Command code from a code (int / '0x..') or a mnemonic (case-insensitive)."""
+    if isinstance(name_or_code, int):
+        return name_or_code
+    t = str(name_or_code).strip()
+    if t.lower().startswith("0x"):
+        return int(t, 16)
+    for c, v in COMMANDS.items():
+        if v[0].lower() == t.lower():
+            return c
+    raise KeyError(f"unknown BOS command '{name_or_code}'")
+
+
+def _field_width(f) -> int:
+    return 8 * int(f.get("len", 1)) if "bits" not in f else f["bits"][0] - f["bits"][1] + 1
+
+
+def _raw_value(f, v):
+    """Parameter value (engineering units) -> raw field value; ValueError when outside the document range."""
+    name = f["name"]
+    if v is None:
+        if "none" in f:
+            return f["none"]
+        raise ValueError(f"{name}: value required")
+    if v == "now":
+        v = int(_time.time())
+    if f.get("encoding") == "signmag_minus1":
+        v = int(round(v))
+        if not f.get("min", -128) <= v <= f.get("max", 127):
+            raise ValueError(f"{name}={v} outside {f.get('min')}…{f.get('max')}")
+        return v if v >= 0 else 0x80 | (-v - 1)
+    if "scale" in f:
+        if "min" in f and not f["min"] - 1e-9 <= v <= f["max"] + 1e-9:
+            raise ValueError(f"{name}={v:g} {f.get('unit', '')} outside {f['min']:g}…{f['max']:g}")
+        r = int(round(v / f["scale"]))
+        return r & ((1 << _field_width(f)) - 1) if f.get("signed") else r
+    v = int(v)
+    if "values" in f and f.get("strict") and str(v) not in f["values"] and f"0x{v:02X}" not in f["values"]:
+        raise ValueError(f"{name}={v:#x} not allowed ({', '.join(f['values'])})")
+    if "min" in f and not f["min"] <= v <= f["max"]:
+        raise ValueError(f"{name}={v:#x} outside {f['min']:#x}…{f['max']:#x}")
+    if v >> _field_width(f):
+        raise ValueError(f"{name}={v:#x} does not fit {_field_width(f)} bits")
+    return v
+
+
+def encode(name_or_code, params: dict | None = None) -> bytes:
+    """Data field (8 bytes, or b'' for a command without data) of a 0102 command from its parameters.
+    Missing parameters take the field default (or 0). Raises ValueError for values the document prohibits."""
+    code = code_of(name_or_code)
+    d = DEFS.get(code)
+    params = dict(params or {})
+    if d is None:
+        raise KeyError(f"command 0x{code:02X} not in {_os.path.basename(LIBRARY_FILE)}")
+    if d.get("encoder") == "session":
+        lo, hi = d.get("freq_n_range", (0, 0x7FF))
+        n = int(params.get("freq_n", 800))
+        if not lo <= n <= hi:
+            raise ValueError(f"freq_n={n} outside {lo}…{hi} for {d['mnemonic']}")
+        kw = {k: params[k] for k in ("atten_db", "coding", "polyn1", "polyn2", "rate", "count", "reg") if k in params}
+        if "continuous" in params:
+            kw["continuous"] = bool(int(params["continuous"]))
+        FREQ_N_RANGE.setdefault(code, (lo, hi))
+        return p_session(code, n, **kw)
+    if not d.get("bytes") and not d.get("fields"):
+        return b""
+    b = bytearray(8)
+    for f in d.get("fields", []):
+        r = _raw_value(f, params.get(f["name"], f.get("default", 0)))
+        i = f["byte"]
+        if "bits" in f:
+            hi_, lo_ = f["bits"]
+            mask = ((1 << (hi_ - lo_ + 1)) - 1) << lo_
+            b[i] = (b[i] & ~mask) | ((r << lo_) & mask)
+        else:
+            n = int(f.get("len", 1))
+            b[i:i + n] = int(r).to_bytes(n, "little")
+    err = validate(code, bytes(b))
+    if err:
+        raise ValueError(err)
+    return bytes(b)
+
+
+def validate(name_or_code, data: bytes) -> str:
+    """'' when the data field is acceptable to the BOS, otherwise why the command would be ignored."""
+    code = code_of(name_or_code)
+    d = DEFS.get(code)
+    if d is None:
+        return ""
+    if d.get("encoder") == "session":
+        p = parse_session(data)
+        lo, hi = d.get("freq_n_range", (0, 0x7FF))
+        return "" if lo <= p["freq_n"] <= hi else f"freq_n={p['freq_n']} outside {lo}…{hi}"
+    b = bytes(data) + bytes(8)
+    for z in d.get("zero_bits", []):
+        hi_, lo_ = z["bits"]
+        if (b[z["byte"]] >> lo_) & ((1 << (hi_ - lo_ + 1)) - 1):
+            return f"byte {z['byte']} bits {hi_}-{lo_} must be 0"
+    vals = {}
+    for f in d.get("fields", []):
+        i = f["byte"]
+        if "bits" in f:
+            hi_, lo_ = f["bits"]
+            r = (b[i] >> lo_) & ((1 << (hi_ - lo_ + 1)) - 1)
+        else:
+            r = int.from_bytes(b[i:i + int(f.get("len", 1))], "little")
+        vals[f["name"]] = r
+        if "none" in f and r == f["none"]:
+            continue
+        if f.get("strict") and "values" in f and str(r) not in f["values"] and f"0x{r:02X}" not in f["values"]:
+            return f"{f['name']}={r:#x} prohibited"
+        if "scale" not in f and "encoding" not in f and "min" in f and not f["min"] <= r <= f["max"]:
+            return f"{f['name']}={r:#x} outside {f['min']:#x}…{f['max']:#x}"
+        if "scale" in f and not f.get("signed") and "min" in f and r * f["scale"] > f["max"] + 1e-9:
+            return f"{f['name']}={r * f['scale']:g} above {f['max']:g}"
+        if "scale" in f and f.get("signed"):
+            sv = (r - 256 if r & 0x80 else r) * f["scale"]
+            if not f["min"] - 1e-9 <= sv <= f["max"] + 1e-9:
+                return f"{f['name']}={sv:g} outside {f['min']:g}…{f['max']:g}"
+    for rule in d.get("rules", []):
+        kind, _, names = rule.partition(":")
+        if kind == "not_both_zero" and all(vals.get(n) == 0 for n in names.split(",")):
+            return f"{names.replace(',', ' and ')} both 0 (prohibited)"
+    return ""
+
+
+def receiver_of(code: int) -> int:
+    d = DEFS.get(code, {})
+    return GROUP_ANGLE if d.get("receiver") == "group" else BOS
+
+
+def wants_ack(code: int) -> bool:
+    return bool(DEFS.get(code, {}).get("ack", True))
+
+
+def standby_only(code: int) -> bool:
+    return DEFS.get(code, {}).get("modes") == "ДЖР"
+
+
+def presets(code: int | None = None) -> list[tuple[int, dict]]:
+    """[(code, preset)] in document order (only commands to the BOS)."""
+    return [(c, p) for c, d in DEFS.items() if code in (None, c) for p in d.get("presets", [])]
+
+
+def library(sender: int = 0x18, line: str = "BOS CAN1") -> list[dict]:
+    """Every preset as a CAN-tab command (can_commands.json format). Acknowledgement requested where the
+    document requires it; target designation goes to the group address."""
+    out = []
+    for code, p in presets():
+        data = encode(code, p.get("params"))
+        can_id, payload = command(code, sender, data, wants_ack(code), receiver_of(code))
+        out.append({"uid": f"0102-{code:02X}-{len([o for o in out if o['uid'].startswith(f'0102-{code:02X}-')])}",
+                    "key": "", "name": p["name"], "id": f"{can_id:08X}", "ext": True, "rtr": False,
+                    "dlc": len(payload), "data": payload.hex(" ").upper(), "line": line})
+    return out
+
+
+load_library()
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="BOS 0102 command library: list / build frames / export for the CAN tab")
+    ap.add_argument("--list", action="store_true", help="list every command and preset with its CAN frame")
+    ap.add_argument("--sender", type=lambda x: int(x, 0), default=0x18, help="sender address (default 0x18 КПА ИВУ)")
+    ap.add_argument("--line", default="BOS CAN1")
+    ap.add_argument("--export", metavar="FILE", help="write the presets as a can_commands.json-style file")
+    ap.add_argument("cmd", nargs="?", help="mnemonic or code to encode, followed by name=value parameters")
+    ap.add_argument("params", nargs="*")
+    a = ap.parse_args()
+    if a.export:
+        with open(a.export, "w", encoding="utf-8") as f:
+            _json.dump({"commands": library(a.sender, a.line), "scripts": {}}, f, ensure_ascii=False, indent=1)
+        print(f"{len(library(a.sender, a.line))} commands → {a.export}")
+    if a.cmd:
+        c = code_of(a.cmd)
+        kv = {k: (None if v == "none" else v if v == "now" else float(v) if "." in v else int(v, 0))
+              for k, v in (x.split("=", 1) for x in a.params)}
+        cid, pl = command(c, a.sender, encode(c, kv), wants_ack(c), receiver_of(c))
+        print(f"{COMMANDS[c][0]}: ID {cid:08X}  data [{len(pl)}] {pl.hex(' ').upper()}")
+    if a.list or not (a.cmd or a.export):
+        for c, p in presets():
+            cid, pl = command(c, a.sender, encode(c, p.get("params")), wants_ack(c), receiver_of(c))
+            print(f"0x{c:02X} {COMMANDS[c][0]:<26} {cid:08X}  {pl.hex(' ').upper():<23}  {p['name']}")

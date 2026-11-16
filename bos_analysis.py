@@ -1353,6 +1353,7 @@ class BosSimulator:
         self.angle_t = None               # last target designation (protocol mode)
         self.sr_t = 0.0
         self.time_snr = 30
+        self.saved_time_snr = 30          # Time_SNR in the stored (user) КОНФИГ
         self.protocol = False             # True once driven by protocol commands (designation required)
 
     def att_db(self):
@@ -1365,12 +1366,20 @@ class BosSimulator:
     def handle(self, code, data, mapping):
         """Execute a command; returns True (КВ+) / False (КВ-)."""
         import bos_protocol as bp
-        if code not in bp.COMMANDS:
-            return False
-        if code == 0x01:
+        if code not in bp.COMMANDS or bp.DEFS.get(code, {}).get("reserved"):
+            return False                                  # КВ-: command does not exist (4.2.3.7 / 4.2.3.11)
+        if bp.standby_only(code) and self.mode != "off":
+            return False                                  # setup commands only in ДЖР
+        if bp.COMMANDS[code][1] and bp.validate(code, data):
+            return False                                  # prohibited value: the command is ignored
+        if code in (0x01, 0x0A):
             self.mode = "off"
         elif code == 0x04:
             self.time_snr = data[0]
+        elif code == 0xFF and data[0] == 2:
+            self.time_snr = self.saved_time_snr           # stored КОНФИГ back into RAM
+        elif code == 0x0E:
+            self.saved_time_snr = self.time_snr
         elif code == 0x0C:
             self.angle_t = time.monotonic()
         elif code in bp.SR_COMMANDS:
