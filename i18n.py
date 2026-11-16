@@ -226,6 +226,12 @@ Pass|Conforme|Bestanden|Conforme|合格|Норма
 Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
 Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
 Control KTR|Contrôle KTR|KTR-Steuerung|Controllo KTR|KTR制御|Управление КТР
+DAC calibration|Étalonnage DAC|DAC-Kalibrierung|Calibrazione DAC|DAC校正|Калибровка ЦАП
+▶ Auto-calibrate (live)|▶ Auto-étalonnage (direct)|▶ Autokalibrierung (live)|▶ Auto-calibrazione (live)|▶ 自動校正 (ライブ)|▶ Автокалибровка (онлайн)
+Write to MD_SETTINGS…|Écrire dans MD_SETTINGS…|In MD_SETTINGS schreiben…|Scrivi in MD_SETTINGS…|MD_SETTINGSへ書込…|Записать в MD_SETTINGS…
+Open in Control KTR|Ouvrir dans Contrôle KTR|In KTR-Steuerung öffnen|Apri in Controllo KTR|KTR制御で開く|Открыть в Управлении КТР
+Document defaults|Valeurs du document|Dokument-Standardwerte|Valori del documento|文書の既定値|Значения документа
+Send to BOS|Envoyer au BOS|An BOS senden|Invia al BOS|BOSへ送信|Отправить в БОС
 New (defaults)|Nouveau (défauts)|Neu (Standard)|Nuovo (predefiniti)|新規 (既定値)|Новый (по умолчанию)
 Load file…|Charger un fichier…|Datei laden…|Carica file…|ファイル読込…|Загрузить файл…
 Save file…|Enregistrer le fichier…|Datei speichern…|Salva file…|ファイル保存…|Сохранить файл…

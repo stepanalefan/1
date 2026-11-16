@@ -1355,6 +1355,11 @@ class BosSimulator:
         self.time_snr = 30
         self.saved_time_snr = 30          # Time_SNR in the stored (user) КОНФИГ
         self.md_config = None             # last MD_CONFIG received (RAM)
+        # DAC38J82 QMC (Change_DAC_1): the hidden "ideal" values of this simulated unit differ from the document
+        # defaults; the measured offset is rotated (rails swapped / inverted on the way) to exercise the calibration
+        self.qmc = {"qmc_offseta": -124, "qmc_offsetb": -458, "qmc_gaina": 1012, "qmc_gainb": 1012,
+                    "qmc_phaseab": -10}
+        self.qmc_ideal = {"qmc_offseta": -124 + 70, "qmc_offsetb": -458 - 45, "gdiff": 12, "qmc_phaseab": -10 + 50}
         self.md_settings = None           # last MD_SETTINGS received
         self.protocol = False             # True once driven by protocol commands (designation required)
 
@@ -1374,6 +1379,10 @@ class BosSimulator:
             return False                                  # setup commands only in ДЖР
         if bp.COMMANDS[code][1] and bp.validate(code, data):
             return False                                  # prohibited value: the command is ignored
+        if code == 0x50:
+            import bos_dac_cal as dc
+            p = bp.decode(code, data)
+            self.qmc = {k: dc.to_signed(k, p[k]) for k in self.qmc}
         if code in (0x01, 0x0A):
             self.mode = "off"
         elif code == 0x04:
@@ -1498,8 +1507,10 @@ class BosSimulator:
             s = s / math.sqrt(np.mean(np.abs(s) ** 2))
             if "q_dead" in self.faults:
                 s = s.real + 0j
-            g = 10 ** (self.faults.get("gain_imb", 0.0) / 20)
-            phi = math.radians(self.faults.get("quad", 0.0))
+            q_, qi = self.qmc, self.qmc_ideal
+            g_qmc = 20 / math.log(10) * ((q_["qmc_gainb"] - q_["qmc_gaina"]) - qi["gdiff"]) / 1012
+            g = 10 ** ((self.faults.get("gain_imb", 0.0) + g_qmc) / 20)
+            phi = math.radians(self.faults.get("quad", 0.0)) + (q_["qmc_phaseab"] - qi["qmc_phaseab"]) / 2500
             i, q = s.real, s.imag
             if self.faults.get("iq_skew"):                 # Q rail delayed (fractional delay in the spectrum)
                 f = np.fft.fftfreq(len(q), 1 / fs)
@@ -1512,6 +1523,10 @@ class BosSimulator:
             s = i + 1j * g * (q * math.cos(phi) + i * math.sin(phi))
         if "leak" in self.faults:
             s = s + 10 ** (self.faults["leak"] / 20) * math.sqrt(np.mean(np.abs(s) ** 2))
+        if self.mode != "cw":                                    # DAC offset error -> carrier offset (rotated, 6000 LSB = RMS)
+            q_, qi = self.qmc, self.qmc_ideal
+            dq = complex(q_["qmc_offseta"] - qi["qmc_offseta"], q_["qmc_offsetb"] - qi["qmc_offsetb"])
+            s = s + 1j * dq / 6000 * math.sqrt(np.mean(np.abs(s) ** 2))
         if "comp" in self.faults:                           # Rapp PA model, smoothness 2
             a = np.abs(s)
             backoff = self.faults["comp"] + self.att_db() - self.cfg.get("att_code", 0)   # ATT is before the PA

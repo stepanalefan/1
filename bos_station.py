@@ -1035,6 +1035,9 @@ class BosStation(QtWidgets.QWidget):
         self.tabs.addTab(self._build_frames_view(), "Frames")
         self.tabs.addTab(self._build_tlm_view(), "BOS telemetry")
         self.tabs.addTab(self._build_corr_view(), "Corrections")
+        import bos_dac_cal
+        self.dac_cal = bos_dac_cal.DacCalPanel(self)
+        self.tabs.addTab(self.dac_cal, "DAC calibration")
         self.tabs.addTab(self._build_history(), "History")
         split.addWidget(self.tabs)
         split.setCollapsible(1, True)
@@ -3950,6 +3953,11 @@ class BosStation(QtWidgets.QWidget):
             self.sig_src.blockSignals(False)
             self._add_capture(f"live {mod}", r)
             self._update_diagnosis()
+            regs = self.dac_cal.live_step(self.res) if mod != "CW" else None
+            if regs:                                         # auto-calibration: next DAC setting, then settle
+                self.dac_cal._send(regs)
+                yield ("sleep", 0.5 if not self._is_demo() else 0.05)
+                continue
             yield ("sleep", 0.2)
 
     # ================================================================ results
@@ -4064,6 +4072,8 @@ class BosStation(QtWidgets.QWidget):
                 self.att_table.setItem(b["bit"], c, it)
 
     def _update_diagnosis(self):
+        if hasattr(self, "dac_cal"):
+            self.dac_cal.show_result(self.res)
         res = {k: v for k, v in self.res.items() if not k.startswith("_") and k != "extra"}
         offline = self.run_info.get("tests") == ["file"]
         self.findings = ba.diagnose(res, {} if offline else self.tlm_snapshot(), self.cfg, self.lim) + \

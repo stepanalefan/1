@@ -426,6 +426,26 @@ compares them with *External 10 MHz expected*. Only the RF is locked to the exte
 internal oscillator; carrier error alone while locked to the external 10 MHz → the TFG6806 or the LMX2594 frequency
 plan (repeat on the internal source to tell which).
 
+### How do I calibrate the DAC (QMC offsets, gain, phase) from the FSW?
+BOS Test Station → **DAC calibration** tab. After any BPSK / OQPSK measurement (plan or Live diagnose) it shows the
+carrier offset (LO leakage), I/Q gain imbalance and quadrature error and how many LSB the DAC38J82 QMC registers
+of Change_DAC_1 / MD_SETTINGS DAC_offsets (table 4.7) are off: qmc_offseta / b, qmc_gaina / b, qmc_phaseab.
+One measurement gives the size but not the direction: the demodulator locks to one of four orientations on every
+capture, so the sign / rail of the error changes from capture to capture.
+
+**▶ Auto-calibrate (live)** finds the direction: Live diagnose runs (OQPSK: all registers; BPSK: offsets only),
+Change_DAC_1 is sent with the registers probed around the working point (offset A ±s, B ±s, A+B; gain B-A ±s;
+phase ±s - 9 captures), |offset|², gain² and phase² are fitted (quadratic surface / parabolas, independent of the
+lock orientation, like LO-leakage nulling with a spectrum analyser), the optimum is sent and checked; if not within
+the targets (offset ≤ -55 dBc, gain ≤ 0.02 dB, quadrature ≤ 0.1°) the next round uses half the probe steps (up to 4
+rounds; on failure the best values measured are put back). The register scales found are kept per unit serial.
+The BOS must be transmitting (session on, e.g. from Control KTR), the DAC is off in standby.
+
+Then **Write to MD_SETTINGS…** puts the values into a DAC_offsets row with a DAC temperature threshold (send it
+from Telemetry → BOS → MD_SETTINGS) - Change_DAC_1 alone lasts only until a reset / MD SETUP; repeat at a few
+temperatures to fill the table. **Open in Control KTR** fills the Change_DAC_1 editor; **Send to BOS** sends the
+values in the left column.
+
 ### Order at the start of every plan: TFG6806 → BOS power → 10 MHz check
 The first test of every plan, **Reference & BOS power-up**, is added automatically (Unit control page,
 *10 MHz reference (TFG6806) and BOS power-up*):
