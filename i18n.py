@@ -225,6 +225,19 @@ Done|Fait|Erledigt|Fatto|完了|Готово
 Pass|Conforme|Bestanden|Conforme|合格|Норма
 Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
 Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
+Control KTR|Contrôle KTR|KTR-Steuerung|Controllo KTR|KTR制御|Управление КТР
+Basic commands|Commandes de base|Grundbefehle|Comandi di base|基本コマンド|Основные команды
+Session (СР) control commands|Commandes de session (СР)|Sitzungsbefehle (СР)|Comandi di sessione (СР)|セッション(СР)制御コマンド|Команды управления СР
+Technological commands|Commandes technologiques|Technologische Befehle|Comandi tecnologici|技術コマンド|Технологические команды
+Command queue|File de commandes|Befehlswarteschlange|Coda comandi|コマンドキュー|Очередь команд
+▶ Send now|▶ Envoyer|▶ Jetzt senden|▶ Invia ora|▶ 今すぐ送信|▶ Отправить
+＋ Add to queue →|＋ Ajouter à la file →|＋ In die Warteschlange →|＋ Aggiungi alla coda →|＋ キューに追加 →|＋ В очередь →
+▶ Run queue|▶ Exécuter la file|▶ Warteschlange starten|▶ Esegui coda|▶ キュー実行|▶ Выполнить очередь
+▶ From selected|▶ Depuis la sélection|▶ Ab Auswahl|▶ Dalla selezione|▶ 選択から|▶ С выбранного
+Stop on wrong / missing КВ|Arrêt si КВ erronée / absente|Stopp bei falscher / fehlender КВ|Stop se КВ errata / assente|КВ不正/なしで停止|Стоп при неверной / нет КВ
+Request КВ|Demander КВ|КВ anfordern|Richiedi КВ|КВ要求|Запросить КВ
+Results|Résultats|Ergebnisse|Risultati|結果|Результаты
+Operator prompt|Message opérateur|Bedienerhinweis|Messaggio operatore|オペレータ指示|Указание оператору
 Send this command in this plan|Envoyer cette commande dans ce plan|Diesen Befehl in diesem Plan senden|Invia questo comando in questo piano|この計画でこのコマンドを送信|Отправлять эту команду в этом плане
 Data fields — tick a field to replace the value the test computes|Champs de données — cocher pour remplacer la valeur calculée par le test|Datenfelder — ankreuzen, um den vom Test berechneten Wert zu ersetzen|Campi dati — spunta per sostituire il valore calcolato dal test|データフィールド — チェックすると試験の計算値を置換|Поля данных — отметьте поле, чтобы заменить значение, вычисляемое проверкой
 Test sends|Le test envoie|Test sendet|Il test invia|試験の送信|Проверка отправляет

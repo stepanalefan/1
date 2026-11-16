@@ -1,6 +1,11 @@
 {
- "document": "ПИЛВ 0102-004, part 1 — BOS control commands over CAN 2.0B",
- "tables": "4.6 / 4.7 (commands to the BOS), 4.8 (commands sent by the BOS); data fields: tables 4.9-4.35",
+ "document": "ПИЛВ 0102-004, part 1, version 2 (0102v2) — BOS control commands over CAN 2.0B",
+ "tables": "4.10 (commands to the BOS), 4.11 (commands sent by the BOS); data fields: tables 4.12-4.46",
+ "groups": {
+  "basic": "Basic commands",
+  "sr": "Session (СР) control commands",
+  "tech": "Technological commands"
+ },
  "format": {
   "id": "29-bit: (sender<<22)|(receiver<<16)|(ack request<<14)|(has data<<13)|code",
   "addresses": {
@@ -10,7 +15,7 @@
   },
   "data": "commands with data always carry 8 bytes (unused bytes 0x00); multi-byte values little-endian",
   "modes": "ДЖР = executed only in standby (the BOS rejects / ignores it during a session); all = any mode",
-  "fields": "byte = first byte, len = bytes (LE), bits = [hi, lo] within the byte, scale = units per LSB, values = allowed codes, strict = other codes prohibited, zero_bits = must be 0"
+  "fields": "byte = first byte, len = bytes (LE), bits = [hi, lo] within the byte, scale = units per LSB, values = allowed codes, strict = other codes prohibited, zero_bits = must be 0, parts = [[byte, hi, lo], …] value split over several places, least significant part first"
  },
  "commands": [
   {
@@ -29,7 +34,8 @@
      "test": true
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x01",
@@ -47,7 +53,8 @@
      "test": true
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x02",
@@ -97,7 +104,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x03",
@@ -146,7 +154,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x04",
@@ -182,7 +191,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x06",
@@ -239,7 +249,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x07",
@@ -259,7 +270,8 @@
      "expect": "КВ-"
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x08",
@@ -315,7 +327,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0A",
@@ -333,7 +346,8 @@
      "params": {}
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0B",
@@ -389,7 +403,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x05",
@@ -409,7 +424,8 @@
      "expect": "КВ-"
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x80",
@@ -447,7 +463,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x10",
@@ -529,7 +546,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x11",
@@ -597,7 +615,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x09",
@@ -653,7 +672,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0D",
@@ -689,7 +709,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0C",
@@ -747,7 +768,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x30",
@@ -801,7 +823,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x12",
@@ -829,7 +852,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x14",
@@ -857,7 +881,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x13",
@@ -885,7 +910,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x15",
@@ -914,7 +940,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x16",
@@ -955,7 +982,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1A",
@@ -994,7 +1022,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1B",
@@ -1035,7 +1064,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1C",
@@ -1076,7 +1106,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x17",
@@ -1114,7 +1145,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x18",
@@ -1175,7 +1207,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0E",
@@ -1193,7 +1226,8 @@
      "params": {}
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x19",
@@ -1210,7 +1244,8 @@
      "params": {}
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x0F",
@@ -1228,7 +1263,8 @@
      "params": {}
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1D",
@@ -1263,7 +1299,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1E",
@@ -1299,7 +1336,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0xFF",
@@ -1346,7 +1384,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0x1F",
@@ -1375,7 +1414,59 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "basic"
+  },
+  {
+   "code": "0x52",
+   "mnemonic": "Pause_SR",
+   "name": "Delay in turning on the physical session (and OG tuning in session)",
+   "bytes": 2,
+   "section": "4.2.3.35",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Technological. With a delay the BOS enters the logical session, the АФАР and RF come on only after the delay (not for sessions at a set time). Bit 0: external-oscillator tuning in session, any BOS mode.",
+   "fields": [
+    {
+     "name": "og_tuning",
+     "byte": 0,
+     "bits": [
+      0,
+      0
+     ],
+     "values": {
+      "0": "OG tuning in session disabled (default)",
+      "1": "OG tuning in session enabled"
+     }
+    },
+    {
+     "name": "delay_s",
+     "byte": 1,
+     "min": 0,
+     "max": 255,
+     "unit": "s",
+     "note": "0 = no delay (default); longer than Time_SNR = no physical session"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Pause_SR off (defaults)",
+     "params": {
+      "og_tuning": 0,
+      "delay_s": 0
+     }
+    },
+    {
+     "name": "Pause_SR 5 s",
+     "params": {
+      "og_tuning": 0,
+      "delay_s": 5
+     }
+    }
+   ],
+   "direction": "to_bos",
+   "group": "basic"
   },
   {
    "code": "0xA0",
@@ -1468,7 +1559,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA1",
@@ -1562,7 +1654,200 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
+  },
+  {
+   "code": "0xAE",
+   "mnemonic": "Send_UB_BERT",
+   "name": "Session: УР BERT (test: PRS X11+X2+1, all-ones start, no Time_SNR limit)",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    8,
+    1592
+   ],
+   "note": "Test mode only (0102 v2): same parameters as Send_UB_Data (0xA1).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 8,
+     "max": 1592,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_UB_BERT N=800",
+     "params": {
+      "freq_n": 800,
+      "rate": 2,
+      "reg": 5
+     }
+    }
+   ],
+   "direction": "to_bos",
+   "group": "sr"
+  },
+  {
+   "code": "0xAD",
+   "mnemonic": "Send_UB_Data_60",
+   "name": "Session: УР КБД with BPSK index +60° (test)",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    8,
+    1592
+   ],
+   "note": "Test mode only (0102 v2): same parameters as Send_UB_Data (0xA1).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 8,
+     "max": 1592,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_UB_Data_60 N=800",
+     "params": {
+      "freq_n": 800,
+      "rate": 2,
+      "reg": 5
+     }
+    }
+   ],
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA2",
@@ -1655,7 +1940,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA3",
@@ -1748,7 +2034,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA4",
@@ -1844,7 +2131,106 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
+  },
+  {
+   "code": "0xAF",
+   "mnemonic": "Send_BERT",
+   "name": "Session: ШР BERT (test: PRS X11+X2+1, no Time_SNR limit; count 2047 = continuous)",
+   "bytes": 8,
+   "section": "4.2.4.1",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "encoder": "session",
+   "freq_n_range": [
+    656,
+    944
+   ],
+   "note": "Test mode only (0102 v2): same parameters as Send_KBD (0xA4).",
+   "fields": [
+    {
+     "name": "freq_n",
+     "byte": 0,
+     "min": 656,
+     "max": 944,
+     "note": "bytes 0 + 1[2:0]: 11-bit code, F = 37650 + 0.125·N MHz"
+    },
+    {
+     "name": "atten_db",
+     "byte": 1,
+     "min": 0,
+     "max": 31,
+     "unit": "dB",
+     "note": "byte 1[7:3], 1 dB, saturates above 20"
+    },
+    {
+     "name": "coding",
+     "byte": 2,
+     "min": 0,
+     "max": 3,
+     "note": "byte 2[7:6] Mode_Coding"
+    },
+    {
+     "name": "polyn1",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[5:3] PolynX.1 / preamble polynomial"
+    },
+    {
+     "name": "polyn2",
+     "byte": 2,
+     "min": 0,
+     "max": 7,
+     "note": "byte 2[2:0] PolynX.2"
+    },
+    {
+     "name": "continuous",
+     "byte": 3,
+     "values": {
+      "1": "continuous (NeprRP)",
+      "0": "pulse (ImpRP)"
+     },
+     "note": "byte 3[0] inverted"
+    },
+    {
+     "name": "rate",
+     "byte": 3,
+     "min": 0,
+     "max": 7,
+     "note": "byte 3[3:1]: 8·2^rate kbit/s"
+    },
+    {
+     "name": "count",
+     "byte": 3,
+     "min": 0,
+     "max": 2047,
+     "note": "byte 3[7:5] + byte 4: КБД count / preambles / ПООСШ length / carrier time, s"
+    },
+    {
+     "name": "reg",
+     "byte": 5,
+     "min": 0,
+     "max": 16777215,
+     "note": "bytes 5-7: register start / idle frames"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Send_BERT N=800",
+     "params": {
+      "freq_n": 800,
+      "coding": 1,
+      "rate": 2,
+      "count": 2047,
+      "reg": 1
+     }
+    }
+   ],
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA5",
@@ -1938,7 +2324,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA6",
@@ -2032,7 +2419,8 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xA7",
@@ -2129,51 +2517,438 @@
      }
     }
    ],
-   "direction": "to_bos"
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xAA",
    "mnemonic": "Set_TimeSend",
-   "name": "Session transmission time",
+   "name": "Session transmission time (БШВ)",
    "bytes": 5,
    "section": "4.2.4.2",
    "modes": "all",
    "receiver": "BOS",
    "ack": true,
+   "note": "Starts the session of the last configuration command (ШР preambles / ПООСШ / КБД) at this time; ignored when the BOS has no configuration yet or the time has passed.",
    "fields": [
     {
-     "name": "raw",
+     "name": "seconds",
      "byte": 0,
-     "len": 5,
+     "len": 4,
      "min": 0,
-     "max": 1099511627775,
-     "note": "data field per §4.2.4.2 (entered as raw value)"
+     "max": 4294967295,
+     "unit": "s",
+     "note": "integer seconds since 01.01.1970 UTC (БШВ); 'now+30' = 30 s from now"
+    },
+    {
+     "name": "frac",
+     "byte": 4,
+     "min": 0,
+     "max": 99,
+     "unit": "×10 ms",
+     "note": "fractional part, 10 ms per LSB, 0…99"
     }
    ],
-   "presets": [],
-   "direction": "to_bos"
+   "presets": [
+    {
+     "name": "Set_TimeSend in 30 s",
+     "params": {
+      "seconds": "now+30",
+      "frac": 0
+     }
+    }
+   ],
+   "direction": "to_bos",
+   "group": "sr"
   },
   {
    "code": "0xE0",
-   "mnemonic": "Chang_FlashTM",
-   "name": "Technological: change parameters in EPROM",
+   "mnemonic": "Change_FlashTM",
+   "name": "Change parameters in EPROM (ИОК_СОСТОЯНИЕ counters)",
    "bytes": 8,
    "section": "4.2.5.1",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Standby only; the BOS also checks the sender address. Writes EPROM (time ≤ Tpark).",
+   "group": "tech",
+   "fields": [
+    {
+     "name": "frame",
+     "byte": 0,
+     "values": {
+      "0xFD": "ИОК_СОСТОЯНИЕ frame"
+     },
+     "strict": true
+    },
+    {
+     "name": "mask",
+     "byte": 1,
+     "bits": [
+      3,
+      0
+     ],
+     "min": 1,
+     "max": 15,
+     "note": "bytes of the value to write: bit k = value byte k"
+    },
+    {
+     "name": "address",
+     "byte": 2,
+     "len": 2,
+     "min": 0,
+     "max": 9,
+     "note": "address in the ИОК_СОСТОЯНИЕ frame: 0 = bytes 11-8, 1 = 15-12, 2 = 19-16 … 9 = 47-44"
+    },
+    {
+     "name": "value",
+     "byte": 4,
+     "len": 4,
+     "min": 0,
+     "max": 4294967295,
+     "note": "value (LE); only the bytes in the mask are written"
+    }
+   ],
+   "zero_bits": [
+    {
+     "byte": 1,
+     "bits": [
+      7,
+      4
+     ]
+    }
+   ],
+   "presets": [
+    {
+     "name": "Change_FlashTM: КОНФИГ flash save counter = 261 (doc example 1)",
+     "params": {
+      "frame": 253,
+      "mask": 6,
+      "address": 1,
+      "value": 66816
+     }
+    },
+    {
+     "name": "Change_FlashTM: КБД sent counter low byte = 0x40 (doc example 2)",
+     "params": {
+      "frame": 253,
+      "mask": 1,
+      "address": 6,
+      "value": 64
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x50",
+   "mnemonic": "Change_DAC_1",
+   "name": "DAC encoder 1 setup: QMC offsets / gains / phase, coarse_dac",
+   "bytes": 8,
+   "section": "4.2.5.2",
    "modes": "all",
    "receiver": "BOS",
    "ack": true,
-   "note": "Manufacturer use only.",
+   "note": "Kept until a BOS reset or МД SETUP. The values in use are in ИОК_ДОП (in session only: the DAC is off in standby).",
+   "group": "tech",
    "fields": [
     {
-     "name": "raw",
+     "name": "qmc_offseta",
      "byte": 0,
-     "len": 8,
+     "parts": [
+      [
+       0,
+       7,
+       0
+      ],
+      [
+       1,
+       7,
+       3
+      ]
+     ],
      "min": 0,
-     "max": 18446744073709551615,
-     "note": "technological data per §4.2.5.1"
+     "max": 8191,
+     "default": 8068,
+     "note": "13 bit, default 1111110000100"
+    },
+    {
+     "name": "qmc_offsetb",
+     "byte": 1,
+     "parts": [
+      [
+       1,
+       2,
+       0
+      ],
+      [
+       2,
+       7,
+       0
+      ],
+      [
+       3,
+       7,
+       6
+      ]
+     ],
+     "min": 0,
+     "max": 8191,
+     "default": 7734,
+     "note": "13 bit, default 1111000110110"
+    },
+    {
+     "name": "qmc_gaina",
+     "byte": 3,
+     "parts": [
+      [
+       3,
+       5,
+       0
+      ],
+      [
+       4,
+       7,
+       3
+      ]
+     ],
+     "min": 0,
+     "max": 2047,
+     "default": 1012,
+     "note": "11 bit, default 01111110100"
+    },
+    {
+     "name": "qmc_gainb",
+     "byte": 4,
+     "parts": [
+      [
+       4,
+       2,
+       0
+      ],
+      [
+       5,
+       7,
+       0
+      ]
+     ],
+     "min": 0,
+     "max": 2047,
+     "default": 1012,
+     "note": "11 bit, default 01111110100"
+    },
+    {
+     "name": "qmc_phaseab",
+     "byte": 6,
+     "parts": [
+      [
+       6,
+       7,
+       0
+      ],
+      [
+       7,
+       7,
+       4
+      ]
+     ],
+     "min": 0,
+     "max": 4095,
+     "default": 4086,
+     "note": "12 bit, default 111111110110"
+    },
+    {
+     "name": "coarse_dac",
+     "byte": 7,
+     "bits": [
+      3,
+      0
+     ],
+     "min": 1,
+     "max": 15,
+     "default": 7,
+     "note": "4 bit 0001…1111, default 0111"
     }
    ],
-   "presets": [],
+   "presets": [
+    {
+     "name": "Change_DAC_1 defaults (doc example)",
+     "params": {
+      "qmc_offseta": 8068,
+      "qmc_offsetb": 7734,
+      "qmc_gaina": 1012,
+      "qmc_gainb": 1012,
+      "qmc_phaseab": 4086,
+      "coarse_dac": 7
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x53",
+   "mnemonic": "Change_DAC_2",
+   "name": "DAC encoder 2 setup: PLL VCO (pll_vco)",
+   "bytes": 1,
+   "section": "4.2.5.3",
+   "modes": "ДЖР",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Kept until a BOS reset or МД SETUP.",
+   "group": "tech",
+   "fields": [
+    {
+     "name": "pll_vco",
+     "byte": 0,
+     "bits": [
+      5,
+      0
+     ],
+     "min": 34,
+     "max": 40,
+     "default": 37,
+     "note": "100010…101000 (34…40), default 100101 (37); check memin_pll_lfvolt in ИОК_ДОП = 100 or 011"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Change_DAC_2 pll_vco = 37 (default)",
+     "params": {
+      "pll_vco": 37
+     }
+    }
+   ],
+   "direction": "to_bos"
+  },
+  {
+   "code": "0x51",
+   "mnemonic": "Change_DAC_OG",
+   "name": "Reference oscillator DAC (50 MHz OG frequency)",
+   "bytes": 8,
+   "section": "4.2.5.4",
+   "modes": "all",
+   "receiver": "BOS",
+   "ack": true,
+   "note": "Changes the BOS 50 MHz reference oscillator (and so the operating frequency). Select the internal 10 MHz source first (SET_Sour_10MHz = internal), otherwise the external oscillator tunes it. Kept until a reset or until the external 10 MHz source is selected; the values in use are in ИОК_ДОП.",
+   "group": "tech",
+   "fields": [
+    {
+     "name": "dac_sync_en",
+     "byte": 0,
+     "bits": [
+      7,
+      7
+     ],
+     "values": {
+      "0": "0 (default)",
+      "1": "1"
+     }
+    },
+    {
+     "name": "ref_pwdwn",
+     "byte": 0,
+     "bits": [
+      6,
+      6
+     ],
+     "values": {
+      "0": "0 (default)",
+      "1": "1"
+     }
+    },
+    {
+     "name": "dac_pwdwn",
+     "byte": 0,
+     "bits": [
+      5,
+      5
+     ],
+     "values": {
+      "0": "0 (default)",
+      "1": "1"
+     }
+    },
+    {
+     "name": "ref_div",
+     "byte": 0,
+     "bits": [
+      4,
+      4
+     ],
+     "values": {
+      "1": "1 (default)",
+      "0": "0"
+     },
+     "default": 1
+    },
+    {
+     "name": "buf_gain",
+     "byte": 0,
+     "bits": [
+      3,
+      3
+     ],
+     "values": {
+      "1": "1 (default)",
+      "0": "0"
+     },
+     "default": 1
+    },
+    {
+     "name": "ldac",
+     "byte": 0,
+     "bits": [
+      2,
+      2
+     ],
+     "values": {
+      "0": "0 (default)",
+      "1": "1"
+     }
+    },
+    {
+     "name": "dac_data",
+     "byte": 1,
+     "parts": [
+      [
+       1,
+       7,
+       0
+      ],
+      [
+       2,
+       7,
+       4
+      ]
+     ],
+     "min": 1,
+     "max": 4095,
+     "default": 2048,
+     "note": "12 bit 0x001…0xFFF; 1 LSB ≈ 150 Hz of the operating frequency"
+    },
+    {
+     "name": "soft_reset",
+     "byte": 2,
+     "bits": [
+      3,
+      0
+     ],
+     "min": 0,
+     "max": 15,
+     "default": 0,
+     "note": "default 0000"
+    }
+   ],
+   "presets": [
+    {
+     "name": "Change_DAC_OG mid-scale 0x800 (example)",
+     "params": {
+      "ref_div": 1,
+      "buf_gain": 1,
+      "dac_data": 2048
+     }
+    }
+   ],
    "direction": "to_bos"
   },
   {
@@ -2218,6 +2993,18 @@
    "name": "КБД request from the БАРЛ",
    "bytes": 1,
    "section": "4.2.6.3",
+   "modes": "all",
+   "receiver": "AFAR/БАРЛ",
+   "ack": false,
+   "direction": "from_bos",
+   "presets": []
+  },
+  {
+   "code": "0x01",
+   "mnemonic": "Stop_I2C",
+   "name": "Stop work on the I2C interfaces of the control unit",
+   "bytes": 0,
+   "section": "4.2.6.4",
    "modes": "all",
    "receiver": "AFAR/БАРЛ",
    "ack": false,

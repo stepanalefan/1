@@ -128,6 +128,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
+| `ktr_control.py` | **Control KTR** tab (first tab): BOS commands of 0102 v2 by group with a field editor, send now / command queue with equipment steps (`ktr_control.json`) |
 | `bos_steps.py` | User-defined plans: step types (BOS command, CAN frame, RF mode, supply, telemetry, SCPI, operator, wait, note), step and plan editors, per-plan parameters |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
 | `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
@@ -144,5 +145,5 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
 | `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_TEST.exe` |
 
-Settings (`bos_station.json`, `dashboard.json`, `can_commands.json`, `can_lines.json`), reports
+Settings (`bos_station.json`, `dashboard.json`, `ktr_control.json`, `can_commands.json`, `can_lines.json`), reports
 (`bos_reports/`) and daily logs (`*_log_YYYY-MM-DD.csv`) are kept next to the program.

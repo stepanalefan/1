@@ -248,6 +248,10 @@ try:  # Main (dashboard) tab
     import dashboard
 except Exception:  # pragma: no cover
     dashboard = None
+try:
+    import ktr_control
+except Exception:                                   # pragma: no cover - optional module
+    ktr_control = None
 
 try:  # BOS Test Station tab (automated test + fault diagnosis)
     import bos_station
@@ -1930,6 +1934,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.bos and self.can_win:
             self.can_win.frame_listeners.append(self.bos.on_frames)
         self.dash = dashboard.Dashboard(self) if dashboard else None
+        self.ktr = ktr_control.KtrControl(self) if ktr_control else None
+        if self.ktr:
+            if self.can_win:
+                self.can_win.frame_listeners.append(self.ktr.on_frames)
+            self.tabs.insertTab(0, self.ktr, "Control KTR")       # first tab
         if self.bos:
             self.tabs.addTab(self.bos, "BOS Test Station")
         if self.dash:
@@ -2867,6 +2876,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw(self, r: dict):
         if self.dash:
             self.dash.on_measurement(r)
+        if getattr(self, "ktr", None):
+            self.ktr.on_measurement(r)
         t_draw = time.perf_counter()
         now = r["t"]
         self.sweeps += 1
@@ -2956,6 +2967,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.bos.shutdown()
         if self.dash:
             self.dash.shutdown()
+        if getattr(self, "ktr", None):
+            self.ktr.shutdown()
         if self.bench:
             if not self.bench.confirm_close(self):
                 ev.ignore()

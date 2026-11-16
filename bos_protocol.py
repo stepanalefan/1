@@ -244,6 +244,10 @@ def load_library(path: str = LIBRARY_FILE) -> int:
     return len(DEFS)
 
 
+def group_of(code: int) -> str:
+    return DEFS.get(code, {}).get("group", "basic")
+
+
 def code_of(name_or_code) -> int:
     """Command code from a code (int / '0x..') or a mnemonic (case-insensitive)."""
     if isinstance(name_or_code, int):
@@ -258,7 +262,43 @@ def code_of(name_or_code) -> int:
 
 
 def _field_width(f) -> int:
+    if "parts" in f:
+        return sum(hi - lo + 1 for _, hi, lo in f["parts"])
     return 8 * int(f.get("len", 1)) if "bits" not in f else f["bits"][0] - f["bits"][1] + 1
+
+
+def _get_raw(f, b) -> int:
+    """Raw value of a field from the 8 data bytes."""
+    if "parts" in f:
+        r, sh = 0, 0
+        for i, hi, lo in f["parts"]:
+            w = hi - lo + 1
+            r |= ((b[i] >> lo) & ((1 << w) - 1)) << sh
+            sh += w
+        return r
+    i = f["byte"]
+    if "bits" in f:
+        hi, lo = f["bits"]
+        return (b[i] >> lo) & ((1 << (hi - lo + 1)) - 1)
+    return int.from_bytes(b[i:i + int(f.get("len", 1))], "little")
+
+
+def _put_raw(f, b: bytearray, r: int):
+    if "parts" in f:
+        for i, hi, lo in f["parts"]:
+            w = hi - lo + 1
+            mask = ((1 << w) - 1) << lo
+            b[i] = (b[i] & ~mask) | (((r & ((1 << w) - 1)) << lo) & mask)
+            r >>= w
+        return
+    i = f["byte"]
+    if "bits" in f:
+        hi, lo = f["bits"]
+        mask = ((1 << (hi - lo + 1)) - 1) << lo
+        b[i] = (b[i] & ~mask) | ((r << lo) & mask)
+    else:
+        n = int(f.get("len", 1))
+        b[i:i + n] = int(r).to_bytes(n, "little")
 
 
 def _raw_value(f, v):
@@ -268,8 +308,11 @@ def _raw_value(f, v):
         if "none" in f:
             return f["none"]
         raise ValueError(f"{name}: value required")
-    if v == "now":
-        v = int(_time.time())
+    if isinstance(v, str) and v.replace(" ", "").startswith("now"):
+        t = v.replace(" ", "")[3:]
+        v = int(_time.time()) + (int(t) if t else 0)          # 'now', 'now+30', 'now-5'
+    elif isinstance(v, str):
+        v = float(v) if "." in v else int(v, 0)
     if f.get("encoding") == "signmag_minus1":
         v = int(round(v))
         if not f.get("min", -128) <= v <= f.get("max", 127):
@@ -313,14 +356,7 @@ def encode(name_or_code, params: dict | None = None) -> bytes:
     b = bytearray(8)
     for f in d.get("fields", []):
         r = _raw_value(f, params.get(f["name"], f.get("default", 0)))
-        i = f["byte"]
-        if "bits" in f:
-            hi_, lo_ = f["bits"]
-            mask = ((1 << (hi_ - lo_ + 1)) - 1) << lo_
-            b[i] = (b[i] & ~mask) | ((r << lo_) & mask)
-        else:
-            n = int(f.get("len", 1))
-            b[i:i + n] = int(r).to_bytes(n, "little")
+        _put_raw(f, b, int(r))
     err = validate(code, bytes(b))
     if err:
         raise ValueError(err)
@@ -344,12 +380,7 @@ def validate(name_or_code, data: bytes) -> str:
             return f"byte {z['byte']} bits {hi_}-{lo_} must be 0"
     vals = {}
     for f in d.get("fields", []):
-        i = f["byte"]
-        if "bits" in f:
-            hi_, lo_ = f["bits"]
-            r = (b[i] >> lo_) & ((1 << (hi_ - lo_ + 1)) - 1)
-        else:
-            r = int.from_bytes(b[i:i + int(f.get("len", 1))], "little")
+        r = _get_raw(f, b)
         vals[f["name"]] = r
         if "none" in f and r == f["none"]:
             continue
@@ -383,12 +414,7 @@ def decode(name_or_code, data: bytes) -> dict:
     b = bytes(data) + bytes(8)
     out = {}
     for f in d["fields"]:
-        i = f["byte"]
-        if "bits" in f:
-            hi_, lo_ = f["bits"]
-            r = (b[i] >> lo_) & ((1 << (hi_ - lo_ + 1)) - 1)
-        else:
-            r = int.from_bytes(b[i:i + int(f.get("len", 1))], "little")
+        r = _get_raw(f, b)
         if "none" in f and r == f["none"]:
             v = None
         elif f.get("encoding") == "signmag_minus1":

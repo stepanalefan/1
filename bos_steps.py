@@ -148,7 +148,8 @@ def cmd_params_text(code, params) -> str:
             vals = f.get("values", {})
             txt = vals.get(str(v)) or vals.get(f"0x{v:02X}" if isinstance(v, int) else "") if vals else None
             unit = f" {f['unit']}" if f.get("unit") and not txt and f["unit"] != "°" else f.get("unit", "") if not txt else ""
-            out.append(f"{f['name']}={txt or (f'{v:g}' if isinstance(v, float) else v)}{unit}")
+            wide = isinstance(v, int) and (int(f.get("len", 1)) > 1 or "parts" in f) and "scale" not in f
+            out.append(f"{f['name']}={txt or (f'{v:g}' if isinstance(v, float) else f'0x{v:X}' if wide else v)}{unit}")
     return ", ".join(out)
 
 
@@ -352,15 +353,17 @@ def field_widget(f, value, changed):
         sp.valueChanged.connect(changed)
         sp.get = sp.value
         return sp
-    le = QtWidgets.QLineEdit("now" if value == "now" else f"0x{int(value or 0):X}"
-                             if int(f.get("len", 1)) > 1 else str(int(value or 0)))
+    is_now = isinstance(value, str) and value.startswith("now")
+    wide = int(f.get("len", 1)) > 1 or "parts" in f
+    le = QtWidgets.QLineEdit(value if is_now else f"0x{int(value or 0):X}" if wide else str(int(value or 0)))
+    timef = f["name"] in ("bshv", "seconds") and int(f.get("len", 1)) == 4
     le.setToolTip(f"{f.get('min', 0)} … {f.get('max', '')}  (decimal or 0x hex" +
-                  (", 'now' = current time" if f["name"] == "bshv" else "") + ")")
+                  (", 'now' / 'now+30' = current time (+ s) when sent" if timef else "") + ")")
     le.textChanged.connect(changed)
 
     def get():
         t = le.text().strip()
-        return "now" if t == "now" else int(t, 0)
+        return t.replace(" ", "") if t.startswith("now") else int(t, 0)
     le.get = get
     return le
 

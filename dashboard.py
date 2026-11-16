@@ -76,7 +76,7 @@ class TelemetryCsv:
 C_OK, C_OFF, C_ERR, C_DIM = "#4fd18b", "#6e7681", "#ff6b6b", "#8a96a3"
 STEP_COLORS = {"fsw_set": "#58a6ff", "hmp": "#f0b03e", "can": "#79c0ff", "wait": "#8a96a3",
                "fsw": "#58a6ff", "repeat": "#d2a8ff", "end": "#d2a8ff", "log": "#c9d1d9",
-               "tfg": "#56d4dd", "n67": "#e3b341", "bos": "#ff7b72"}
+               "tfg": "#56d4dd", "n67": "#e3b341", "bos": "#ff7b72", "it68": "#f0b03e", "bos_cmd": "#79c0ff"}
 WD_DEFAULTS = {  # power watchdog configuration (dashboard.json "watchdog")
     "on": False, "always": False,
     "seq_error": True, "comm": True, "cc": True, "cc_s": 1.0, "prot": True,
@@ -214,7 +214,7 @@ class StepDialog(QtWidgets.QDialog):
         self.setWindowTitle({"hmp": "HMP4040 outputs", "can": "CAN command",
                              "wait": "Pause", "fsw": "FSW", "fsw_set": "FSW settings", "repeat": "Repeat",
                              "log": "Log message", "tfg": "TFG6806 generator",
-                             "n67": "N6701C outputs", "bos": "BOS test plan"}.get(op, op))
+                             "n67": "N6701C outputs", "bos": "BOS test plan", "it68": "IT6832 supply"}.get(op, op))
         f = QtWidgets.QFormLayout(self)
         self.w = {}
         if op == "hmp":
@@ -339,6 +339,33 @@ class StepDialog(QtWidgets.QDialog):
             f.addRow(self.n67_clear)
             f.addRow(QtWidgets.QLabel("The step waits until the N6701C has accepted the settings; "
                                       "an SCPI error stops the sequence."))
+        elif op == "it68":
+            self.it_v = QtWidgets.QDoubleSpinBox()
+            self.it_v.setRange(0, 32)
+            self.it_v.setDecimals(3)
+            self.it_v.setSuffix(" V")
+            self.it_i = QtWidgets.QDoubleSpinBox()
+            self.it_i.setRange(0, 6)
+            self.it_i.setDecimals(3)
+            self.it_i.setSuffix(" A")
+            self.it_use_v = QtWidgets.QCheckBox("set voltage")
+            self.it_use_i = QtWidgets.QCheckBox("set current limit")
+            self.it_use_v.setChecked(step.get("v") is not None)
+            self.it_use_i.setChecked(step.get("i") is not None)
+            self.it_v.setValue(step.get("v") or 14.0)
+            self.it_i.setValue(step.get("i") or 1.5)
+            for chk, sp, lab in ((self.it_use_v, self.it_v, "Voltage"), (self.it_use_i, self.it_i, "Current")):
+                row = QtWidgets.QHBoxLayout()
+                row.addWidget(chk)
+                row.addWidget(sp, 1)
+                f.addRow(lab, row)
+            self.it_on = QtWidgets.QComboBox()
+            self.it_on.addItems(["leave as is", "ON", "OFF"])
+            o = step.get("on")
+            self.it_on.setCurrentIndex(0 if o is None else (1 if o else 2))
+            f.addRow("Output", self.it_on)
+            f.addRow(QtWidgets.QLabel("Max. voltage first, then voltage, current, output; the step waits until the "
+                                      "IT6832 has accepted them."))
         elif op == "can":
             self.cmd = QtWidgets.QComboBox()
             for c in can_cmds:
@@ -458,6 +485,13 @@ class StepDialog(QtWidgets.QDialog):
                 s["clear"] = self.n67_clear.isChecked()
                 if not s["ch"] and s["all"] is None and not s["clear"]:
                     raise ValueError("nothing to do: select a channel or 'all outputs'")
+            elif op == "it68":
+                s["v"] = self.it_v.value() if self.it_use_v.isChecked() else None
+                s["i"] = self.it_i.value() if self.it_use_i.isChecked() else None
+                o = self.it_on.currentIndex()
+                s["on"] = None if o == 0 else (o == 1)
+                if s["v"] is None and s["i"] is None and s["on"] is None:
+                    raise ValueError("nothing to do: tick voltage / current or choose the output state")
             elif op == "can":
                 if self.cmd.currentData() is None:
                     raise ValueError("no CAN command selected")
@@ -591,6 +625,210 @@ class WatchdogDialog(QtWidgets.QDialog):
 # --------------------------------------------------------------------------- #
 #  Dashboard                                                                   #
 # --------------------------------------------------------------------------- #
+def _can_cmds(host):
+    c = getattr(host, "can_win", None)
+    return list(c.store.commands) if c else []
+
+
+def step_text(host, s) -> str:
+    """One line for a sequence / queue step (Main tab, Control KTR queue)."""
+    op = s["op"]
+    if op == "hmp":
+        parts = [f"OUT{ch} {p['v']:g} V / {p['i']:g} A {'on' if p['on'] else 'off'}"
+                 for ch, p in sorted(s.get("ch", {}).items())]
+        if s.get("master") is not None:
+            parts.append(f"MASTER {'ON' if s['master'] else 'OFF'}")
+        return "⚡ HMP   " + ", ".join(parts)
+    if op == "can":
+        c = next((c for c in _can_cmds(host) if c.uid == s.get("cmd")), None)
+        return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
+    if op == "wait":
+        return f"⏱ Pause {s['ms']} ms"
+    if op == "n67":
+        parts = [f"OUT{ch} {p['v']:g} V / {p['i']:g} A {'on' if p['on'] else 'off'}"
+                 for ch, p in sorted(s.get("ch", {}).items())]
+        if s.get("clear"):
+            parts.insert(0, "clear protection")
+        if s.get("all") is not None:
+            parts.append(f"ALL {'ON' if s['all'] else 'OFF'}")
+        return "⚡ N6701C   " + ", ".join(parts)
+    if op == "tfg":
+        tg = _tfg()
+        chs = "+".join(f"CH{c}" for c in s.get("ch", [1]))
+        parts = [f"{tg.PARAMS[k][1]} {tg.describe(k, v)}" if tg and k in tg.PARAMS else k
+                 for k, v in s.get("p", {}).items()]
+        act = {"trg": "trigger", "align": "align phases", "recall": f"recall slot {s.get('slot', 0)}"}.get(
+            s.get("action", ""))
+        if act:
+            parts.append(act)
+        return f"∿ TFG {chs}   " + ", ".join(parts)
+    if op == "fsw":
+        return "〰 FSW   " + {"single": "single measurement (wait for result)",
+                              "autolevel": "auto level"}.get(s["action"], s["action"])
+    if op == "fsw_set":
+        parts = []
+        for key, label, kind, _ in fsw_params(host, s["app"]):
+            if key not in s["params"]:
+                continue
+            v = s["params"][key]
+            name = label.split(",")[0].split(" (")[0]
+            if kind == "hz":
+                parts.append(f"{name} {fmt_hz(v) if 'Hz' in label or 'sym' in label else f'{v:g}'}")
+            elif kind == "b":
+                parts.append(f"{name} {'ON' if v else 'OFF'}")
+            elif key == "prat":
+                sr = s["params"].get("symbol_rate")
+                parts.append(f"OVS ×{v}" + (f" (sample rate {fmt_hz(sr * v)})" if sr else ""))
+            else:
+                parts.append(f"{name} {v:g}" if isinstance(v, float) else f"{name} {v}")
+        return f"〰 FSW {({'vsa': 'VSA', 'spec': 'Spectrum', 'iq': 'I/Q'})[s['app']]}   " + ", ".join(parts)
+    if op == "bos":
+        return f"◉ BOS test plan '{s.get('plan', '')}'" + ("  (stop on FAIL)" if s.get("stop_on_fail", True) else "")
+    if op == "repeat":
+        return f"⟳ Repeat {'forever' if s['count'] == 0 else str(s['count']) + ' ×'}"
+    if op == "end":
+        return "⟲ End repeat"
+    if op == "it68":
+        parts = []
+        if s.get("v") is not None:
+            parts.append(f"{s['v']:g} V")
+        if s.get("i") is not None:
+            parts.append(f"{s['i']:g} A")
+        if s.get("on") is not None:
+            parts.append(f"output {'ON' if s['on'] else 'OFF'}")
+        return "⚡ IT6832   " + ", ".join(parts)
+    return f"✎ Log   {s.get('text', '')}"
+
+
+
+def exec_device(host, s, log, set_await=None):
+    """Execute one device step of a sequence / queue (everything except Repeat / End / Pause): returns a
+    Token to wait for, or None when done. Raises RuntimeError when the device is not connected."""
+    op, h = s["op"], host
+    set_await = set_await or (lambda tok, t: None)
+    if op == "log":
+        log(f"[sequence] {s.get('text', '')}", "info")
+    elif op == "hmp":
+        b = getattr(h, "bench", None)
+        if not b or not b._hmp_ok:
+            raise RuntimeError("HMP4040 not connected")
+        w = b.hmp
+
+        def job():
+            for ch, p in sorted(s.get("ch", {}).items()):
+                w.set_channel(int(ch), p["v"], p["i"], p["on"])
+            if s.get("master") is not None:
+                w.set_master(s["master"])
+        return run_in(w.submit, job, "HMP4040")
+    elif op == "n67":
+        n = getattr(h, "n67", None)
+        if not n or not n.ok:
+            raise RuntimeError("N6701C not connected")
+        w = n.worker
+        chans = [c for c in s.get("ch", {}) if int(c) not in n.channels]
+        if chans:
+            raise RuntimeError(f"N6701C has no output {', '.join(chans)}")
+
+        def job():
+            if s.get("clear"):
+                w.clear_protection()
+            for ch, p in sorted(s.get("ch", {}).items()):
+                w.set_channel(int(ch), p["v"], p["i"], p["on"])
+            if s.get("all") is not None:
+                w.set_all(s["all"], "sequence")
+        return run_in(w.submit, job, "N6701C")
+    elif op == "tfg":
+        tfg = getattr(h, "tfg", None)
+        if not tfg or not tfg.is_connected:
+            raise RuntimeError("TFG6806 not connected")
+        w = tfg.worker
+        params, chans = dict(s.get("p", {})), list(s.get("ch", [1]))
+        act, slot = s.get("action", ""), s.get("slot", 0)
+
+        def job():
+            for ch in chans:
+                if params:
+                    w.apply(ch, params, prev={}, label="sequence")
+            if act == "trg":
+                w.command("*TRG", "sequence: trigger")
+            elif act == "align":
+                w.command("SOURce:PHASe:ALIgn", "sequence: phases aligned")
+            elif act == "recall":
+                w.command(f"*RCL {slot}", f"sequence: state {slot} recalled")
+                for ch in (1, 2):
+                    w.read(ch)
+        return run_in(w.submit, job, "TFG6806")
+    elif op == "can":
+        c = getattr(h, "can_win", None)
+        cmd = c.store.by_uid(s.get("cmd")) if c else None
+        if cmd is None:
+            raise RuntimeError("CAN command not found in the library")
+        if not c.send_frame(cmd.to_frame(c.FRAME)):
+            raise RuntimeError("CAN send failed (adapter not connected?)")
+        log(f"[sequence] CAN sent {cmd.label()} {cmd.id_str()}: {cmd.data_str()}")
+    elif op == "fsw":
+        if not h.connected:
+            raise RuntimeError("FSW not connected")
+        if s["action"] == "single":
+            h.run_btn.setChecked(False)
+            tok = Token("FSW single measurement", timeout=max(30.0, h.timeout_spin.value() * 2))
+            set_await(tok, time.time())
+            h.on_single()
+            return tok
+        if s["action"] == "autolevel":
+            app = h.app()
+            return run_in(lambda job: h.worker.submit("seq", job),
+                          lambda: h.worker.dev.auto_level(app), "FSW auto level")
+        h.run_btn.setChecked(s["action"] == "run")
+    elif op == "fsw_set":
+        if not h.connected:
+            raise RuntimeError("FSW not connected")
+        app, params = s["app"], dict(s["params"])
+        h.fsw_tabs.setCurrentIndex({"vsa": 0, "spec": 1, "iq": 2}[app])     # GUI follows the FSW channel
+        known = {"vsa": h.last_read, "spec": h.last_read_spec, "iq": h.last_read_iq}[app]
+        prev = {k: v for k, v in known.items() if k not in params}   # dependencies only
+        box = Token(f"FSW {app.upper()} settings")
+
+        def job():
+            dev = h.worker.dev
+            fn = {"vsa": dev.apply_settings, "spec": dev.apply_spec_settings,
+                  "iq": dev.apply_iq_settings}[app]
+            cmds, errors, notes = fn(params, prev)
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            box.msg = "FSW: " + ("; ".join(cmds) or "nothing to change") + \
+                      ("  (" + "; ".join(notes) + ")" if notes else "")
+        tok = run_in(lambda j: h.worker.submit("seq", j), job, box.what)
+        tok.msg_from = box
+        return tok
+    elif op == "bos":
+        st = getattr(h, "bos", None)
+        if st is None:
+            raise RuntimeError("BOS Test Station not available (bos_station.py missing)")
+        tok = Token(f"BOS test plan '{s.get('plan', '')}'")
+        stop_on_fail = s.get("stop_on_fail", True)
+
+        def done(verdict, summary):
+            if verdict == "ABORTED" or (stop_on_fail and verdict == "FAIL"):
+                tok.error = f"BOS verdict {verdict}: {summary}"
+            tok.msg = f"BOS verdict {verdict}: {summary}"
+            tok.done = True
+        st.run_plan_by_name(s.get("plan", ""), done)
+        return tok
+    elif op == "it68":
+        it = getattr(h, "it68", None)
+        if not it or not it.ok:
+            raise RuntimeError("IT6832 not connected")
+        w = it.worker
+        v, i, on = s.get("v"), s.get("i"), s.get("on")
+
+        def job():
+            w.apply(v, i, None, on)
+        return run_in(w.submit, job, "IT6832")
+    return None
+
+
+
 class Dashboard(QtWidgets.QWidget):
     DEVICES = ["FSW", "HMP4040", "N6701C", "IT6832", "TFG6806", "CAN", "BOS"]
 
@@ -789,15 +1027,15 @@ class Dashboard(QtWidgets.QWidget):
         add = QtWidgets.QGridLayout()
         for k, (text, op) in enumerate((("+ HMP", "hmp"), ("+ N6701C", "n67"), ("+ CAN", "can"),
                                         ("+ Pause", "wait"), ("+ BOS test", "bos"), ("+ FSW", "fsw"),
-                                        ("+ FSW set", "fsw_set"), ("+ TFG", "tfg"), ("+ Repeat", "repeat"),
-                                        ("+ Log", "log"))):
+                                        ("+ FSW set", "fsw_set"), ("+ TFG", "tfg"), ("+ IT6832", "it68"),
+                                        ("+ Repeat", "repeat"), ("+ Log", "log"))):
             b = QtWidgets.QPushButton(text)
             b.setStyleSheet(f"color:{STEP_COLORS[op]};padding:2px 4px;")
             b.setToolTip({"fsw_set": "FSW settings (frequency, symbol rate, modulation …)",
                           "n67": "N6701C outputs (voltage, current, on/off), waits until accepted",
                           "bos": "Run a BOS Test Station plan and wait for the verdict"}.get(op, ""))
             b.clicked.connect(lambda _, op=op: self.add_step(op))
-            add.addWidget(b, k // 5, k % 5)
+            add.addWidget(b, k // 6, k % 6)
         add.setSpacing(3)
         sv.addLayout(add)
         ed = QtWidgets.QHBoxLayout()
@@ -1328,63 +1566,7 @@ class Dashboard(QtWidgets.QWidget):
         return list(c.store.commands) if c else []
 
     def step_text(self, s) -> str:
-        op = s["op"]
-        if op == "hmp":
-            parts = [f"OUT{ch} {p['v']:g} V / {p['i']:g} A {'on' if p['on'] else 'off'}"
-                     for ch, p in sorted(s.get("ch", {}).items())]
-            if s.get("master") is not None:
-                parts.append(f"MASTER {'ON' if s['master'] else 'OFF'}")
-            return "⚡ HMP   " + ", ".join(parts)
-        if op == "can":
-            c = next((c for c in self._can_cmds() if c.uid == s.get("cmd")), None)
-            return ("✉ CAN   " + (f"{c.label()}  {c.id_str()}: {c.data_str()}" if c else "<missing command>"))
-        if op == "wait":
-            return f"⏱ Pause {s['ms']} ms"
-        if op == "n67":
-            parts = [f"OUT{ch} {p['v']:g} V / {p['i']:g} A {'on' if p['on'] else 'off'}"
-                     for ch, p in sorted(s.get("ch", {}).items())]
-            if s.get("clear"):
-                parts.insert(0, "clear protection")
-            if s.get("all") is not None:
-                parts.append(f"ALL {'ON' if s['all'] else 'OFF'}")
-            return "⚡ N6701C   " + ", ".join(parts)
-        if op == "tfg":
-            tg = _tfg()
-            chs = "+".join(f"CH{c}" for c in s.get("ch", [1]))
-            parts = [f"{tg.PARAMS[k][1]} {tg.describe(k, v)}" if tg and k in tg.PARAMS else k
-                     for k, v in s.get("p", {}).items()]
-            act = {"trg": "trigger", "align": "align phases", "recall": f"recall slot {s.get('slot', 0)}"}.get(
-                s.get("action", ""))
-            if act:
-                parts.append(act)
-            return f"∿ TFG {chs}   " + ", ".join(parts)
-        if op == "fsw":
-            return "〰 FSW   " + {"single": "single measurement (wait for result)",
-                                  "autolevel": "auto level"}.get(s["action"], s["action"])
-        if op == "fsw_set":
-            parts = []
-            for key, label, kind, _ in fsw_params(self.host, s["app"]):
-                if key not in s["params"]:
-                    continue
-                v = s["params"][key]
-                name = label.split(",")[0].split(" (")[0]
-                if kind == "hz":
-                    parts.append(f"{name} {fmt_hz(v) if 'Hz' in label or 'sym' in label else f'{v:g}'}")
-                elif kind == "b":
-                    parts.append(f"{name} {'ON' if v else 'OFF'}")
-                elif key == "prat":
-                    sr = s["params"].get("symbol_rate")
-                    parts.append(f"OVS ×{v}" + (f" (sample rate {fmt_hz(sr * v)})" if sr else ""))
-                else:
-                    parts.append(f"{name} {v:g}" if isinstance(v, float) else f"{name} {v}")
-            return f"〰 FSW {({'vsa': 'VSA', 'spec': 'Spectrum', 'iq': 'I/Q'})[s['app']]}   " + ", ".join(parts)
-        if op == "bos":
-            return f"◉ BOS test plan '{s.get('plan', '')}'" + ("  (stop on FAIL)" if s.get("stop_on_fail", True) else "")
-        if op == "repeat":
-            return f"⟳ Repeat {'forever' if s['count'] == 0 else str(s['count']) + ' ×'}"
-        if op == "end":
-            return "⟲ End repeat"
-        return f"✎ Log   {s.get('text', '')}"
+        return step_text(self.host, s)
 
     def reload(self, select=()):
         self.list.clear()
@@ -1428,7 +1610,8 @@ class Dashboard(QtWidgets.QWidget):
                     "fsw_set": {"app": "vsa", "params": {}}, "repeat": {"count": 3},
                     "log": {"text": ""}, "can": {},
                     "tfg": {"ch": [1], "p": {"wave": "SINusoid", "freq": 1e3, "ampl": 1.0, "out": True}},
-                    "n67": {"ch": {"1": {"v": 12.0, "i": 1.0, "on": True}}, "all": None, "clear": False}}
+                    "n67": {"ch": {"1": {"v": 12.0, "i": 1.0, "on": True}}, "all": None, "clear": False},
+                    "it68": {"v": 14.0, "i": 1.5, "on": True}}
         dlg = StepDialog(self, {"op": op, **defaults[op]}, self._can_cmds(), self.host)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -1631,116 +1814,11 @@ class Dashboard(QtWidgets.QWidget):
             else:
                 self.stack.pop()
                 self.pc += 1
-        elif op == "log":
-            self.log(f"[sequence] {s.get('text', '')}", "info")
-        elif op == "hmp":
-            b = getattr(h, "bench", None)
-            if not b or not b._hmp_ok:
-                raise RuntimeError("HMP4040 not connected")
-            w = b.hmp
+        else:
+            return exec_device(self.host, s, self.log, self._set_await)
 
-            def job():
-                for ch, p in sorted(s.get("ch", {}).items()):
-                    w.set_channel(int(ch), p["v"], p["i"], p["on"])
-                if s.get("master") is not None:
-                    w.set_master(s["master"])
-            return run_in(w.submit, job, "HMP4040")
-        elif op == "n67":
-            n = getattr(h, "n67", None)
-            if not n or not n.ok:
-                raise RuntimeError("N6701C not connected")
-            w = n.worker
-            chans = [c for c in s.get("ch", {}) if int(c) not in n.channels]
-            if chans:
-                raise RuntimeError(f"N6701C has no output {', '.join(chans)}")
-
-            def job():
-                if s.get("clear"):
-                    w.clear_protection()
-                for ch, p in sorted(s.get("ch", {}).items()):
-                    w.set_channel(int(ch), p["v"], p["i"], p["on"])
-                if s.get("all") is not None:
-                    w.set_all(s["all"], "sequence")
-            return run_in(w.submit, job, "N6701C")
-        elif op == "tfg":
-            tfg = getattr(h, "tfg", None)
-            if not tfg or not tfg.is_connected:
-                raise RuntimeError("TFG6806 not connected")
-            w = tfg.worker
-            params, chans = dict(s.get("p", {})), list(s.get("ch", [1]))
-            act, slot = s.get("action", ""), s.get("slot", 0)
-
-            def job():
-                for ch in chans:
-                    if params:
-                        w.apply(ch, params, prev={}, label="sequence")
-                if act == "trg":
-                    w.command("*TRG", "sequence: trigger")
-                elif act == "align":
-                    w.command("SOURce:PHASe:ALIgn", "sequence: phases aligned")
-                elif act == "recall":
-                    w.command(f"*RCL {slot}", f"sequence: state {slot} recalled")
-                    for ch in (1, 2):
-                        w.read(ch)
-            return run_in(w.submit, job, "TFG6806")
-        elif op == "can":
-            c = getattr(h, "can_win", None)
-            cmd = c.store.by_uid(s.get("cmd")) if c else None
-            if cmd is None:
-                raise RuntimeError("CAN command not found in the library")
-            if not c.send_frame(cmd.to_frame(c.FRAME)):
-                raise RuntimeError("CAN send failed (adapter not connected?)")
-            self.log(f"[sequence] CAN sent {cmd.label()} {cmd.id_str()}: {cmd.data_str()}")
-        elif op == "fsw":
-            if not h.connected:
-                raise RuntimeError("FSW not connected")
-            if s["action"] == "single":
-                h.run_btn.setChecked(False)
-                tok = Token("FSW single measurement", timeout=max(30.0, h.timeout_spin.value() * 2))
-                self._await_meas = (tok, time.time())
-                h.on_single()
-                return tok
-            if s["action"] == "autolevel":
-                app = h.app()
-                return run_in(lambda job: h.worker.submit("seq", job),
-                              lambda: h.worker.dev.auto_level(app), "FSW auto level")
-            h.run_btn.setChecked(s["action"] == "run")
-        elif op == "fsw_set":
-            if not h.connected:
-                raise RuntimeError("FSW not connected")
-            app, params = s["app"], dict(s["params"])
-            h.fsw_tabs.setCurrentIndex({"vsa": 0, "spec": 1, "iq": 2}[app])     # GUI follows the FSW channel
-            known = {"vsa": h.last_read, "spec": h.last_read_spec, "iq": h.last_read_iq}[app]
-            prev = {k: v for k, v in known.items() if k not in params}   # dependencies only
-            box = Token(f"FSW {app.upper()} settings")
-
-            def job():
-                dev = h.worker.dev
-                fn = {"vsa": dev.apply_settings, "spec": dev.apply_spec_settings,
-                      "iq": dev.apply_iq_settings}[app]
-                cmds, errors, notes = fn(params, prev)
-                if errors:
-                    raise RuntimeError("; ".join(errors))
-                box.msg = "FSW: " + ("; ".join(cmds) or "nothing to change") + \
-                          ("  (" + "; ".join(notes) + ")" if notes else "")
-            tok = run_in(lambda j: h.worker.submit("seq", j), job, box.what)
-            tok.msg_from = box
-            return tok
-        elif op == "bos":
-            st = getattr(h, "bos", None)
-            if st is None:
-                raise RuntimeError("BOS Test Station not available (bos_station.py missing)")
-            tok = Token(f"BOS test plan '{s.get('plan', '')}'")
-            stop_on_fail = s.get("stop_on_fail", True)
-
-            def done(verdict, summary):
-                if verdict == "ABORTED" or (stop_on_fail and verdict == "FAIL"):
-                    tok.error = f"BOS verdict {verdict}: {summary}"
-                tok.msg = f"BOS verdict {verdict}: {summary}"
-                tok.done = True
-            st.run_plan_by_name(s.get("plan", ""), done)
-            return tok
-        return None
+    def _set_await(self, tok, t):
+        self._await_meas = (tok, t)
 
     def on_measurement(self, r: dict):
         """Called by the main window for every drawn FSW result (completes 'single' steps)."""

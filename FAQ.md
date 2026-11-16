@@ -206,7 +206,39 @@ sequences or always. A trigger stays latched (red) until *Reset* or the next run
 Drawn from the channel's settings (the generator has no command to read its screen), like the generator's own
 display: very fast carriers in modulation / sweep / burst are drawn with fewer cycles ("not to scale").
 
-## 6. BOS Test Station
+## 5a. Control KTR (manual unit control)
+
+### What is the Control KTR tab?
+The first tab. Left: sub-tabs **BOS**, **AFAR**, **UPNG** (AFAR and UPNG follow later). BOS shows the commands of
+ПИЛВ 0102-004 **version 2** in three groups — **Basic commands** (36), **Session (СР) control commands** (12),
+**Technological commands** (4) — click a group to open it, or type in *Filter* (code, mnemonic, text). Codes in
+orange are executed only in standby (ДЖР).
+
+### How do I send a command?
+Pick it: the editor shows its section, where it is executed, receiver, number of data bytes, notes, and **every
+data field** of the document (lists for coded values, ranges, units; time fields take `now` / `now+30`). A
+*Preset* fills the fields. The frame is shown live (`BOS CAN1: ID 0x06296004 [8] FF 00 …`); values the document
+prohibits are refused before sending. Choose sender, CAN line 1 / 2, *Request КВ* and the expected answer
+(КВ+ / КВ- / any), then **▶ Send now** — the answer (КВ+ / КВ- with the reason, the line it came back on, the time)
+appears under the button. In demo mode the commands go to the simulated BOS.
+
+### How does the queue work?
+**＋ Add to queue →** appends the command (after the selected step). Equipment steps are the same as in the Main
+tab sequences: Pause, HMP4040, N6701C, IT6832, TFG6806, FSW run / single / auto level, FSW settings, CAN library
+frame (AFAR / UPNG meanwhile), BOS test plan, Repeat … End, Log message, plus an **Operator prompt** that waits for
+OK. Double-click a step to edit it — a BOS command opens in the editor on the left with *✔ Update queue step*.
+**▶ Run queue** / **▶ From selected** run it; every КВ and every instrument is waited for, the results are listed
+under the queue. *Stop on wrong / missing КВ* stops at the first unexpected answer; an instrument error always
+stops. Several named queues; stored in `ktr_control.json` next to the program. The tab does not send while the
+BOS Test Station is running a plan.
+
+### What is new in 0102 v2?
+Pause_SR 0x52 (delay of the physical session, OG tuning in session); session commands Send_UB_BERT 0xAE,
+Send_UB_Data_60 0xAD (BPSK index +60°), Send_BERT 0xAF (test mode); technological commands Change_DAC_1 0x50
+(QMC offsets / gains / phase, coarse_dac), Change_DAC_2 0x53 (pll_vco), Change_DAC_OG 0x51 (50 MHz OG DAC); the
+data fields of Change_FlashTM 0xE0 and Set_TimeSend 0xAA; Stop_I2C 0x01 from the BOS. All are in
+`bos_commands_0102.json` (the station tests and the CAN tab use the same file).
+
 
 ### What does it do?
 It tests a BOS modulator automatically and tells the operator **what is wrong and where to look**. A test plan

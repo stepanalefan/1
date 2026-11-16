@@ -1382,13 +1382,14 @@ class BosSimulator:
             self.saved_time_snr = self.time_snr
         elif code == 0x0C:
             self.angle_t = time.monotonic()
-        elif code in bp.SR_COMMANDS:
+        elif code in bp.SR_COMMANDS or code in (0xAD, 0xAE, 0xAF):
             p = bp.parse_session(data)
             self.att_code = p["atten_db"]
             self.freq = bp.freq_hz(p["freq_n"])
             self.sr_t = time.monotonic()
             self.protocol = True
-            self.mode = "cw" if code == 0xA0 else mapping.get(code, "OQPSK")
+            self.mode = "cw" if code == 0xA0 else mapping.get(code) or \
+                {0xAD: "BPSK", 0xAE: "BPSK", 0xAF: "OQPSK"}.get(code, "OQPSK")
         return True
 
     def _session_alive(self):
