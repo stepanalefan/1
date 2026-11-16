@@ -245,6 +245,24 @@ In Russian the column is in Russian; in the other languages it stays in English.
 | LO harmonics | Lines at carrier × k/4 | LO / multiplier leakage of the ADMV1013 |
 | Stability | Power, frequency, MER over time with temperature | Thermal drift of PA / reference |
 
+### OQPSK shows 16 points (each point a 2 × 2 square) / BPSK points doubled along I - what is measured?
+**I/Q time skew (OQPSK, QPSK):** the I and Q rails reach the modulator at different times. The analyser can only
+choose one timing, so each rail is sampled off its eye centre and its value depends on one neighbour symbol: two
+levels per rail → a 2 × 2 square per point. The station finds each rail's own eye centre (the symbol-rate line of
+the squared rail, in blocks of 256 symbols - a clock-rate error cancels) and reports the **skew in ps** (limit 250
+ps, ≈ 3 % of a ШР symbol), the spread between blocks, and the **MER with each rail at its own centre** (what the
+skew costs). The size is reliable (±~15 ps in tests); the **sign cannot be told** from the signal because a 90°
+carrier rotation swaps the rails. The stability test tracks it against temperature. Typical cause: unequal baseband
+filters between DAC38J82 and ADMV1013 - X7R / X5R capacitors drift with temperature (worse in the cold); fix with
+C0G / NP0 parts and matched rails, or a fractional delay of one rail in the FPGA (Corrections tab).
+
+**BPSK level split:** the amplitude depends on whether the neighbour symbol has the same sign; with SP-L one
+neighbour is always opposite, so each point is doubled along the I axis. Reported in % of the amplitude (limit
+10 %) with the side: **previous symbol dominant** = slow edges in the transmitter (the old level lingers - baseband
+filter / DAC / ADMV1013 input, temperature-dependent parts); **both alike** = symmetric band limitation, usually the
+measurement (VSA measurement filter not rectangular, < 8 samples per symbol). Simulator faults for training:
+*I/Q time skew*, *Baseband filter too slow*.
+
 ### How does the diagnosis decide?
 By cross-checking measurements that point at different blocks, for example:
 * carrier error and symbol-rate error with the **same ppm** → the common 10 MHz reference; carrier error with a

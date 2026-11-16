@@ -310,6 +310,107 @@ def iq_impairments(z, d):
     return {"gain_imb": gi, "quad_err": qe, "offset": complex(cr[2], ci[2]), "irr": irr}
 
 
+def iq_skew(x, fs, sr, alpha=0.25, mod="OQPSK", filt="RRC", S=32, blk=256) -> dict:
+    """I/Q time skew: each rail's own best sampling time (eye centre) and their difference beyond the nominal
+    offset (OQPSK T/2, QPSK 0). Model-free, from the raw capture: coarse frequency removed, interpolated to
+    S samples / symbol, matched filter, rotated onto the axes (4th power) and analysed in blocks of `blk`
+    symbols (a clock-rate error drifts both rails alike and cancels in the difference).
+    Returns skew_s / skew_ps (> 0: Q later than nominal; the sign flips with the 90° carrier ambiguity, the size
+    is reliable), skew_frac (part of a symbol), skew_spread_ps (block-to-block), mer_common (both rails at one
+    common timing, as a demodulator samples) and mer_own (each rail at its own centre: the MER without skew)."""
+    out = {"skew_s": float("nan"), "skew_ps": float("nan"), "skew_frac": float("nan"),
+           "skew_spread_ps": float("nan"), "mer_common": float("nan"), "mer_own": float("nan"), "skew_blocks": 0}
+    x = np.asarray(x, np.complex128)
+    if len(x) < 8 * blk * fs / sr:
+        return out
+    f1 = iq_demod._coarse_cfo(x[:min(len(x), 1 << 18)], fs, 4)
+    x = x * np.exp(-2j * np.pi * f1 / fs * np.arange(len(x)))
+    y, _ = resample(x, fs, S * sr)
+    h = iq_demod.rrc_taps(alpha, S) if filt == "RRC" else np.ones(S) / S
+    y = np.convolve(y, h, mode="same")
+    y = y[len(h):len(y) - len(h)]                       # filter transients
+    y = y / (math.sqrt(float(np.mean(np.abs(y) ** 2))) or 1.0)
+    nominal = S / 2 if mod == "OQPSK" else 0.0
+    nb = len(y) // (blk * S)
+    ks, mc, mo = [], [], []
+
+    rot = np.exp(-2j * np.pi * np.arange(blk * S) / S)
+
+    def centre(v):
+        """Eye centre of one rail as a fractional column 0...S: phase of the symbol-rate line of the squared rail
+        (Oerder & Meyr on each rail alone - continuous, no grid quantisation). Second value: line strength
+        relative to the rail power (small = no clean signal)."""
+        e = (v.reshape(-1)) ** 2
+        c = np.sum(e * rot)
+        return (-np.angle(c) / (2 * np.pi) * S) % S, abs(c) / (np.sum(e) + 1e-30)
+
+    def rail_at(v, t):
+        """v (B x S) sampled at fractional column t (linear interpolation, wraps into the next symbol)."""
+        flat = v.reshape(-1)
+        idx = np.arange(v.shape[0]) * S + t
+        i0 = np.floor(idx).astype(int)
+        u = idx - i0
+        ok = i0 + 1 < len(flat)
+        i0, u = i0[ok], u[ok]
+        return flat[i0] * (1 - u) + flat[i0 + 1] * u
+
+    def mer(vi, vq):
+        n = min(len(vi), len(vq))
+        vi, vq = np.abs(vi[:n]), np.abs(vq[:n])
+        ai, aq = vi.mean(), vq.mean()
+        e = np.mean((vi - ai) ** 2 + (vq - aq) ** 2)
+        return _db((ai ** 2 + aq ** 2) / max(float(e), 1e-30))
+
+    for b in range(nb):
+        seg = y[b * blk * S:(b + 1) * blk * S]
+        seg = seg * np.exp(-1j * np.angle(-np.mean(seg ** 4)) / 4)      # constellation onto the axes
+        m = seg.reshape(blk, S)
+        ti, qi_m = centre(m.real)
+        tq, qq_m = centre(m.imag)
+        if not (qi_m > 0.02 and qq_m > 0.02):           # no clock line: noise / no signal in this block
+            continue
+        sk = ((tq - ti - nominal + S / 2) % S) - S / 2
+        ks.append(sk)
+        tc = ti + sk / 2                                # one common timing (compromise) as a demodulator uses
+        mc.append(mer(rail_at(m.real, tc), rail_at(m.imag, (tc + nominal) % S)))
+        mo.append(mer(rail_at(m.real, ti), rail_at(m.imag, tq)))
+    if len(ks) < 3:
+        return out
+    ks = np.asarray(ks)
+    med = float(np.median(ks))
+    T = 1.0 / sr
+    out.update(skew_s=med / S * T, skew_ps=med / S * T * 1e12, skew_frac=med / S,
+               skew_spread_ps=float(np.std(ks)) / S * T * 1e12, mer_common=float(np.median(mc)),
+               mer_own=float(np.median(mo)), skew_blocks=len(ks))
+    return out
+
+
+def bpsk_isi(i_sym) -> dict:
+    """Data-dependent amplitude of BPSK (one rail): mean |I| when the previous (or next) symbol has the same sign vs
+    the opposite sign. A split shows as each constellation point doubled along the I axis: slow edges / band
+    limitation of the rectangular (SP-L) pulses with the sampling point near an edge, or unequal symbol lengths.
+    Returns isi_prev_pct, isi_next_pct (+ = an equal neighbour gives a larger amplitude), isi_split_pct (the
+    larger, in % of the mean amplitude) and isi_side ('previous' / 'next')."""
+    v = np.asarray(i_sym, float)
+    if len(v) < 200:
+        return {}
+    a, s = np.abs(v), np.sign(v)
+    m = float(np.mean(a)) or 1.0
+    same_prev = s[1:] == s[:-1]                        # symbol k (k >= 1) vs k-1
+    ap = a[1:]
+    same_next = s[:-1] == s[1:]                        # symbol k (k < n-1) vs k+1
+    an = a[:-1]
+
+    def diff(av, same):
+        if same.sum() < 20 or (~same).sum() < 20:
+            return float("nan")
+        return 100 * (float(np.mean(av[same])) - float(np.mean(av[~same]))) / m
+    dp, dn = diff(ap, same_prev), diff(an, same_next)
+    side = "previous" if abs(np.nan_to_num(dp)) >= abs(np.nan_to_num(dn)) else "next"
+    return {"isi_prev_pct": dp, "isi_next_pct": dn, "isi_split_pct": float(np.nanmax(np.abs([dp, dn]))),
+            "isi_side": side}
+
+
 def analyze_modulated(x, fs, cfg, expected_mod):
     """Full analysis of one modulated capture. cfg: symbol_rate, alpha, carrier, loss_db."""
     sr, alpha = cfg["symbol_rate"], cfg["alpha"]
@@ -401,6 +502,13 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     out["phase_slow_deg"] = float(np.degrees(np.sqrt(np.mean(slow[k:-k] ** 2)))) if len(slow) > 2 * k else float("nan")
     out["offset_i"], out["offset_q"] = imp["offset"].real, imp["offset"].imag
     out["offset_dbc"] = _db(abs(imp["offset"]) ** 2) if abs(imp["offset"]) > 0 else -120.0
+    if expected_mod == "BPSK" and "i" in out:
+        out.update(bpsk_isi(out["i"]))
+    if expected_mod in ("OQPSK", "QPSK"):
+        try:
+            out.update(iq_skew(x, fs, sr, alpha, expected_mod, filt))
+        except Exception as e:                          # never lose the rest of the analysis
+            out["skew_error"] = f"{type(e).__name__}: {e}"
     pr = papr(xd)
     ref = papr_reference(expected_mod, sps, alpha, (min(bw, fs) / sr) if bw else fs / sr)
     out["papr"], out["papr_ref"], out["compression_db"] = pr, ref, ref - pr
@@ -528,6 +636,16 @@ def fit_attenuator(codes, powers):
 def corrections(res: dict, cfg: dict) -> list[tuple[str, str, str]]:
     """(what, value, how) - suggested adjustments from the last measurements."""
     out = []
+    oq = res.get("mod_OQPSK") or {}
+    if _finite(oq.get("skew_ps")) and abs(oq["skew_ps"]) >= 20:
+        sk = abs(oq["skew_ps"])
+        sr = cfg.get("sr_oqpsk", 131.072e6)
+        out.append(("I/Q time skew (fractional delay of one rail)", f"{sk:.0f} ps = {sk * 1e-12 * sr:.3f} symbol",
+                    f"Delay the earlier rail by ≈ {sk:.0f} ps (FPGA fractional-delay filter, or DAC38J82 output path). "
+                    f"The sign cannot be told from the signal (90° carrier ambiguity): try one rail, re-measure - "
+                    f"the skew must drop to ~0 ps, otherwise delay the other rail. MER would rise from "
+                    f"{oq.get('mer_common', float('nan')):.1f} to {oq.get('mer_own', float('nan')):.1f} dB. "
+                    f"If it changes with temperature, fix the baseband filters instead."))
     m = res.get("mod_OQPSK") or res.get("mod_BPSK")
     if m and _finite(m.get("gain_imb")) and abs(m["gain_imb"]) >= 0.05:
         g = m["gain_imb"]
@@ -892,6 +1010,52 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
                              {"MIX": 0.45, "DAC": 0.35, "FPGA": 0.2},
                              ["Apply the QMC gain / phase corrections (see Corrections)",
                               "If |gain| > 1 dB: check the Q baseband path (DAC IOUTB, filter, resistors)"], mod))
+        # I/Q time skew (OQPSK / QPSK): each constellation point splits into a 2 x 2 square
+        sk = r.get("skew_ps")
+        skl = lim.get("iq_skew_max_ps", 250)
+        if _finite(sk) and abs(sk) > skl:
+            F.append(Finding("fail" if abs(sk) > 2 * skl else "warn",
+                             f"{mod}: I/Q time skew {abs(sk):.0f} ps ({100 * abs(r['skew_frac']):.1f} % of a symbol)",
+                             f"The I and Q rails reach the modulator at different times: each rail is sampled off its eye "
+                             f"centre and every constellation point splits into a 2 x 2 square. MER {r.get('mer_common', mer):.1f} "
+                             f"dB now, {r.get('mer_own', float('nan')):.1f} dB with each rail at its own centre. Typical "
+                             f"cause: the baseband filters between DAC38J82 and ADMV1013 (unequal parts; X7R / X5R "
+                             f"capacitors drift with temperature - worse in the cold), unequal trace / cable lengths.",
+                             {"MIX": 0.45, "DAC": 0.35, "FPGA": 0.2},
+                             ["Compare the I and Q eye diagrams (FSW K70) warm and cold",
+                              "Measure the I-to-Q delay at the ADMV1013 inputs with an oscilloscope",
+                              "Use C0G / NP0 capacitors and matched parts in both baseband filters",
+                              "Compensate with a fractional delay of one rail in the FPGA (if the skew is stable)"], mod))
+        # BPSK: amplitude depends on a neighbour symbol (each point doubled along I)
+        sp_ = r.get("isi_split_pct")
+        il = lim.get("isi_max_pct", 10)
+        if _finite(sp_) and sp_ > il:
+            pv, nx = abs(np.nan_to_num(r.get("isi_prev_pct", 0))), abs(np.nan_to_num(r.get("isi_next_pct", 0)))
+            low_sps = _finite(r.get("low_sps"))
+            if low_sps:
+                why, blk = ("the capture has only %.1f samples per symbol: the FSW bandwidth rounds the rectangular "
+                            "SP-L pulses - record with >= 8 samples per symbol" % r["low_sps"], {"OUT": 0.8, "MIX": 0.2})
+                acts = ["Capture with a higher sample rate (>= 8 x symbol rate) and re-measure"]
+            elif pv > 2 * nx:
+                why, blk = ("the previous symbol lingers: slow edges in the transmit baseband (filter / reconstruction "
+                            "corner too low, DAC output, ADMV1013 input), often worse in the cold when filter "
+                            "capacitors drift", {"MIX": 0.4, "DAC": 0.4, "FPGA": 0.2})
+                acts = ["Check the baseband filter corner and parts (C0G / NP0), warm and cold",
+                        "Look at the BPSK eye on the FSW (K70): rounded / slow edges",
+                        "Check that the FPGA sends rectangular SP-L pulses with equal halves"]
+            else:
+                why, blk = ("both neighbours act alike: symmetric band limitation - typically the measurement (VSA "
+                            "measurement filter not set for rectangular pulses, FSW bandwidth / sample rate)",
+                            {"OUT": 0.6, "MIX": 0.2, "DAC": 0.2})
+                acts = ["FSW K70: transmit filter rectangular, measurement filter none / rectangular",
+                        "Capture with >= 8 samples per symbol",
+                        "If it stays: check the transmit baseband filter corner"]
+            F.append(Finding("fail" if sp_ > 2 * il and not low_sps else "warn",
+                             f"{mod}: level split {sp_:.0f} % (ISI from the {r.get('isi_side', '?')} symbol)",
+                             f"The amplitude depends on whether the neighbour symbol has the same sign (previous "
+                             f"{r.get('isi_prev_pct', float('nan')):+.1f} %, next {r.get('isi_next_pct', float('nan')):+.1f} "
+                             f"%): each constellation point is doubled along the I axis. Likely: {why}.",
+                             blk, acts, mod))
         # compression
         c = r.get("compression_db")
         sp = r.get("spectrum", {})
@@ -1156,6 +1320,8 @@ FAULTS = [  # key, label, default magnitude, unit
     ("jesd", "JESD204B link error", 1, ""),
     ("gain_imb", "Q path gain error", 2.0, "dB"),
     ("quad", "Quadrature error", 8.0, "deg"),
+    ("iq_skew", "I/Q time skew (Q path delayed)", 400.0, "ps"),
+    ("bb_slow", "Baseband filter too slow (corner, × symbol rate)", 0.6, "× SR"),
     ("leak", "LO leakage", -22.0, "dBc"),
     ("pn", "Excess phase noise", 6.0, "deg"),
     ("comp", "PA compression (backoff)", 0.5, "dB"),
@@ -1302,6 +1468,14 @@ class BosSimulator:
             g = 10 ** (self.faults.get("gain_imb", 0.0) / 20)
             phi = math.radians(self.faults.get("quad", 0.0))
             i, q = s.real, s.imag
+            if self.faults.get("iq_skew"):                 # Q rail delayed (fractional delay in the spectrum)
+                f = np.fft.fftfreq(len(q), 1 / fs)
+                q = np.fft.ifft(np.fft.fft(q) * np.exp(-2j * np.pi * f * self.faults["iq_skew"] * 1e-12)).real
+            if self.faults.get("bb_slow"):                 # slow baseband filter: rounded edges (both rails)
+                f = np.fft.fftfreq(len(i), 1 / fs)
+                hlp = 1.0 / (1.0 + 1j * f / (self.faults["bb_slow"] * sr))
+                i = np.fft.ifft(np.fft.fft(i) * hlp).real
+                q = np.fft.ifft(np.fft.fft(q) * hlp).real
             s = i + 1j * g * (q * math.cos(phi) + i * math.sin(phi))
         if "leak" in self.faults:
             s = s + 10 ** (self.faults["leak"] / 20) * math.sqrt(np.mean(np.abs(s) ** 2))

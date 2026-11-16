@@ -237,6 +237,12 @@ OUTPUT OFF|SORTIE COUPÉE|AUSGANG AUS|USCITA OFF|出力オフ|ВЫХОД ВЫК�
 Command console|Console de commandes|Befehlskonsole|Console comandi|コマンドコンソール|Консоль команд
 IT6832: output OFF|IT6832 : sortie coupée|IT6832: Ausgang AUS|IT6832: uscita OFF|IT6832: 出力オフ|IT6832: выход ВЫКЛ.
 CAN1 / CAN2 lines|Lignes CAN1 / CAN2|CAN1- / CAN2-Leitungen|Linee CAN1 / CAN2|CAN1 / CAN2回線|Линии CAN1 / CAN2
+I/Q time skew max (OQPSK / QPSK)|Décalage temporel I/Q max (OQPSK / QPSK)|I/Q-Zeitversatz max. (OQPSK / QPSK)|Sfasamento temporale I/Q max (OQPSK / QPSK)|I/Q時間スキュー最大 (OQPSK / QPSK)|Макс. временной сдвиг I/Q (OQPSK / QPSK)
+BPSK level split max (ISI from a neighbour)|Dédoublement de niveau BPSK max (IES voisin)|BPSK-Pegelaufspaltung max. (ISI vom Nachbarn)|Sdoppiamento di livello BPSK max (ISI dal vicino)|BPSKレベル分離最大 (隣接シンボルISI)|Макс. расщепление уровня BPSK (МСИ от соседнего символа)
+I/Q time skew|Décalage temporel I/Q|I/Q-Zeitversatz|Sfasamento temporale I/Q|I/Q時間スキュー|Временной сдвиг I/Q
+Level split (ISI from a neighbour symbol)|Dédoublement de niveau (IES d'un symbole voisin)|Pegelaufspaltung (ISI vom Nachbarsymbol)|Sdoppiamento di livello (ISI da simbolo vicino)|レベル分離 (隣接シンボルISI)|Расщепление уровня (МСИ от соседнего символа)
+MER with each rail at its own eye centre|MER avec chaque voie à son centre d'œil|MER mit jeder Schiene in ihrer Augenmitte|MER con ogni ramo al proprio centro dell'occhio|各レールを自身のアイ中心で取った場合のMER|MER при отсчёте каждого канала в центре своего глаза
+Worst I/Q time skew|Pire décalage temporel I/Q|Größter I/Q-Zeitversatz|Peggiore sfasamento temporale I/Q|最大I/Q時間スキュー|Наибольший временной сдвиг I/Q
 CAN line 1|Ligne CAN 1|CAN-Leitung 1|Linea CAN 1|CAN回線1|Линия CAN 1
 CAN line 2|Ligne CAN 2|CAN-Leitung 2|Linea CAN 2|CAN回線2|Линия CAN 2
 Check CAN1, then CAN2 at the start (NOP + REQ_TM)|Vérifier CAN1 puis CAN2 au début (NOP + REQ_TM)|Zu Beginn CAN1, dann CAN2 prüfen (NOP + REQ_TM)|All'inizio verifica CAN1, poi CAN2 (NOP + REQ_TM)|開始時にCAN1、次にCAN2を確認 (NOP + REQ_TM)|В начале проверить CAN1, затем CAN2 (NOP + REQ_TM)

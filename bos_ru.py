@@ -378,6 +378,24 @@ TFG6806 CH{} offset|Смещение TFG6806 CH{}
 TFG6806 internal 10 MHz on the rear port (UTILity:INSide:CLOck?)|Внутренние 10 МГц TFG6806 на заднем разъёме (UTILity:INSide:CLOck?)
 setting only: the TFG has no query for 'external clock present'; without a qualified clock it runs on its internal one (status bar 'Ext Ref On')|только настройка: у TFG нет запроса «внешняя опора есть»; без годного сигнала он работает от внутренней (строка состояния «Ext Ref On»)
 BOS power on|Питание БОС включено
+{} % of a symbol, ±{} ps between blocks; sign {} (Q later / earlier) is ambiguous (90° carrier ambiguity)|{} % символа, ±{} пс между блоками; знак {} (Q позже / раньше) неоднозначен (неоднозначность фазы несущей 90°)
+common timing {} dB|общая синхронизация {} дБ
+previous {} %, next {} %|предыдущий {} %, следующий {} %
+change {} ps over the test|изменение {} пс за проверку
+{}: I/Q time skew {} ps ({} % of a symbol)|{}: временной сдвиг I/Q {} пс ({} % символа)
+{}: level split {} % (ISI from the {} symbol)|{}: расщепление уровня {} % (МСИ от {} символа)
+I/Q time skew (fractional delay of one rail)|Временной сдвиг I/Q (дробная задержка одного канала)
+Compare the I and Q eye diagrams (FSW K70) warm and cold|Сравните глазковые диаграммы I и Q (FSW K70) в тепле и на холоде
+Measure the I-to-Q delay at the ADMV1013 inputs with an oscilloscope|Измерьте осциллографом задержку между I и Q на входах ADMV1013
+Use C0G / NP0 capacitors and matched parts in both baseband filters|Используйте конденсаторы C0G / NP0 и согласованные элементы в обоих фильтрах НЧ-тракта
+Compensate with a fractional delay of one rail in the FPGA (if the skew is stable)|Скомпенсируйте дробной задержкой одного канала в ПЛИС (если сдвиг стабилен)
+Capture with a higher sample rate (>= 8 x symbol rate) and re-measure|Запишите с большей частотой дискретизации (>= 8 × символьная скорость) и повторите
+Check the baseband filter corner and parts (C0G / NP0), warm and cold|Проверьте частоту среза и элементы фильтра НЧ-тракта (C0G / NP0) в тепле и на холоде
+Look at the BPSK eye on the FSW (K70): rounded / slow edges|Посмотрите глазковую диаграмму BPSK на FSW (K70): скруглённые / медленные фронты
+Check that the FPGA sends rectangular SP-L pulses with equal halves|Проверьте, что ПЛИС формирует прямоугольные импульсы SP-L с равными половинами
+FSW K70: transmit filter rectangular, measurement filter none / rectangular|FSW K70: фильтр передатчика прямоугольный, измерительный фильтр нет / прямоугольный
+Capture with >= 8 samples per symbol|Записывайте с >= 8 отсчётами на символ
+If it stays: check the transmit baseband filter corner|Если сохраняется: проверьте частоту среза фильтра НЧ-тракта передатчика
 CAN{} ({}): command + КВ|CAN{} ({}): команда + КВ
 CAN{} ({}): telemetry (REQ_TM ИОК_ОСН)|CAN{} ({}): телеметрия (REQ_TM ИОК_ОСН)
 КВ+ on {}, via CAN{}|КВ+ по {}, через CAN{}
@@ -413,6 +431,7 @@ Test {}/{}: {}|Проверка {}/{}: {}
 # captured values that are words
 VALUES = {
     "connectors, cable, FSW": "разъёмы, кабель, FSW",
+    "previous": "предыдущего", "next": "следующего",
     "external": "внешний", "internal": "внутренний", "correct": "в норме", "not conclusive": "неопределённа",
     "preamble": "преамбулы", "КБД": "КБД", "phase noise": "фазовый шум", "compression": "компрессия",
     "carrier leakage": "просачивание несущей", "I/Q imbalance": "разбаланс I/Q",

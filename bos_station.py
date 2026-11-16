@@ -125,6 +125,8 @@ LIM_FIELDS = [  # key, label, default, unit
     ("iq_offset_max_dbc", "Carrier leakage max", -30.0, "dBc"),
     ("gain_imb_max", "I/Q gain imbalance max", 0.5, "dB"),
     ("quad_err_max", "Quadrature error max", 3.0, "°"),
+    ("iq_skew_max_ps", "I/Q time skew max (OQPSK / QPSK)", 250.0, "ps"),
+    ("isi_max_pct", "BPSK level split max (ISI from a neighbour)", 10.0, "%"),
     ("phase_err_max", "Phase error RMS max", 3.0, "°"),
     ("compression_max_db", "PA compression max (PAPR loss)", 0.8, "dB"),
     ("aclr_min", "ACLR min", 30.0, "dB"),
@@ -2889,6 +2891,17 @@ class BosStation(QtWidgets.QWidget):
         if _fin(r.get("gain_imb")):
             self._lim_row(T, "I/Q gain imbalance", r["gain_imb"], "dB", -L["gain_imb_max"], L["gain_imb_max"], "{:+.3f}")
             self._lim_row(T, "Quadrature error", r["quad_err"], "°", -L["quad_err_max"], L["quad_err_max"], "{:+.2f}")
+        if _fin(r.get("skew_ps")):
+            self._lim_row(T, "I/Q time skew", abs(r["skew_ps"]), "ps", None, L.get("iq_skew_max_ps", 250), "{:.0f}",
+                          note=f"{100 * abs(r['skew_frac']):.1f} % of a symbol, ±{r['skew_spread_ps']:.0f} ps between "
+                               f"blocks; sign {'+' if r['skew_ps'] >= 0 else '-'} (Q later / earlier) is ambiguous "
+                               f"(90° carrier ambiguity)")
+            self._row(T, "MER with each rail at its own eye centre", r.get("mer_own"), "dB", "", "INFO",
+                      note=f"common timing {r.get('mer_common', float('nan')):.1f} dB")
+        if _fin(r.get("isi_split_pct")):
+            self._lim_row(T, "Level split (ISI from a neighbour symbol)", r["isi_split_pct"], "%", None,
+                          L.get("isi_max_pct", 10), "{:.1f}",
+                          note=f"previous {r['isi_prev_pct']:+.1f} %, next {r['isi_next_pct']:+.1f} %")
         self._lim_row(T, "Phase error RMS (after I/Q corr.)", r["phase_err_res_deg"], "°", None, L["phase_err_max"])
         self._row(T, "Magnitude error RMS", r["mag_err_pct"], "%", "", "INFO")
         fw = r.get("freq_wander")
@@ -3287,7 +3300,7 @@ class BosStation(QtWidgets.QWidget):
         T = TEST_NAME["drift"]
         c = self.cfg
         yield from self._set_mode("oqpsk")
-        d = {"t": [], "power": [], "cfe": [], "mer": [], "temp": []}
+        d = {"t": [], "power": [], "cfe": [], "mer": [], "temp": [], "skew": []}
         self.res["drift"] = d
         for k in range(int(c["drift_n"])):
             r = yield from self._mod_capture("OQPSK", f"stability {k + 1}/{int(c['drift_n'])}")
@@ -3296,6 +3309,7 @@ class BosStation(QtWidgets.QWidget):
                 d["power"].append(r["power"])
                 d["cfe"].append(r["cfe"])
                 d["mer"].append(r["mer"])
+                d["skew"].append(abs(r["skew_ps"]) if _fin(r.get("skew_ps")) else float("nan"))
                 tm = self.tlm.get("Temp_DT1")
                 if tm is not None:
                     d["temp"].append(float(tm))
@@ -3306,6 +3320,10 @@ class BosStation(QtWidgets.QWidget):
             self._lim_row(T, "Power drift (peak-peak)", float(np.ptp(d["power"])), "dB", None, self.lim["drift_power_db"])
             self._lim_row(T, "Frequency drift (peak-peak)", float(np.ptp(d["cfe"])), "Hz", None, self.lim["drift_cfe_hz"], "{:.0f}")
             self._lim_row(T, "Worst MER", float(np.min(d["mer"])), "dB", self.lim["mer_min"], None)
+            sk = [v for v in d["skew"] if _fin(v)]
+            if len(sk) >= 2:
+                self._lim_row(T, "Worst I/Q time skew", float(max(sk)), "ps", None, self.lim.get("iq_skew_max_ps", 250),
+                              "{:.0f}", note=f"change {float(np.ptp(sk)):.0f} ps over the test")
             if d["temp"]:
                 self._row(T, "Temperature change", float(np.ptp(d["temp"])), "°C", "", "INFO", spec="{:.1f}")
 
@@ -3349,7 +3367,7 @@ class BosStation(QtWidgets.QWidget):
             self.table.setItem(r, c, it)
         self.table.scrollToBottom()
 
-    def _lim_row(self, test, name, value, unit, lo, hi, spec="{:.2f}", none_ok=False):
+    def _lim_row(self, test, name, value, unit, lo, hi, spec="{:.2f}", none_ok=False, note=""):
         if lo is not None and hi is not None:
             lt = f"{spec.format(lo)} … {spec.format(hi)}"
         elif lo is not None:
@@ -3358,13 +3376,13 @@ class BosStation(QtWidgets.QWidget):
             lt = f"≤ {spec.format(hi)}"
         if not _fin(value) and none_ok:
             self._row(test, name, value, unit, lt, "PASS" if none_ok is True else "INFO", spec,
-                      text="none found" if none_ok is True else none_ok)
+                      text="none found" if none_ok is True else none_ok, note=note)
             return
         if not _fin(value):
             st = "FAIL"
         else:
             st = "FAIL" if (lo is not None and value < lo) or (hi is not None and value > hi) else "PASS"
-        self._row(test, name, value, unit, lt, st, spec)
+        self._row(test, name, value, unit, lt, st, spec, note=note)
 
     def _add_capture(self, label, r):
         self.res.setdefault("_caps", []).append((label, r))
@@ -3397,6 +3415,8 @@ class BosStation(QtWidgets.QWidget):
                                  ("quad_err", "Quadrature error, °", "{:+.2f}"), ("irr", "Image rejection, dB", "{:.1f}"),
                                  ("phase_err_res_deg", "Phase error (res.), °", "{:.2f}"),
                                  ("mag_err_pct", "Magnitude error, %", "{:.2f}"), ("mer_corr", "MER after I/Q corr., dB", "{:.2f}"),
+                                 ("skew_ps", "I/Q time skew, ps (±sign)", "{:+.0f}"), ("mer_own", "MER without skew, dB", "{:.2f}"),
+                                 ("isi_split_pct", "Level split (ISI), %", "{:.1f}"),
                                  ("compression_db", "PAPR loss, dB", "{:.2f}"), ("pn_deg", "Integrated PN, ° RMS", "{:.3f}"),
                                  ("snr_floor", "SNR over FSW floor, dB", "{:.1f}"), ("detected", "Detected modulation", "{}")):
             v = r.get(key)
