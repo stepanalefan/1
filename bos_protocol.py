@@ -370,6 +370,39 @@ def validate(name_or_code, data: bytes) -> str:
     return ""
 
 
+def decode(name_or_code, data: bytes) -> dict:
+    """Parameters (engineering units, as encode() takes them) of a data field - the inverse of encode()."""
+    code = code_of(name_or_code)
+    d = DEFS.get(code)
+    if d is None or not d.get("fields"):
+        return {}
+    if d.get("encoder") == "session":
+        p = parse_session(data)
+        p["continuous"] = int(p["continuous"])
+        return p
+    b = bytes(data) + bytes(8)
+    out = {}
+    for f in d["fields"]:
+        i = f["byte"]
+        if "bits" in f:
+            hi_, lo_ = f["bits"]
+            r = (b[i] >> lo_) & ((1 << (hi_ - lo_ + 1)) - 1)
+        else:
+            r = int.from_bytes(b[i:i + int(f.get("len", 1))], "little")
+        if "none" in f and r == f["none"]:
+            v = None
+        elif f.get("encoding") == "signmag_minus1":
+            v = r if r < 0x80 else -((r & 0x7F) + 1)
+        elif "scale" in f:
+            if f.get("signed") and r >> (_field_width(f) - 1):
+                r -= 1 << _field_width(f)
+            v = round(r * f["scale"], 6)
+        else:
+            v = r
+        out[f["name"]] = v
+    return out
+
+
 def receiver_of(code: int) -> int:
     d = DEFS.get(code, {})
     return GROUP_ANGLE if d.get("receiver") == "group" else BOS

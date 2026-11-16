@@ -76,13 +76,39 @@ def _sps(fs):
 
 
 # ------------------------------------------------------------------------------------------- CAN
+class FrameText(str):
+    """Frame line that also carries its command identity inside the plan (for ✎ / ✕ in the plan view)."""
+    key = None
+    code = 0
+    data = b""
+    skipped = False
+    edited = False
+
+    def __add__(self, other):
+        t = FrameText(str(self) + str(other))
+        t.key, t.code, t.data, t.skipped, t.edited = self.key, self.code, self.data, self.skipped, self.edited
+        return t
+
+
 def can_frame(st, code, data=b"", ack=True, receiver=None):
-    """'0x01 MODE_D  ID 0x06290001  data —' with the station's sender address."""
+    """'0x01 MODE_D  ID 0x06290001  data —' with the station's sender address. Inside a built-in test the
+    plan's command control is applied (not sent / data fields replaced) and the line remembers its key."""
+    import bos_steps as bs
+    tid = getattr(st, "_desc_tid", None)
+    key = skipped = edited = None
+    data0 = bytes(data)
+    if tid:
+        key = bs.cmd_key(tid, code, data0)
+        over = getattr(st, "_desc_cmds", {}).get(key)
+        send, data = bs.apply_cmd(over, code, data0)
+        skipped, edited = not send, send and bytes(data) != data0
     receiver = bp.receiver_of(code) if receiver is None else receiver
     cid, payload = bp.command(code, st.ctl.get("sender", 0x18), data, ack, receiver)
     name = bp.COMMANDS.get(code, ("?",))[0]
     hexd = " ".join(f"{b:02X}" for b in payload) if payload else "—"
-    return f"0x{code:02X} {name}   ID 0x{cid:08X}   [{len(payload)}] {hexd}"
+    t = FrameText(f"0x{code:02X} {name}   ID 0x{cid:08X}   [{len(payload)}] {hexd}")
+    t.key, t.code, t.data, t.skipped, t.edited = key, code, data0, bool(skipped), bool(edited)
+    return t
 
 
 def _ack(st):
@@ -708,7 +734,9 @@ def _describe(st, plan, bs):
                                    "ДЕМО: команды и записи идут в имитатор БОС / FSW")))
     out.append(("", L("Before the plan", "Перед планом"), prep, None))
     state = {"mode": None, "att": int(st.cfg.get("att_code", 0))}
+    st._desc_cmds = opts.get("cmds", {})
     for t, ix in zip(tests, idx):
+        st._desc_tid = None if bs.is_step(t) else t
         if bs.is_step(t):
             try:
                 steps = step_desc(st, t, state)
@@ -722,6 +750,7 @@ def _describe(st, plan, bs):
         except Exception as e:                       # never break the GUI for a description
             steps = [Step("info", f"{type(e).__name__}: {e}")]
         out.append((t, None, steps, ix))
+    st._desc_tid = "end"
     end = []
     if method == "protocol" and (builtin or any(bs.is_step(t) and t.get("type") in ("rf", "bos_cmd") for t in tests)):
         end += [Step("can", L("MODE_D — leave the BOS in standby, RF off (if a session is on)",
@@ -731,6 +760,7 @@ def _describe(st, plan, bs):
                          "заключение НОРМА / НОРМА (замечания) / НЕ НОРМА, выводы, поправки")),
             Step("pc", L("HTML report bos_reports/BOS_<serial>_<date>.html, history bos_history.csv",
                          "отчёт HTML bos_reports/BOS_<номер>_<дата>.html, история bos_history.csv"))]
+    st._desc_tid = None
     out.append(("", L("After the plan", "После плана"), end, None))
     return out
 

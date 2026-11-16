@@ -316,6 +316,55 @@ def _param_widget(key, value):
     return w
 
 
+def field_widget(f, value, changed):
+    """Input for one 0102 data field; w.get() returns the parameter value; changed() on every edit."""
+    vals = f.get("values")
+    if vals and (f.get("strict") or len(vals) <= 8):
+        cb = QtWidgets.QComboBox()
+        for k, txt in vals.items():
+            cb.addItem(f"{k} — {txt}", int(k, 0))
+        cb.setCurrentIndex(max(0, cb.findData(value)))
+        cb.currentIndexChanged.connect(changed)
+        cb.get = cb.currentData
+        return cb
+    if "scale" in f or f.get("encoding"):
+        sp = QtWidgets.QDoubleSpinBox()
+        sp.setDecimals(4 if "scale" in f and f["scale"] < 0.1 else 1)
+        sp.setRange(float(f.get("min", -1e9)), float(f.get("max", 1e9)))
+        sp.setSingleStep(f.get("scale", 1.0))
+        sp.setSuffix(" " + f.get("unit", "") if f.get("unit") else "")
+        if "none" in f:
+            w = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            none = QtWidgets.QCheckBox("no direction (0x80)")
+            none.setChecked(value is None)
+            sp.setEnabled(value is not None)
+            none.toggled.connect(lambda on: sp.setEnabled(not on))
+            none.toggled.connect(changed)
+            sp.setValue(float(value or 0))
+            sp.valueChanged.connect(changed)
+            h.addWidget(sp, 1)
+            h.addWidget(none)
+            w.get = lambda: None if none.isChecked() else sp.value()
+            return w
+        sp.setValue(float(value or 0))
+        sp.valueChanged.connect(changed)
+        sp.get = sp.value
+        return sp
+    le = QtWidgets.QLineEdit("now" if value == "now" else f"0x{int(value or 0):X}"
+                             if int(f.get("len", 1)) > 1 else str(int(value or 0)))
+    le.setToolTip(f"{f.get('min', 0)} … {f.get('max', '')}  (decimal or 0x hex" +
+                  (", 'now' = current time" if f["name"] == "bshv" else "") + ")")
+    le.textChanged.connect(changed)
+
+    def get():
+        t = le.text().strip()
+        return "now" if t == "now" else int(t, 0)
+    le.get = get
+    return le
+
+
 class PlanParamsDialog(QtWidgets.QDialog):
     """Parameters of built-in tests for one plan: tick 'this plan' to override the station setting."""
 
@@ -445,51 +494,7 @@ class StepDialog(QtWidgets.QDialog):
         self._update_frame()
 
     def _field_widget(self, f, value):
-        vals = f.get("values")
-        if vals and (f.get("strict") or len(vals) <= 8):
-            cb = QtWidgets.QComboBox()
-            for k, txt in vals.items():
-                cb.addItem(f"{k} — {txt}", int(k, 0))
-            cb.setCurrentIndex(max(0, cb.findData(value)))
-            cb.currentIndexChanged.connect(self._update_frame)
-            cb.get = cb.currentData
-            return cb
-        if "scale" in f or f.get("encoding"):
-            sp = QtWidgets.QDoubleSpinBox()
-            sp.setDecimals(4 if "scale" in f and f["scale"] < 0.1 else 1)
-            sp.setRange(float(f.get("min", -1e9)), float(f.get("max", 1e9)))
-            sp.setSingleStep(f.get("scale", 1.0))
-            sp.setSuffix(" " + f.get("unit", "") if f.get("unit") else "")
-            if "none" in f:
-                w = QtWidgets.QWidget()
-                h = QtWidgets.QHBoxLayout(w)
-                h.setContentsMargins(0, 0, 0, 0)
-                none = QtWidgets.QCheckBox("no direction (0x80)")
-                none.setChecked(value is None)
-                sp.setEnabled(value is not None)
-                none.toggled.connect(lambda on: sp.setEnabled(not on))
-                none.toggled.connect(self._update_frame)
-                sp.setValue(float(value or 0))
-                sp.valueChanged.connect(self._update_frame)
-                h.addWidget(sp, 1)
-                h.addWidget(none)
-                w.get = lambda: None if none.isChecked() else sp.value()
-                return w
-            sp.setValue(float(value or 0))
-            sp.valueChanged.connect(self._update_frame)
-            sp.get = sp.value
-            return sp
-        le = QtWidgets.QLineEdit("now" if value == "now" else f"0x{int(value or 0):X}"
-                                 if int(f.get("len", 1)) > 1 else str(int(value or 0)))
-        le.setToolTip(f"{f.get('min', 0)} … {f.get('max', '')}  (decimal or 0x hex" +
-                      (", 'now' = current time" if f["name"] == "bshv" else "") + ")")
-        le.textChanged.connect(self._update_frame)
-
-        def get():
-            t = le.text().strip()
-            return "now" if t == "now" else int(t, 0)
-        le.get = get
-        return le
+        return field_widget(f, value, self._update_frame)
 
     def _preset_chosen(self, i):
         p = self.preset.itemData(i)
@@ -676,6 +681,140 @@ class StepDialog(QtWidgets.QDialog):
 
     def value(self) -> dict:
         return self.s
+
+
+# ------------------------------------------------------------------- commands inside built-in tests
+def cmd_key(tid: str, code: int, data: bytes = b"") -> str:
+    """Identity of a BOS command inside a built-in test of a plan: test id + command code (+ the telemetry
+    array type for SET_PeriodTM / REQ_TM, which are sent once per array). 'end' = the MODE_D after the plan."""
+    k = f"{tid}:{code:02X}"
+    if code in (0x10, 0x11) and data:
+        k += f":{data[0]:02X}"
+    return k
+
+
+def apply_cmd(over: dict | None, code: int, data: bytes):
+    """(send?, data) after a plan's command control: {"skip": True} = not sent, {"params": {...}} = these data
+    fields replaced (the others stay as the test computed them)."""
+    if not over:
+        return True, data
+    if over.get("skip"):
+        return False, data
+    p = over.get("params") or {}
+    if p and data is not None:
+        cur = bp.decode(code, data)
+        cur.update(p)
+        try:
+            return True, bp.encode(code, cur)
+        except (ValueError, KeyError):
+            return True, data
+    return True, data
+
+
+class CmdDialog(QtWidgets.QDialog):
+    """One BOS command of a built-in test, for one plan: send it or not, and replace any data field."""
+
+    def __init__(self, parent, plan, key, code, data, test_name, over):
+        super().__init__(parent)
+        self.code, self.data0, self.key = code, bytes(data or b""), key
+        d = bp.DEFS.get(code, {})
+        self.setWindowTitle(f"Command in plan '{plan}'")
+        self.setMinimumWidth(560)
+        f = QtWidgets.QFormLayout(self)
+        f.addRow(QtWidgets.QLabel(f"<b>{test_name}</b> — 0x{code:02X} {bp.COMMANDS.get(code, ('?',))[0]}"
+                                  f"<br><span style='color:#8a96a3'>{d.get('name', '')}"
+                                  f"{' · §' + d['section'] if d.get('section') else ''}</span>"))
+        self.send = QtWidgets.QCheckBox("Send this command in this plan")
+        self.send.setChecked(not (over or {}).get("skip"))
+        self.send.setToolTip("Unticked: the test goes on without sending it (the log and the report say so).\n"
+                             "A test that needs its answer (acknowledgement, telemetry) may then fail.")
+        f.addRow(self.send)
+        cur = bp.decode(code, self.data0) if self.data0 else {}
+        po = dict((over or {}).get("params") or {})
+        self.rows = {}
+        box = QtWidgets.QGroupBox("Data fields — tick a field to replace the value the test computes")
+        g = QtWidgets.QGridLayout(box)
+        for r, fd in enumerate(d.get("fields", []) if self.data0 else []):
+            on = QtWidgets.QCheckBox()
+            on.setChecked(fd["name"] in po)
+            w = field_widget(fd, po.get(fd["name"], cur.get(fd["name"], fd.get("default"))), self._update)
+            w.setEnabled(on.isChecked())
+            on.toggled.connect(w.setEnabled)
+            on.toggled.connect(self._update)
+            lab = QtWidgets.QLabel(fd["name"] + (f"  ({fd['note']})" if fd.get("note") else ""))
+            lab.setWordWrap(True)
+            lab.setMaximumWidth(280)
+            g.addWidget(on, r, 0)
+            g.addWidget(lab, r, 1)
+            g.addWidget(w, r, 2)
+            g.addWidget(QtWidgets.QLabel(f"test: {cur.get(fd['name'])}"), r, 3)
+            self.rows[fd["name"]] = (on, w)
+        if not self.rows:
+            g.addWidget(QtWidgets.QLabel("no data field"), 0, 0)
+        f.addRow(box)
+        if d.get("encoder") == "session" or code in (0x0C,):
+            f.addRow(QtWidgets.QLabel("The test changes this command's data while it runs (mode, attenuation, "
+                                      "frequency); ticked fields are fixed for every time it is sent."))
+        mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
+        self.f0 = QtWidgets.QLabel(f"[{len(self.data0)}] {self.data0.hex(' ').upper() or '—'}")
+        self.f1 = QtWidgets.QLabel()
+        for lab in (self.f0, self.f1):
+            lab.setStyleSheet(mono)
+        f.addRow("Test sends", self.f0)
+        f.addRow("This plan sends", self.f1)
+        self.err = QtWidgets.QLabel()
+        self.err.setStyleSheet("color:#ff6b6b;")
+        f.addRow(self.err)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.b_reset = bb.addButton("Restore original", QtWidgets.QDialogButtonBox.ResetRole)
+        self.b_reset.clicked.connect(self._reset)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+        self.send.toggled.connect(self._update)
+        self._reset_flag = False
+        self._update()
+
+    def _params(self):
+        return {k: w.get() for k, (on, w) in self.rows.items() if on.isChecked()}
+
+    def _update(self, *_):
+        if not self.send.isChecked():
+            self.f1.setText("— not sent —")
+            self.err.setText("")
+            return True
+        try:
+            p = bp.decode(self.code, self.data0) if self.data0 else {}
+            p.update(self._params())
+            data = bp.encode(self.code, p) if self.data0 else b""
+            self.f1.setText(f"[{len(data)}] {data.hex(' ').upper() or '—'}")
+            self.err.setText("")
+            return True
+        except (ValueError, KeyError) as e:
+            self.f1.setText("—")
+            self.err.setText(str(e))
+            return False
+
+    def _reset(self):
+        self._reset_flag = True
+        self.accept()
+
+    def accept(self):
+        if not self._reset_flag and not self._update():
+            return
+        super().accept()
+
+    def value(self):
+        """None = original (no entry), else {"skip": bool, "params": {...}}."""
+        if self._reset_flag:
+            return None
+        out = {}
+        if not self.send.isChecked():
+            out["skip"] = True
+        p = self._params()
+        if p:
+            out["params"] = p
+        return out or None
 
 
 def add_step_menu(parent, on_pick, tests=None) -> QtWidgets.QMenu:

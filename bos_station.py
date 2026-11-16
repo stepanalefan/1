@@ -461,6 +461,7 @@ class PlanView(QtWidgets.QWidget):
         self._sig = None
         self._plan = None
         self._desc = []
+        self._cmdrefs = []
         self._open = set()                               # paths of opened nodes
         self._closed = set()                             # tests closed by the operator
         self._state = {}                                 # test index -> run / done
@@ -538,8 +539,12 @@ class PlanView(QtWidgets.QWidget):
     # ---- expand / collapse
     def _clicked(self, url):
         kind, _, p = url.toString().partition(":")
-        if kind in ("e", "x", "u", "d", "p"):                # edit / delete / move a plan item, test parameters
+        if kind in ("e", "x", "u", "d", "p", "c", "k"):      # plan items, test parameters, single commands
             if self.st.running:
+                return
+            if kind in ("c", "k"):
+                key, code, data = self._cmdrefs[int(p)]
+                (self.st.plan_cmd_edit if kind == "c" else self.st.plan_cmd_toggle)(key, code, data)
                 return
             if kind == "p":
                 self.st.plan_test_params(p)
@@ -586,6 +591,7 @@ class PlanView(QtWidgets.QWidget):
         e = html.escape
         mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
         rows = []
+        self._cmdrefs = []                               # (key, code, data) of the ✎ / ✕ links
         k_test = -1
         lk = "text-decoration:none;color:#8ab4f8"
         busy = self.st.running
@@ -645,13 +651,32 @@ class PlanView(QtWidgets.QWidget):
                                                               "OUTP", "SOUR", "SYST", "DISP", "TRIG"))
             style = (mono + f"color:{C_DIM};") if is_code else (f"color:{C_DIM};" if s.kind == "info" else "")
             pen = ""
-            if tid and s.kind == "can" and bsteps.test_params(tid):
+            fr = next((c.text for c in s.children if getattr(c.text, "key", None)), None)
+            own = getattr(s.text, "key", None)
+            if fr is not None or own:
+                f = fr if fr is not None else s.text
+                if f.skipped:
+                    style += "text-decoration:line-through;color:#6e7681;"
+                    if fr is not None:
+                        txt += f" <span style='color:#ff6b6b;text-decoration:none'>{e(bp_.L('[not sent]', '[не отправляется]'))}</span>"
+                elif f.edited and fr is not None:
+                    txt += f" <span style='color:#e3b341'>{e(bp_.L('[edited]', '[изменена]'))}</span>"
+                if fr is not None and not self.st.running:
+                    n = len(self._cmdrefs)
+                    self._cmdrefs.append((f.key, f.code, f.data))
+                    lk = "text-decoration:none;color:#8ab4f8"
+                    pen = (f"<a href='c:{n}' style='{lk}' title='{e(bp_.L('edit this command in this plan', 'изменить команду в этом плане'))}'>✎</a>"
+                           + (f"<a href='k:{n}' style='{lk}' title='{e(bp_.L('send it again', 'снова отправлять'))}'>↺</a>"
+                              if f.skipped else
+                              f"<a href='k:{n}' style='text-decoration:none;color:#ff6b6b' "
+                              f"title='{e(bp_.L('do not send in this plan', 'не отправлять в этом плане'))}'>✕</a>"))
+            elif tid and s.kind == "can" and bsteps.test_params(tid):
                 pen = (f"<a href='p:{tid}' style='text-decoration:none;color:#8ab4f8' "
                        f"title='command parameters for this plan'>✎</a>")
             rows.append(f"<table width='100%' cellspacing='0' cellpadding='1'><tr>"
                         f"<td width='{14 * depth}'></td><td width='12'>{arrow}</td>"
                         f"<td width='44' style='color:{col};font-weight:600'>{e(bp_.tag(s.kind))}</td>"
-                        f"<td style=\"{style}\">{txt}</td><td width='14'>{pen}</td></tr></table>")
+                        f"<td style=\"{style}\">{txt}</td><td width='26'>{pen}</td></tr></table>")
             if has and opened:
                 self._rows(rows, s.children, q, depth + 1, mono, tid)
 
@@ -1996,6 +2021,44 @@ class BosStation(QtWidgets.QWidget):
             self.save()
             self._plan_tip()
 
+    def _plan_cmds(self, plan=None):
+        plan = plan or self.plan_cb.currentText()
+        return self.data.setdefault("plan_opts", {}).setdefault(plan, {}).setdefault("cmds", {})
+
+    def _cmd_test_name(self, key):
+        tid = key.split(":")[0]
+        return "After the plan (MODE_D)" if tid == "end" else TEST_NAME.get(tid, tid)
+
+    def plan_cmd_edit(self, key, code, data):
+        """✎ on a command line of a built-in test: send / don't send, replace data fields - for this plan."""
+        plan = self.plan_cb.currentText()
+        cmds = self._plan_cmds(plan)
+        dlg = bsteps.CmdDialog(self, plan, key, code, data, self._cmd_test_name(key), cmds.get(key))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        v = dlg.value()
+        if v is None:
+            cmds.pop(key, None)
+        else:
+            cmds[key] = v
+        self.save()
+        self._plan_tip()
+
+    def plan_cmd_toggle(self, key, code=None, data=None):
+        """✕ / ↺ on a command line: not sent in this plan / sent again (data changes are kept)."""
+        cmds = self._plan_cmds()
+        o = dict(cmds.get(key) or {})
+        if o.get("skip"):
+            o.pop("skip")
+        else:
+            o["skip"] = True
+        if o:
+            cmds[key] = o
+        else:
+            cmds.pop(key, None)
+        self.save()
+        self._plan_tip()
+
     def plan_item_delete(self, idx):
         plan = self.plan_cb.currentText()
         items = self.data["plans"].get(plan, [])
@@ -2244,6 +2307,13 @@ class BosStation(QtWidgets.QWidget):
             return
         self._collect()
         self._plan_over = dict(opts.get("ctl", {}))
+        self._plan_cmds_run = json.loads(json.dumps(opts.get("cmds", {})))
+        self._ctl_logged = set()
+        self._skip_pending = None
+        if self._plan_cmds_run:
+            n_off = sum(1 for v in self._plan_cmds_run.values() if v.get("skip"))
+            self.log(f"BOS station: plan command control: {n_off} command(s) removed, "
+                     f"{len(self._plan_cmds_run) - n_off} changed", "info")
         self.ctl = {**self.data["ctl"], **self._plan_over}        # the plan's own parameters, for this run
         self._cfg_saved = None
         if self._plan_over and not offline:
@@ -2704,8 +2774,28 @@ class BosStation(QtWidgets.QWidget):
     def _sim_map(self):
         return {self.ctl.get("bpsk_cmd", 0xA1): "BPSK", self.ctl.get("oqpsk_cmd", 0xA4): "OQPSK"}
 
-    def _frame(self, code, data=b"", ack=True, receiver=bp.BOS, line=None):
+    def _cmd_ctl(self, code, data=b""):
+        """(send?, data) of a command of the running built-in test after the plan's command control
+        (bos_station.json "plan_opts" -> plan -> "cmds"). User steps and runs without control are unchanged."""
+        tid = self.cur_test
+        cmds = getattr(self, "_plan_cmds_run", None)
+        if not cmds or not self.running or not isinstance(tid, str) or (tid not in TEST_NAME and tid != "end"):
+            return True, data
+        key = bsteps.cmd_key(tid, code, bytes(data))
+        send, d = bsteps.apply_cmd(cmds.get(key), code, bytes(data))
+        if key not in self._ctl_logged and (not send or d != bytes(data)):
+            self._ctl_logged.add(key)
+            name = bp.COMMANDS.get(code, (f"0x{code:02X}",))[0]
+            self.log(f"BOS station: {name} " + ("NOT SENT - removed in this plan" if not send else
+                                                f"data replaced by the plan: {d.hex(' ').upper()}"), "warn")
+        return send, d
+
+    def _frame(self, code, data=b"", ack=True, receiver=bp.BOS, line=None, ctl=True):
         c = getattr(self.host, "can_win", None)
+        if ctl:
+            send, data = self._cmd_ctl(code, data)
+            if not send:
+                return True
         can_id, payload = bp.command(code, self.ctl.get("sender", 0x18), data, ack, receiver)
         if c is None:
             return False
@@ -2714,10 +2804,13 @@ class BosStation(QtWidgets.QWidget):
 
     def _send_now(self, code, data=b""):
         """Fire-and-forget (RF off button, keep-alive, end of a test)."""
+        send, data = self._cmd_ctl(code, data)
+        if not send:
+            return True
         if self._is_demo():
             self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
             return True
-        ok = self._frame(code, data, ack=False, receiver=bp.receiver_of(code))
+        ok = self._frame(code, data, ack=False, receiver=bp.receiver_of(code), ctl=False)
         if code == 0x01:
             self.log("BOS station: MODE_D (standby, RF off) sent" if ok else
                      "BOS station: MODE_D not sent - BOS CAN line not connected", "info" if ok else "err")
@@ -2734,6 +2827,12 @@ class BosStation(QtWidgets.QWidget):
         0102 library first (a prohibited value would make the BOS ignore the command). expect_neg: КВ- is the
         expected answer (reserved codes) and is returned instead of raising."""
         name = bp.COMMANDS[code][0]
+        send, data = self._cmd_ctl(code, data)
+        if not send:                                       # removed from this plan: the test goes on
+            self._skip_pending = name
+            yield ("sleep", 0.0)
+            return {"code": code, "negative": False, "unknown": False, "can2": False, "byte": 0, "array": False,
+                    "bus": line or self.ctl.get("line", "BOS CAN1"), "skipped": True}
         bad = bp.validate(code, data) if data else ""
         if bad:
             raise _TestError(f"{name}: data field rejected by the 0102 rules - {bad}")
@@ -2748,7 +2847,7 @@ class BosStation(QtWidgets.QWidget):
                 self.tlm_line_t[(line, data[0] if data else 0xFC)] = time.time()
         else:
             self._ack_code = code
-            if not self._frame(code, data, line=line):
+            if not self._frame(code, data, line=line, ctl=False):
                 raise _TestError(f"{name}: CAN send failed - line '{line}' not connected (CAN tab)")
             a = yield ("ack", 0.3)
         if a is None:
@@ -3855,6 +3954,10 @@ class BosStation(QtWidgets.QWidget):
 
     # ================================================================ results
     def _row(self, test, name, value, unit, limit, status, spec="{:.2f}", text=None, note=""):
+        sk = getattr(self, "_skip_pending", None)
+        if sk and status == "PASS" and "КВ" in f"{limit} {text}":    # the command was removed in this plan
+            status, text, note = "SKIP", "not sent (removed in this plan)", sk
+        self._skip_pending = None
         vtxt = text if text is not None else fmt(value, spec)
         self.rows.append({"test": test, "name": name, "value": value, "text": vtxt, "unit": unit, "limit": limit,
                           "status": status, "note": note})
@@ -4074,10 +4177,14 @@ class BosStation(QtWidgets.QWidget):
         finally:
             self._finishing = False
             self.running = False
+            pv = getattr(self, "plan_view", None)
+            if pv is not None:                              # edit links back
+                QtCore.QTimer.singleShot(0, lambda: pv.refresh(force=True))
 
     def _finish2(self, verdict, summary):
         self.pending = None
         if self.ctl.get("method") == "protocol" and self.cur_mode not in (None, "rf_off"):
+            self.cur_test = "end"
             self._send_now(0x01)                            # leave the unit in standby, RF off
         self.cur_mode = None
         self.wait_timer.stop()
@@ -4113,6 +4220,7 @@ class BosStation(QtWidgets.QWidget):
             self.cfg["carrier"] = self._carrier_saved
             self._carrier_saved = None
         self.ctl = self.data["ctl"]                         # plan parameters end with the run
+        self._plan_cmds_run = {}
         if getattr(self, "_cfg_saved", None):
             self.cfg.update(self._cfg_saved)
             self._cfg_saved = None

@@ -225,6 +225,11 @@ Done|Fait|Erledigt|Fatto|完了|Готово
 Pass|Conforme|Bestanden|Conforme|合格|Норма
 Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
 Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
+Send this command in this plan|Envoyer cette commande dans ce plan|Diesen Befehl in diesem Plan senden|Invia questo comando in questo piano|この計画でこのコマンドを送信|Отправлять эту команду в этом плане
+Data fields — tick a field to replace the value the test computes|Champs de données — cocher pour remplacer la valeur calculée par le test|Datenfelder — ankreuzen, um den vom Test berechneten Wert zu ersetzen|Campi dati — spunta per sostituire il valore calcolato dal test|データフィールド — チェックすると試験の計算値を置換|Поля данных — отметьте поле, чтобы заменить значение, вычисляемое проверкой
+Test sends|Le test envoie|Test sendet|Il test invia|試験の送信|Проверка отправляет
+This plan sends|Ce plan envoie|Dieser Plan sendet|Questo piano invia|この計画の送信|Этот план отправляет
+Restore original|Rétablir l'original|Original wiederherstellen|Ripristina originale|元に戻す|Вернуть исходную
 + BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ БОС 0102…
 BOS commands (0102)|Commandes BOS (0102)|BOS-Befehle (0102)|Comandi BOS (0102)|BOSコマンド (0102)|Команды БОС (0102)
 Sender|Émetteur|Absender|Mittente|送信元|Отправитель

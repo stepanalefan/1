@@ -264,6 +264,23 @@ Yes (when no plan is running):
   another at N = 944.
 Limits stay common (Limits page).
 
+### Can I remove or change a single command inside a built-in test?
+Yes — every →BOS command line of a built-in test (and the MODE_D after the plan) has **✎** and **✕** in the
+*Plan sequence* column (open the line with ▸ if needed):
+* **✕** — the command is **not sent in this plan**; the line is struck through and marked *[not sent]*, **↺**
+  sends it again. During the run the log says so and the row that would have shown its КВ+ becomes **SKIP**
+  "not sent (removed in this plan)". A test that needs the answer (e.g. REQ_TM before a telemetry check) may then
+  fail — that is reported, not hidden.
+* **✎** — the command's data fields from `bos_commands_0102.json` with what the test sends; tick any field to
+  replace it (e.g. fix Atten_EIRP of the carrier session at 5 dB, a different SET_PeriodTM period, SET_CAN = 03).
+  The frame the plan will send is shown; values the document prohibits are refused. *Restore original* removes
+  the change. Fields the test changes while it runs (session frequency / attenuation) stay fixed at your value
+  every time it is sent — the test's own limits do not know that (e.g. power then reads 5 dB low).
+A command is identified by its test and code (SET_PeriodTM / REQ_TM also by the telemetry array), so one change
+applies to every time that test sends it. Stored per plan in `bos_station.json` → `"plan_opts"` → plan →
+`"cmds"`; other plans are not affected. TFG6806 SCPI lines are not affected (use *Plan parameters* for the
+reference settings).
+
 ### What exactly does a plan do? (the *Plan sequence* column)
 The column between the settings and the results lists the selected plan **step by step, in the order the station
 runs it**, built from the current settings (it changes as soon as you change a setting or the plan):
