@@ -39,6 +39,7 @@ import pyqtgraph as pg
 
 import bos_analysis as ba
 import bos_protocol as bp
+import bos_steps as bsteps
 import bos_iqfile
 
 try:
@@ -389,29 +390,6 @@ class BlockDiagram(QtWidgets.QWidget):
 # --------------------------------------------------------------------------- #
 #  Small dialogs                                                               #
 # --------------------------------------------------------------------------- #
-class PlanDialog(QtWidgets.QDialog):
-    def __init__(self, parent, name, tests):
-        super().__init__(parent)
-        self.setWindowTitle("Test plan")
-        f = QtWidgets.QFormLayout(self)
-        self.name = QtWidgets.QLineEdit(name)
-        f.addRow("Name", self.name)
-        self.chk = {}
-        for tid, tname, desc in TESTS:
-            c = QtWidgets.QCheckBox(tname)
-            c.setToolTip(desc)
-            c.setChecked(tid in tests)
-            f.addRow(c)
-            self.chk[tid] = c
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
-
-    def value(self):
-        return self.name.text().strip(), [t for t, c in self.chk.items() if c.isChecked()]
-
-
 # --------------------------------------------------------------------------- #
 #  Station                                                                     #
 # --------------------------------------------------------------------------- #
@@ -499,7 +477,17 @@ class PlanView(QtWidgets.QWidget):
         self.b_col = QtWidgets.QToolButton()
         self.b_col.setText("⊟")
         self.b_col.clicked.connect(self.collapse_all)
-        for b in (self.b_exp, self.b_col):
+        self.b_add = QtWidgets.QToolButton()
+        self.b_add.setText("+ Step")
+        self.b_add.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.b_add.setMenu(bsteps.add_step_menu(self.b_add, lambda it: self.st.plan_add(it), TESTS))
+        self.b_add.setToolTip("Add a built-in test or your own step (BOS command, CAN frame, RF mode, supply,\n"
+                              "telemetry check, SCPI, operator step, wait, note) at the end of this plan")
+        self.b_edit = QtWidgets.QToolButton()
+        self.b_edit.setText("✎ Plan")
+        self.b_edit.setToolTip("Open the plan editor (order, preparation, parameters)")
+        self.b_edit.clicked.connect(lambda: self.st.edit_plan())
+        for b in (self.b_add, self.b_edit, self.b_exp, self.b_col):
             b.setAutoRaise(True)
             h.addWidget(b)
         v.addLayout(h)
@@ -529,7 +517,8 @@ class PlanView(QtWidgets.QWidget):
         plan = st.plan_cb.currentText() if hasattr(st, "plan_cb") else st.data.get("plan", "")
         try:
             sig = json.dumps([plan, st.cfg, st.lim, st.ctl, st.data.get("supply"), st.data["plans"].get(plan),
-                              self._lang(), st._is_demo()], sort_keys=True, default=str)
+                              st.data.get("plan_opts", {}).get(plan), self._lang(), st._is_demo()],
+                             sort_keys=True, default=str)
         except Exception:
             sig = None
         if sig == self._sig and not force:
@@ -543,12 +532,21 @@ class PlanView(QtWidgets.QWidget):
         try:
             self._desc = self.bp.describe(st, plan)
         except Exception as e:
-            self._desc = [("", f"{type(e).__name__}: {e}", [])]
+            self._desc = [("", f"{type(e).__name__}: {e}", [], None)]
         self._render()
 
     # ---- expand / collapse
     def _clicked(self, url):
-        p = url.toString().split(":", 1)[-1]
+        kind, _, p = url.toString().partition(":")
+        if kind in ("e", "x", "u", "d", "p"):                # edit / delete / move a plan item, test parameters
+            if self.st.running:
+                return
+            if kind == "p":
+                self.st.plan_test_params(p)
+            else:
+                {"e": self.st.plan_item_edit, "x": self.st.plan_item_delete,
+                 "u": lambda i: self.st.plan_item_move(i, -1), "d": lambda i: self.st.plan_item_move(i, 1)}[kind](int(p))
+            return
         if p.count(".") == 0:                           # a test: open by default, remember closing
             (self._closed.discard if p in self._closed else self._closed.add)(p)
         else:
@@ -564,7 +562,7 @@ class PlanView(QtWidgets.QWidget):
                 if s.children:
                     self._open.add(q)
                     walk(s.children, q)
-        for k, (_, _, steps) in enumerate(self._desc):
+        for k, (_, _, steps, _) in enumerate(self._desc):
             walk(steps, str(k))
         self._render()
 
@@ -589,10 +587,20 @@ class PlanView(QtWidgets.QWidget):
         mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
         rows = []
         k_test = -1
-        for k, (tid, title, steps) in enumerate(self._desc):
+        lk = "text-decoration:none;color:#8ab4f8"
+        busy = self.st.running
+        for k, (tid, title, steps, ix) in enumerate(self._desc):
+            tools = ""
             if tid:
                 k_test += 1
-                title = f"{k_test + 1}. {_tr(TEST_NAME.get(tid, tid))}"
+                title = f"{k_test + 1}. {title if tid == 'step' else _tr(TEST_NAME.get(tid, tid))}"
+                if not busy and ix is not None:
+                    tools = (f"<a href='e:{ix}' style='{lk}' title='edit'>✎</a>&nbsp;"
+                             f"<a href='u:{ix}' style='{lk}' title='move up'>▲</a>"
+                             f"<a href='d:{ix}' style='{lk}' title='move down'>▼</a>&nbsp;"
+                             f"<a href='x:{ix}' style='text-decoration:none;color:#ff6b6b' title='remove'>✕</a>")
+                elif not busy and tid != "step":
+                    tools = f"<a href='p:{tid}' style='{lk}' title='parameters for this plan'>✎</a>"
                 st = self._state.get(k_test)
                 mark = "▶ " if st == "run" else "✓ " if st == "done" else ""
                 bg = "background:#1f3a5f;" if st == "run" else ""
@@ -607,9 +615,10 @@ class PlanView(QtWidgets.QWidget):
             rows.append(f"<table width='100%' cellspacing='0' cellpadding='2' style='margin-top:6px;{bg}'><tr>"
                         f"<td width='14'><a href='t:{k}' style='text-decoration:none;color:#c9d1d9'>{arrow}</a></td>"
                         f"<td><a href='t:{k}' style='text-decoration:none;color:#e6edf3'><b>{e(mark + title)}</b></a>"
-                        f" <span style='color:{C_DIM}'>{e(cnt)}</span></td></tr></table>")
+                        f" <span style='color:{C_DIM}'>{e(cnt)}</span></td>"
+                        f"<td align='right' width='70'>{tools}</td></tr></table>")
             if opened:
-                self._rows(rows, steps, str(k), 1, mono)
+                self._rows(rows, steps, str(k), 1, mono, tid if tid and tid != "step" and not busy else None)
         sb = self.view.verticalScrollBar()
         pos = sb.value()
         self.view.setHtml("<div style='font-size:9pt'>" + "".join(rows) + "</div>")
@@ -619,7 +628,7 @@ class PlanView(QtWidgets.QWidget):
         else:
             sb.setValue(pos)
 
-    def _rows(self, rows, steps, path, depth, mono):
+    def _rows(self, rows, steps, path, depth, mono, tid=None):
         bp_ = self.bp
         e = html.escape
         for i, s in enumerate(steps):
@@ -635,12 +644,16 @@ class PlanView(QtWidgets.QWidget):
             is_code = s.kind == "info" and s.text.startswith(("0x", "ID ", "INST", "FREQ", "TRAC", "ADJ", "*", "UTIL",
                                                               "OUTP", "SOUR", "SYST", "DISP", "TRIG"))
             style = (mono + f"color:{C_DIM};") if is_code else (f"color:{C_DIM};" if s.kind == "info" else "")
+            pen = ""
+            if tid and s.kind == "can" and bsteps.test_params(tid):
+                pen = (f"<a href='p:{tid}' style='text-decoration:none;color:#8ab4f8' "
+                       f"title='command parameters for this plan'>✎</a>")
             rows.append(f"<table width='100%' cellspacing='0' cellpadding='1'><tr>"
                         f"<td width='{14 * depth}'></td><td width='12'>{arrow}</td>"
                         f"<td width='44' style='color:{col};font-weight:600'>{e(bp_.tag(s.kind))}</td>"
-                        f"<td style=\"{style}\">{txt}</td></tr></table>")
+                        f"<td style=\"{style}\">{txt}</td><td width='14'>{pen}</td></tr></table>")
             if has and opened:
-                self._rows(rows, s.children, q, depth + 1, mono)
+                self._rows(rows, s.children, q, depth + 1, mono, tid)
 
     # ---- live state while a plan runs
     def mark(self, k, state):
@@ -852,6 +865,7 @@ class BosStation(QtWidgets.QWidget):
                              "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
                              "ref_wait_s": 30},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
+                     "plan_opts": {},                 # plan -> {"prep": auto/on/off, "ctl": {overrides}}
                      "unit": {"serial": "", "operator": ""}}
         try:
             with open(STORE_FILE, encoding="utf-8") as fh:
@@ -863,6 +877,7 @@ class BosStation(QtWidgets.QWidget):
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
                 self.data["plans"].setdefault("Command set (0102)", ["cmds"])
+            self.data["plan_opts"] = {k: v for k, v in d.get("plan_opts", {}).items() if k in self.data["plans"]}
             for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
                 if self.data["ctl"].get(k) in ("BOS", "AFAR", "UPNG"):
                     self.data["ctl"][k] += " CAN1"
@@ -895,6 +910,7 @@ class BosStation(QtWidgets.QWidget):
         self.rows: list = []
         self.findings: list = []
         self.run_info: dict = {}
+        self._plan_over: dict = {}
         self.verdict = ""
         self.on_done = None
         self.cur_test = ""
@@ -932,9 +948,11 @@ class BosStation(QtWidgets.QWidget):
         plan_menu.setText("Plans ▾")
         plan_menu.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         m = QtWidgets.QMenu(plan_menu)
-        m.addAction("Edit plan…", self.edit_plan)
-        m.addAction("New plan…", self.new_plan)
-        m.addAction("Delete plan", self.delete_plan)
+        m.addAction("Edit plan…", lambda: self.edit_plan())
+        m.addAction("New plan…", lambda: self.new_plan())
+        m.addAction("New empty plan…", lambda: self.new_plan(empty=True))
+        m.addAction("Duplicate plan", self.copy_plan)
+        m.addAction("Delete plan…", self.delete_plan)
         plan_menu.setMenu(m)
         self.run_btn = QtWidgets.QPushButton("▶ Run test plan")
         self.run_btn.setStyleSheet("font-weight:700;padding:6px 14px;")
@@ -1789,6 +1807,7 @@ class BosStation(QtWidgets.QWidget):
 
     # ================================================================ settings
     def _collect(self):
+        ctl = self.data["ctl"]                               # stored settings (not the plan's)
         for key, (wdg, kind, sc) in self.cfg_w.items():
             if kind == "b":
                 self.cfg[key] = wdg.isChecked()
@@ -1799,13 +1818,13 @@ class BosStation(QtWidgets.QWidget):
         for key, s in self.lim_w.items():
             self.lim[key] = s.value()
         if hasattr(self, "ctl_w"):
-            self.ctl["cmd"] = {k: cb.currentData() for k, cb in self.ctl_w.items() if cb.currentData()}
+            ctl["cmd"] = {k: cb.currentData() for k, cb in self.ctl_w.items() if cb.currentData()}
         if hasattr(self, "att_mode"):
-            self.ctl.update(att_mode=self.att_mode.currentData(), att_id=self.att_id.text().strip(),
+            ctl.update(att_mode=self.att_mode.currentData(), att_id=self.att_id.text().strip(),
                             att_data=self.att_data.text().strip(), att_line=self.att_line.text().strip(),
                             settle_ms=self.settle.value())
         if hasattr(self, "p_freq"):
-            self.ctl.update(method=self.method.currentData(), sender=self.p_sender.currentData(),
+            ctl.update(method=self.method.currentData(), sender=self.p_sender.currentData(),
                             line=self.p_line.text().strip() or "BOS CAN1",
                             line2=self.p_line2.text().strip() or "BOS CAN2", can_check=self.p_can12.isChecked(),
                             can1_only=self.p_can1.isChecked(), freq_n=self.p_freq.value(),
@@ -1815,7 +1834,7 @@ class BosStation(QtWidgets.QWidget):
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
             self._sync_carrier()
         if hasattr(self, "r_wait"):
-            self.ctl.update(tfg_setup=self.r_tfg.isChecked(), tfg_src=self.r_src.currentData(),
+            ctl.update(tfg_setup=self.r_tfg.isChecked(), tfg_src=self.r_src.currentData(),
                             tfg_feed=self.r_feed.currentData(), power_up=self.r_pwr.currentData(),
                             ref_wait_s=self.r_wait.value(), tfg_ref_apply=self.r_std.isChecked(),
                             tfg_ref_amp=self.r_amp.value(), tfg_ref_offs=self.r_offs.value())
@@ -1823,6 +1842,8 @@ class BosStation(QtWidgets.QWidget):
             self.data["supply"] = self.supply_cb.currentData()
         self.data["unit"] = {"serial": self.serial.text().strip(), "operator": self.operator.text().strip()} \
             if hasattr(self, "operator") else self.data["unit"]
+        if self.running and self.ctl is not ctl:
+            self.ctl.update({**ctl, **self._plan_over})
         self.save()
 
     def save(self):
@@ -1863,7 +1884,7 @@ class BosStation(QtWidgets.QWidget):
 
     def _plan_tip(self):
         tests = self.data["plans"].get(self.plan_cb.currentText(), [])
-        self.plan_cb.setToolTip("\n".join(f"{k + 1}. {TEST_NAME.get(t, t)}" for k, t in enumerate(tests)))
+        self.plan_cb.setToolTip("\n".join(f"{k + 1}. {bsteps.item_name(t, self)}" for k, t in enumerate(tests)))
         if hasattr(self, "plan_view"):
             self.plan_view.refresh()
 
@@ -1875,37 +1896,140 @@ class BosStation(QtWidgets.QWidget):
     def plan_names(self):
         return list(self.data["plans"])
 
-    def edit_plan(self):
-        name = self.plan_cb.currentText()
-        dlg = PlanDialog(self, name, self.data["plans"].get(name, []))
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
-            return
-        new, tests = dlg.value()
-        if not new or not tests:
-            return
-        plans = {(new if k == name else k): (tests if k == name else v) for k, v in self.data["plans"].items()}
+    def plan_cfg(self, ctl) -> dict:
+        """Signal settings following a plan's frequency code / УР rate (protocol control)."""
+        c = dict(self.cfg)
+        if ctl.get("method") == "protocol":
+            c["carrier"] = bp.freq_hz(int(ctl.get("freq_n", 800)))
+            if ctl.get("bpsk_cmd", 0xA1) == 0xA1:
+                c["sr_bpsk"] = 2e3 * bp.RATES[int(ctl.get("rate_ur", 2))]
+        return c
+
+    def plan_ctl(self, plan=None) -> dict:
+        """Station settings with the plan's own parameters applied (the stored settings are not changed)."""
+        plan = plan if plan is not None else self.plan_cb.currentText()
+        return {**self.data["ctl"], **self.data.get("plan_opts", {}).get(plan, {}).get("ctl", {})}
+
+    def _store_plan(self, old, new, items, opts):
+        plans = {}
+        for k, v in self.data["plans"].items():
+            plans[new if k == old else k] = items if k == old else v
+        if old not in self.data["plans"]:
+            plans[new] = items
+        po = self.data.setdefault("plan_opts", {})
+        po.pop(old, None)
+        po[new] = opts
         self.data["plans"], self.data["plan"] = plans, new
         self.save()
         self._fill_plans()
 
-    def new_plan(self):
-        dlg = PlanDialog(self, f"Plan {len(self.data['plans']) + 1}", ["pre", "cw", "oqpsk"])
+    def edit_plan(self, name=None):
+        name = name or self.plan_cb.currentText()
+        dlg = bsteps.PlanEditor(self, self, name, self.data["plans"].get(name, []),
+                                self.data.get("plan_opts", {}).get(name, {}), TESTS)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
-        name, tests = dlg.value()
-        if name and tests:
-            self.data["plans"][name] = tests
-            self.data["plan"] = name
-            self.save()
-            self._fill_plans()
+        new, items, opts = dlg.value()
+        if new != name and new in self.data["plans"]:
+            QtWidgets.QMessageBox.warning(self, "Test plan", f"A plan named '{new}' already exists.")
+            return
+        self._store_plan(name, new, items, opts)
+
+    def new_plan(self, empty=False):
+        name = f"Plan {len(self.data['plans']) + 1}"
+        while name in self.data["plans"]:
+            name += "+"
+        dlg = bsteps.PlanEditor(self, self, name, [] if empty else ["pre", "cw", "oqpsk"], {}, TESTS)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new, items, opts = dlg.value()
+        if new in self.data["plans"]:
+            QtWidgets.QMessageBox.warning(self, "Test plan", f"A plan named '{new}' already exists.")
+            return
+        self._store_plan(new, new, items, opts)
+
+    def copy_plan(self):
+        name = self.plan_cb.currentText()
+        new = f"{name} (copy)"
+        while new in self.data["plans"]:
+            new += "+"
+        self._store_plan(new, new, json.loads(json.dumps(self.data["plans"].get(name, []))),
+                         json.loads(json.dumps(self.data.get("plan_opts", {}).get(name, {}))))
 
     def delete_plan(self):
         if len(self.data["plans"]) <= 1:
             return
-        self.data["plans"].pop(self.plan_cb.currentText(), None)
+        name = self.plan_cb.currentText()
+        if QtWidgets.QMessageBox.question(self, "Test plan", f"Delete the plan '{name}'?") != \
+                QtWidgets.QMessageBox.Yes:
+            return
+        self.data["plans"].pop(name, None)
+        self.data.get("plan_opts", {}).pop(name, None)
         self.data["plan"] = next(iter(self.data["plans"]))
         self.save()
         self._fill_plans()
+
+    def plan_item_edit(self, idx):
+        """Plan view ✎ on item idx of the current plan: a user step opens its editor, a built-in test the
+        plan parameters of that test."""
+        plan = self.plan_cb.currentText()
+        items = self.data["plans"].get(plan, [])
+        if self.running or not 0 <= idx < len(items):
+            return
+        it = items[idx]
+        if bsteps.is_step(it):
+            dlg = bsteps.StepDialog(self, it, self)
+            if dlg.exec_() == QtWidgets.QDialog.Accepted:
+                items[idx] = dlg.value()
+                self.save()
+                self._plan_tip()
+        else:
+            self.plan_test_params(it)
+
+    def plan_test_params(self, tid):
+        plan = self.plan_cb.currentText()
+        po = self.data.setdefault("plan_opts", {}).setdefault(plan, {})
+        dlg = bsteps.PlanParamsDialog(self, plan, self.data["ctl"], po.get("ctl", {}), bsteps.test_params(tid),
+                                      TEST_NAME.get(tid, tid))
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            po["ctl"] = dlg.value()
+            self.save()
+            self._plan_tip()
+
+    def plan_item_delete(self, idx):
+        plan = self.plan_cb.currentText()
+        items = self.data["plans"].get(plan, [])
+        if self.running or not 0 <= idx < len(items) or len(items) <= 1:
+            return
+        if QtWidgets.QMessageBox.question(self, "Test plan", f"Remove step {idx + 1} "
+                                          f"'{bsteps.item_name(items[idx], self)}' from '{plan}'?") != \
+                QtWidgets.QMessageBox.Yes:
+            return
+        del items[idx]
+        self.save()
+        self._plan_tip()
+
+    def plan_item_move(self, idx, d):
+        items = self.data["plans"].get(self.plan_cb.currentText(), [])
+        if self.running or not (0 <= idx < len(items) and 0 <= idx + d < len(items)):
+            return
+        items[idx], items[idx + d] = items[idx + d], items[idx]
+        self.save()
+        self._plan_tip()
+
+    def plan_add(self, item, after=None):
+        """Add a built-in test id or a new user step (its editor opens first) to the current plan."""
+        if self.running:
+            return
+        if bsteps.is_step(item):
+            dlg = bsteps.StepDialog(self, item, self)
+            if dlg.exec_() != QtWidgets.QDialog.Accepted:
+                return
+            item = dlg.value()
+        items = self.data["plans"].setdefault(self.plan_cb.currentText(), [])
+        items.insert(len(items) if after is None else after + 1, item)
+        self.save()
+        self._plan_tip()
 
     # ================================================================ host
     def _wire_host(self):
@@ -2100,18 +2224,17 @@ class BosStation(QtWidgets.QWidget):
             if done:
                 done("ABORTED", "the station is busy")
             return
-        tests = list(tests or self.data["plans"].get(name, []))
+        explicit = tests is not None
+        tests = json.loads(json.dumps(list(tests or self.data["plans"].get(name, []))))   # private copy
         offline = tests == ["file"]
-        if self.ctl.get("method") == "protocol" and tests not in (["live"], ["file"]) and "link" not in tests:
-            tests.insert(0, "link")
-        if self.ctl.get("method") == "protocol" and self.ctl.get("can_check", True) and \
-                tests not in (["live"], ["file"], ["link"]) and "can12" not in tests:
-            tests.insert(0, "can12")                       # both CAN lines checked, then CAN1 only
-        if tests not in (["live"], ["file"], ["link"]) and "ref" not in tests:
-            tests.insert(0, "ref")                         # TFG reference + BOS power-up before anything else
+        opts = {} if explicit else self.data.get("plan_opts", {}).get(name, {})
+        ctl = self.plan_ctl(name) if not explicit else self.data["ctl"]
+        # TFG reference + BOS power-up, both CAN lines, link setup before the plan (per its preparation option)
+        tests = bsteps.expand(tests, ctl, "auto" if explicit else opts.get("prep", "auto"))
+        need_fsw = not offline and bsteps.needs_fsw(tests)
         self._ref_failed = False
         self._gate_rows = set()
-        if not offline and not getattr(self.host, "connected", False):
+        if need_fsw and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
             self.step_lbl.setText(msg)
@@ -2120,11 +2243,22 @@ class BosStation(QtWidgets.QWidget):
             self.live_btn.setChecked(False)
             return
         self._collect()
+        self._plan_over = dict(opts.get("ctl", {}))
+        self.ctl = {**self.data["ctl"], **self._plan_over}        # the plan's own parameters, for this run
+        self._cfg_saved = None
+        if self._plan_over and not offline:
+            pc = self.plan_cfg(self.ctl)
+            if any(pc[k] != self.cfg.get(k) for k in ("carrier", "sr_bpsk")):
+                self._cfg_saved = {k: self.cfg.get(k) for k in ("carrier", "sr_bpsk")}
+                self.cfg.update(carrier=pc["carrier"], sr_bpsk=pc["sr_bpsk"])
+        if self._plan_over:
+            self.log("BOS station: plan parameters: " + ", ".join(f"{k}={v}" for k, v in self._plan_over.items()),
+                     "info")
         self._wire_host()
-        if not offline:
+        if need_fsw:
             self._auto_bandwidth()
         self.live_mode = tests == ["live"]
-        if hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
+        if need_fsw and hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
             self.host.run_btn.setChecked(False)          # stop the live FSW view while testing
         self.res, self.rows, self.findings = {}, [], []
         self.cur_att = int(self.cfg.get("att_code", 0))
@@ -2140,7 +2274,8 @@ class BosStation(QtWidgets.QWidget):
         self.abort_flag = False
         self.running = True
         self.cur_test = ""
-        self.run_info = {"plan": name, "tests": tests, "serial": self.serial.text().strip(),
+        self.run_info = {"plan": name, "tests": [bsteps.item_name(t, self) for t in tests],
+                         "serial": self.serial.text().strip(),
                          "operator": self.operator.text().strip(), "start": time.time(),
                          "demo": self._is_demo() and not offline,
                          "faults": dict(self.sim.faults) if self._is_demo() and not offline else {}}
@@ -2148,7 +2283,8 @@ class BosStation(QtWidgets.QWidget):
         self.progress.setRange(0, max(1, len(tests)))
         self.progress.setValue(0)
         self._show_verdict("RUNNING")
-        self.log(f"BOS station: plan '{name}' started ({', '.join(TEST_NAME.get(t, t) for t in tests)})", "info")
+        self.log(f"BOS station: plan '{name}' started ({', '.join(bsteps.item_name(t, self) for t in tests)})",
+                 "info")
         self.gen = self._plan_gen(tests)
         self._advance(None)
 
@@ -2231,6 +2367,10 @@ class BosStation(QtWidgets.QWidget):
                     r = ("err", f"{type(e).__name__}: {e}")
                 self.job_done.emit(r)
             submit(run)
+        elif kind == "ask":                                 # operator step (bos_steps)
+            self.pending = "ask"
+            r = self._ask_operator(req[1], req[2])
+            QtCore.QTimer.singleShot(0, lambda: self._advance(r))
         elif kind == "prompt":
             r = QtWidgets.QMessageBox.question(self, "BOS test station", req[1],
                                                QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel)
@@ -2266,19 +2406,298 @@ class BosStation(QtWidgets.QWidget):
                     pv.mark(k - 1, "done")
                 pv.mark(k, "run")
             self.progress.setValue(k)
-            self.step_lbl.setText(f"Test {k + 1}/{len(tests)}: {TEST_NAME.get(t, 'Live diagnose')}")
-            fn = getattr(self, f"_t_{t}")
+            name = bsteps.item_name(t, self)
+            if bsteps.is_step(t):
+                self.cur_test = f"{k + 1}. {name}" if t.get("type") != "note" else name
+                fn = (lambda s=t: self._step(s))
+            else:
+                self.cur_test = t
+                fn = getattr(self, f"_t_{t}")
+            self.step_lbl.setText(f"Test {k + 1}/{len(tests)}: {name if t != 'live' else 'Live diagnose'}")
+            T = TEST_NAME.get(self.cur_test, self.cur_test)
             try:
                 yield from fn()
             except _Skip as e:
-                self._row(TEST_NAME.get(t, t), "skipped", None, "", "", "SKIP", note=str(e))
+                self._row(T, "skipped", None, "", "", "SKIP", note=str(e))
             except _TestError as e:
-                self._row(TEST_NAME.get(t, t), "error", None, "", "", "ERROR", note=str(e))
-                self.log(f"BOS station: {TEST_NAME.get(t, t)}: {e}", "err")
+                self._row(T, "error", None, "", "", "ERROR", note=str(e))
+                self.log(f"BOS station: {T}: {e}", "err")
             self._update_diagnosis()
         if pv is not None and tests:
             pv.mark(len(tests) - 1, "done")
         self.progress.setValue(len(tests))
+
+    # ---- user-defined plan steps (bos_steps)
+    def _step(self, s):
+        T = self.cur_test
+        yield from getattr(self, f"_s_{s['type']}")(T, s)
+
+    def _s_note(self, T, s):
+        self.log(f"BOS station: — {s.get('text', '')} —", "info")
+        self._row(T, "Note", None, "", "", "INFO", text=s.get("text", ""))
+        yield ("sleep", 0.0)
+
+    def _s_wait(self, T, s):
+        d = float(s.get("s", 1.0))
+        self.step_lbl.setText(f"{T}: waiting {d:g} s …")
+        yield ("sleep", d if not self._is_demo() else min(d, 0.05))
+        self._row(T, "Wait", d, "s", "", "INFO", spec="{:g}")
+
+    def _s_bos_cmd(self, T, s):
+        code = int(s.get("code", 0))
+        name = bp.COMMANDS.get(code, (f"0x{code:02X}",))[0]
+        try:
+            data = bp.encode(code, s.get("params", {}))
+        except (ValueError, KeyError) as e:
+            raise _TestError(f"{name}: {e}")
+        line = self.ctl.get("line2" if s.get("line") == 2 else "line", "BOS CAN1")
+        import canable_analyzer as ca
+        c = getattr(self.host, "can_win", None)
+        line = ca.resolve_line(line, c.line_names() if c is not None and hasattr(c, "line_names") else [])
+        hexd = data.hex(" ").upper() if data else "-"
+        exp = s.get("expect", "КВ+")
+        if exp == "none" or not bp.wants_ack(code):
+            if self._is_demo():
+                self.sim.handle(code, bytes(data) + bytes(8), self._sim_map())
+                ok = True
+            else:
+                ok = self._frame(code, data, ack=False, receiver=bp.receiver_of(code), line=line)
+            self.log(f"BOS station: {name} [{hexd}] sent on {line} (no КВ)", "info" if ok else "err")
+            self._row(T, name, None, "", "sent", "PASS" if ok else "FAIL", text=f"[{hexd}]",
+                      note="" if ok else f"line '{line}' not connected")
+            yield ("sleep", 0.02)
+            return
+        try:
+            a = yield from self._proto(code, data, f"{name} [{hexd}]", line=line, expect_neg=exp == "КВ-")
+        except _TestError as e:
+            self._row(T, name, None, "", exp, "FAIL", text="КВ- / no КВ", note=str(e))
+            return
+        got = "КВ-" if a["negative"] else "КВ+"
+        self._row(T, name, None, "", exp, "PASS" if got == exp else "FAIL", text=f"{got}  [{hexd}]",
+                  note="" if got == exp else (f"expected {exp}" + (" — executed only in standby (ДЖР)"
+                                                                   if bp.standby_only(code) else "")))
+        if code == 0x01:
+            self.cur_mode = "rf_off"
+
+    def _s_can(self, T, s):
+        c = getattr(self.host, "can_win", None)
+        cmd = c.store.by_uid(s.get("uid")) if c is not None else None
+        if cmd is None:
+            raise _TestError("CAN library command not found (deleted on the CAN tab?)")
+        ok = c.send_frame(cmd.to_frame(c.FRAME))
+        self._row(T, cmd.label(), None, "", "sent", "PASS" if ok else "FAIL",
+                  text=f"{cmd.id_str()}: {cmd.data_str()}", note="" if ok else "CAN line not connected")
+        yield ("sleep", 0.02)
+
+    def _s_rf(self, T, s):
+        if s.get("att") is not None:
+            self.cur_att = int(s["att"])
+        yield from self._set_mode(s.get("mode", "cw"))
+        self._row(T, "BOS RF mode", None, "", "", "PASS", text=dict(bsteps.RF_MODES).get(s.get("mode"), s.get("mode"))
+                  + (f", {self.cur_att} dB" if s.get("mode") != "rf_off" else ""))
+
+    def _psu_dev(self, sel):
+        """(kind, channel, worker, name) of a supply selection ('plan' = the station supply)."""
+        src = self.data.get("supply", "none") if sel == "plan" else sel
+        if src in (None, "", "none"):
+            return None
+        kind, ch = src.split(":")
+        ch = int(ch)
+        if kind == "hmp":
+            b = getattr(self.host, "bench", None)
+            return (kind, ch, b.hmp, f"HMP4040 OUT{ch}") if b and b._hmp_ok else (kind, ch, None, f"HMP4040 OUT{ch}")
+        if kind == "it68":
+            it = getattr(self.host, "it68", None)
+            return (kind, ch, it.worker, "IT6832") if it and it.ok else (kind, ch, None, "IT6832")
+        n = getattr(self.host, "n67", None)
+        return (kind, ch, n.worker, f"N6701C output {ch}") if n and n.ok else (kind, ch, None, f"N6701C output {ch}")
+
+    def _s_psu(self, T, s):
+        a = s.get("action", "measure")
+        d = self._psu_dev(s.get("supply", "plan"))
+        if d is None:
+            if not self._is_demo():
+                raise _TestError("no supply selected (step or Unit / signal page)")
+            d = ("sim", 1, None, "simulated supply")
+        kind, ch, w, name = d
+        if w is None and not self._is_demo():
+            raise _TestError(f"{name} not connected")
+        if w is None:                                     # demo without the instrument: simulated readings
+            if a == "measure":
+                yield ("sleep", 0.05)
+                v, i = 14.0 + 0.002, self.sim.supply_current()
+            else:
+                self._row(T, name, None, "", "", "PASS", text=bsteps.summary({**s, "title": ""}))
+                yield ("sleep", 0.02)
+                return
+        else:
+            v_set, i_set = float(s.get("v", 0)), float(s.get("i", 0))
+
+            def job():
+                if a in ("set", "set_on", "on", "off"):
+                    if kind == "it68":
+                        if a in ("set", "set_on"):
+                            w.apply(v_set, i_set, None, True if a == "set_on" else None)
+                        else:
+                            w.set_output(a == "on", "BOS station plan")
+                        return None
+                    cur_v, cur_i, cur_on = w.dev.read_channel(ch)[:3]
+                    nv, ni = (v_set, i_set) if a in ("set", "set_on") else (cur_v, cur_i)
+                    on = True if a in ("set_on", "on") else False if a == "off" else bool(cur_on)
+                    w.set_channel(ch, nv, ni, on)
+                    if kind == "hmp" and on:
+                        w.set_master(True)
+                    return None
+                if kind == "hmp":
+                    return w.dev.measure(ch)
+                if kind == "it68":
+                    r = w.dev.read()
+                    return r["v"], r["i"]
+                return w.dev.measure()[0][ch]
+            if a == "measure" and s.get("settle_s"):
+                self.step_lbl.setText(f"{T}: settling {s['settle_s']:g} s …")
+                yield ("sleep", float(s["settle_s"]) if not self._is_demo() else 0.05)
+            st, r = yield ("job", w.submit, job)
+            if st == "err":
+                raise _TestError(f"{name}: {r}")
+            if a != "measure":
+                self._row(T, name, None, "", "", "PASS", text=bsteps.summary({**s, "title": ""}))
+                return
+            v, i = r
+        self._lim_row(T, f"{name} voltage", v, "V", s.get("v_min"), s.get("v_max"), "{:.3f}")
+        self._lim_row(T, f"{name} current", i, "A", s.get("i_min"), s.get("i_max"), "{:.4f}")
+
+    def _s_tlm(self, T, s):
+        key = s.get("key", "")
+        t_end = time.monotonic() + float(s.get("timeout_s", 3.0))
+        asked = False
+        while True:
+            t = self.tlm_snapshot()
+            v = t.get(key)
+            if v is not None:
+                break
+            if time.monotonic() > t_end:
+                self._row(T, f"Telemetry {key}", None, "", bsteps._lim(s.get("min"), s.get("max")) or "received",
+                          "FAIL", text="not received")
+                return
+            if not asked and self.ctl.get("method") == "protocol" and not self._is_demo():
+                for tm in (0xFC, 0xFB):
+                    self._frame(0x11, bp.p_req_tm(tm), ack=False)
+                asked = True
+            yield ("sleep", 0.2 if not self._is_demo() else 0.05)
+        if isinstance(v, (int, float)):
+            self._lim_row(T, f"Telemetry {key}", float(v), "", s.get("min"), s.get("max"), "{:g}")
+        else:
+            self._row(T, f"Telemetry {key}", None, "", "", "INFO", text=str(v))
+
+    def _s_scpi(self, T, s):
+        cmd = s.get("cmd", "").strip()
+        query = cmd.endswith("?") or "? " in cmd
+        if s.get("inst") == "TFG":
+            tfg = self._tfg()
+            if tfg is None:
+                raise _TestError("TFG6806 not connected (TFG6806 tab)")
+            w = tfg.worker
+            st, r = yield ("job", w.submit, lambda: w.command(cmd))
+        else:
+            if not getattr(self.host, "connected", False):
+                raise _TestError("FSW not connected (Spectrum Analyzer tab)")
+
+            def job():
+                dev = self.host.worker.dev
+                if dev is None:
+                    raise RuntimeError("FSW not connected")
+                if query:
+                    return dev.query(cmd)
+                dev.write(cmd)
+                return ""
+            st, r = yield ("fsw", job)
+        if st == "err":
+            raise _TestError(f"{s.get('inst')} {cmd}: {r}")
+        r = "" if r is None else str(r).strip()
+        self.log(f"BOS station: {s.get('inst')} {cmd}" + (f" → {r}" if r else ""), "info")
+        chk = s.get("check", "none")
+        if chk == "number":
+            try:
+                val = float(r.split(",")[0])
+            except ValueError:
+                self._row(T, cmd, None, "", bsteps._lim(s.get("min"), s.get("max")), "FAIL", text=r or "(empty)",
+                          note="reply is not a number")
+                return
+            self._lim_row(T, cmd, val, "", s.get("min"), s.get("max"), "{:g}")
+        elif chk == "text":
+            ok = s.get("text", "") in r
+            self._row(T, cmd, None, "", f"contains '{s.get('text', '')}'", "PASS" if ok else "FAIL", text=r)
+        else:
+            self._row(T, cmd, None, "", "", "PASS", text=r or "sent")
+
+    def _s_operator(self, T, s):
+        if self._is_demo() and not self.ctl.get("prompt", True):
+            ans = {"result": "pass", "value": s.get("min") if s.get("min") is not None else s.get("max") or 0.0}
+        else:
+            ans = yield ("ask", s, T)
+        if ans is None or ans.get("result") == "abort":
+            self.abort_flag = True
+            self.step_lbl.setText("aborted by the operator")
+            yield ("sleep", 0.0)
+            return
+        mode = s.get("mode", "confirm")
+        first = (s.get("text") or "").splitlines()[0][:80]
+        if mode == "confirm":
+            self._row(T, first, None, "", "done", "PASS", text="confirmed")
+        elif mode == "passfail":
+            ok = ans.get("result") == "pass"
+            self._row(T, first, None, "", "Pass", "PASS" if ok else "FAIL", text="Pass" if ok else "Fail",
+                      note=ans.get("note", ""))
+        else:
+            self._lim_row(T, first, float(ans.get("value", 0.0)), s.get("unit", ""), s.get("min"), s.get("max"),
+                          "{:g}")
+
+    def _ask_operator(self, s, T):
+        """Modal operator dialog for an 'operator' step -> {"result": ok/pass/fail/abort, "value", "note"}."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(f"Operator — {T}")
+        dlg.setMinimumWidth(460)
+        v = QtWidgets.QVBoxLayout(dlg)
+        lab = QtWidgets.QLabel(s.get("text", ""))
+        lab.setWordWrap(True)
+        lab.setStyleSheet("font-size:11pt;")
+        v.addWidget(lab)
+        mode = s.get("mode", "confirm")
+        out = {"result": "abort"}
+        val = note = None
+        if mode == "value":
+            val = QtWidgets.QDoubleSpinBox()
+            val.setRange(-1e9, 1e9)
+            val.setDecimals(4)
+            val.setSuffix(f" {s.get('unit', '')}" if s.get("unit") else "")
+            lim = bsteps._lim(s.get("min"), s.get("max"), " " + s.get("unit", ""))
+            v.addWidget(QtWidgets.QLabel(f"Value{f'  (limit {lim})' if lim else ''}:"))
+            v.addWidget(val)
+        if mode == "passfail":
+            note = QtWidgets.QLineEdit()
+            note.setPlaceholderText("remark (optional, goes to the report)")
+            v.addWidget(note)
+        h = QtWidgets.QHBoxLayout()
+
+        def done(res):
+            out["result"] = res
+            if val is not None:
+                out["value"] = val.value()
+            if note is not None:
+                out["note"] = note.text().strip()
+            dlg.accept()
+        btns = {"confirm": [("Done", "ok")], "passfail": [("Pass", "pass"), ("Fail", "fail")],
+                "value": [("OK", "ok")]}[mode] + [("Abort plan", "abort")]
+        for txt, res in btns:
+            b = QtWidgets.QPushButton(txt)
+            if res == "abort":
+                h.addStretch(1)
+            b.clicked.connect(lambda _=False, r=res: done(r))
+            h.addWidget(b)
+        v.addLayout(h)
+        dlg.exec_()
+        return out
 
     # ---- unit control helpers (generators)
     # ---- BOS protocol
@@ -3454,6 +3873,9 @@ class BosStation(QtWidgets.QWidget):
         self.table.scrollToBottom()
 
     def _lim_row(self, test, name, value, unit, lo, hi, spec="{:.2f}", none_ok=False, note=""):
+        if lo is None and hi is None:                       # no limit: value recorded only
+            self._row(test, name, value, unit, "", "INFO" if _fin(value) else "FAIL", spec, note=note)
+            return
         if lo is not None and hi is not None:
             lt = f"{spec.format(lo)} … {spec.format(hi)}"
         elif lo is not None:
@@ -3690,6 +4112,11 @@ class BosStation(QtWidgets.QWidget):
         if getattr(self, "_carrier_saved", None):          # file analysis used the measured channel
             self.cfg["carrier"] = self._carrier_saved
             self._carrier_saved = None
+        self.ctl = self.data["ctl"]                         # plan parameters end with the run
+        if getattr(self, "_cfg_saved", None):
+            self.cfg.update(self._cfg_saved)
+            self._cfg_saved = None
+        self._plan_over = {}
         self.running = False
         done, self.on_done = self.on_done, None
         if done:

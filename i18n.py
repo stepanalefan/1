@@ -187,6 +187,44 @@ Modulation only|Modulation seule|Nur Modulation|Solo modulazione|変調のみ|Т
 Data decoding|Décodage des données|Datendekodierung|Decodifica dati|データ復号|Декодирование данных
 Burn-in (stability)|Rodage (stabilité)|Einbrennen (Stabilität)|Rodaggio (stabilità)|エージング(安定度)|Прогон (стабильность)
 Command set (0102)|Jeu de commandes (0102)|Befehlssatz (0102)|Set di comandi (0102)|コマンドセット (0102)|Набор команд (0102)
++ Step|+ Étape|+ Schritt|+ Passo|+ ステップ|+ Шаг
+✎ Plan|✎ Plan|✎ Plan|✎ Piano|✎ 計画|✎ План
+Edit plan…|Modifier le plan…|Plan bearbeiten…|Modifica piano…|計画を編集…|Изменить план…
+New plan…|Nouveau plan…|Neuer Plan…|Nuovo piano…|新しい計画…|Новый план…
+New empty plan…|Nouveau plan vide…|Neuer leerer Plan…|Nuovo piano vuoto…|新しい空の計画…|Новый пустой план…
+Duplicate plan|Dupliquer le plan|Plan duplizieren|Duplica piano|計画を複製|Копировать план
+Delete plan…|Supprimer le plan…|Plan löschen…|Elimina piano…|計画を削除…|Удалить план…
+Test plan|Plan de test|Prüfplan|Piano di prova|試験計画|План проверки
+Preparation|Préparation|Vorbereitung|Preparazione|準備|Подготовка
++ Add ▾|+ Ajouter ▾|+ Hinzufügen ▾|+ Aggiungi ▾|+ 追加 ▾|+ Добавить ▾
+Edit…|Modifier…|Bearbeiten…|Modifica…|編集…|Изменить…
+Duplicate|Dupliquer|Duplizieren|Duplica|複製|Копировать
+▲ Up|▲ Monter|▲ Hoch|▲ Su|▲ 上へ|▲ Вверх
+▼ Down|▼ Descendre|▼ Runter|▼ Giù|▼ 下へ|▼ Вниз
+Parameters…|Paramètres…|Parameter…|Parametri…|パラメータ…|Параметры…
+Built-in test|Test intégré|Eingebauter Test|Test integrato|組込み試験|Встроенная проверка
+BOS command (0102)|Commande BOS (0102)|BOS-Befehl (0102)|Comando BOS (0102)|BOSコマンド (0102)|Команда БОС (0102)
+CAN frame (CAN tab library)|Trame CAN (bibliothèque CAN)|CAN-Frame (CAN-Bibliothek)|Frame CAN (libreria CAN)|CANフレーム (CANライブラリ)|Кадр CAN (библиотека вкладки CAN)
+BOS RF mode|Mode RF du BOS|BOS-HF-Modus|Modo RF BOS|BOS RFモード|Режим ВЧ БОС
+Power supply|Alimentation|Netzteil|Alimentatore|電源|Источник питания
+Telemetry check|Contrôle de télémesure|Telemetrieprüfung|Controllo telemetria|テレメトリ確認|Проверка телеметрии
+Instrument SCPI (FSW / TFG)|SCPI instrument (FSW / TFG)|Geräte-SCPI (FSW / TFG)|SCPI strumento (FSW / TFG)|測定器SCPI (FSW / TFG)|SCPI прибора (FSW / TFG)
+Operator step|Étape opérateur|Bedienerschritt|Passo operatore|オペレータ手順|Действие оператора
+Wait|Attente|Warten|Attesa|待機|Пауза
+Note / section|Note / section|Notiz / Abschnitt|Nota / sezione|注記/セクション|Примечание / раздел
+Title (report / log)|Titre (rapport / journal)|Titel (Bericht / Protokoll)|Titolo (rapporto / log)|タイトル (報告/ログ)|Название (отчёт / журнал)
+Expected answer|Réponse attendue|Erwartete Antwort|Risposta attesa|期待応答|Ожидаемый ответ
+Send on|Envoyer sur|Senden über|Invia su|送信回線|Отправить по
+Preset|Préréglage|Vorgabe|Preset|プリセット|Вариант
+Frame|Trame|Frame|Frame|フレーム|Кадр
+Supply|Alimentation|Netzteil|Alimentatore|電源|Источник
+Action|Action|Aktion|Azione|動作|Действие
+Instruction|Instruction|Anweisung|Istruzione|指示|Указание
+Answer|Réponse|Antwort|Risposta|回答|Ответ
+Done|Fait|Erledigt|Fatto|完了|Готово
+Pass|Conforme|Bestanden|Conforme|合格|Норма
+Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
+Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
 + BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ BOS 0102…|+ БОС 0102…
 BOS commands (0102)|Commandes BOS (0102)|BOS-Befehle (0102)|Comandi BOS (0102)|BOSコマンド (0102)|Команды БОС (0102)
 Sender|Émetteur|Absender|Mittente|送信元|Отправитель

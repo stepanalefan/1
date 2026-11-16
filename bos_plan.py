@@ -24,7 +24,8 @@ KINDS = {
     "rx": ("BOS→", "БОС→", "#79c0ff", "answer / telemetry from the BOS", "ответ / телеметрия от БОС"),
     "fsw": ("FSW", "FSW", "#c792ea", "R&S FSW (SCPI)", "R&S FSW (SCPI)"),
     "tfg": ("TFG", "TFG", "#56d4dd", "TFG6806 generator (SCPI)", "генератор TFG6806 (SCPI)"),
-    "psu": ("PSU", "Пит.", "#f0b03e", "bench supply (HMP4040 / N6701C)", "источник питания (HMP4040 / N6701C)"),
+    "psu": ("PSU", "Пит.", "#f0b03e", "bench supply (HMP4040 / N6701C / IT6832)",
+            "источник питания (HMP4040 / N6701C / IT6832)"),
     "op": ("Oper.", "Опер.", "#ff6b6b", "operator dialog", "окно для оператора"),
     "pc": ("PC", "ПК", "#4fd18b", "analysis on the PC", "обработка на ПК"),
     "wait": ("Wait", "Пауза", "#8a96a3", "pause", "пауза"),
@@ -644,23 +645,44 @@ TESTS = {"ref": t_ref, "can12": t_can12, "link": t_link, "cmds": t_cmds, "pre": 
 
 
 def describe(st, plan):
-    """[(test id or '', title, [Step])] for the plan as the runner would execute it now."""
-    tests = list(st.data["plans"].get(plan, []))
+    """[(test id or '', title, [Step], plan index)] for the plan as the runner would execute it now, with the
+    plan's own parameters. Built-in tests have their id; user steps have tid 'step' and their summary as title;
+    the plan index is None for the automatic preparation and the before / after blocks."""
+    import bos_steps
+    saved, saved_cfg = st.ctl, st.cfg
+    if hasattr(st, "plan_ctl") and not st.running:
+        st.ctl = st.plan_ctl(plan)
+        st.cfg = st.plan_cfg(st.ctl)
+    try:
+        return _describe(st, plan, bos_steps)
+    finally:
+        st.ctl, st.cfg = saved, saved_cfg
+
+
+def _describe(st, plan, bs):
+    items = list(st.data["plans"].get(plan, []))
+    opts = st.data.get("plan_opts", {}).get(plan, {})
+    tests = bs.expand(items, st.ctl, opts.get("prep", "auto"))
+    idx, k = [], 0
+    for t in tests:                                   # plan index of every executed item (None = automatic)
+        if k < len(items) and t is items[k]:
+            idx.append(k)
+            k += 1
+        else:
+            idx.append(None)
     demo = st._is_demo()
     method = st.ctl.get("method", "protocol")
-    if method == "protocol" and "link" not in tests:
-        tests.insert(0, "link")
-    if method == "protocol" and st.ctl.get("can_check", True) and "can12" not in tests:
-        tests.insert(0, "can12")
-    if "ref" not in tests:
-        tests.insert(0, "ref")
+    builtin = any(not bs.is_step(t) for t in tests)
     out = []
-    prep = [Step("info", L("FSW must be connected (Spectrum Analyzer tab); its live view is stopped",
-                           "FSW должен быть подключён (вкладка Анализатор спектра); его просмотр останавливается"))]
-    if st.cfg.get("fsw_bw_auto", True):
-        prep.append(Step("fsw", L("*OPT? → I/Q bandwidth option (B160 / B320 / B512 …) → bandwidth and OQPSK sample "
-                                  "rate", "*OPT? → опция полосы I/Q (B160 / B320 / B512 …) → полоса и частота "
-                                  "дискретизации OQPSK")))
+    prep = []
+    if bs.needs_fsw(tests):
+        prep.append(Step("info", L("FSW must be connected (Spectrum Analyzer tab); its live view is stopped",
+                                   "FSW должен быть подключён (вкладка Анализатор спектра); его просмотр "
+                                   "останавливается")))
+        if st.cfg.get("fsw_bw_auto", True):
+            prep.append(Step("fsw", L("*OPT? → I/Q bandwidth option (B160 / B320 / B512 …) → bandwidth and OQPSK "
+                                      "sample rate", "*OPT? → опция полосы I/Q (B160 / B320 / B512 …) → полоса и "
+                                      "частота дискретизации OQPSK")))
     mtxt = {"protocol": L("control: BOS protocol over CAN (ПИЛВ 0102-004)", "управление: протокол БОС по CAN "
                           "(ПИЛВ 0102-004)"),
             "library": L("control: commands from the CAN library", "управление: команды из библиотеки CAN"),
@@ -673,20 +695,35 @@ def describe(st, plan):
                                    f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель "
                                    f"0x{st.ctl.get('sender', 0x18):02X}, БОС 0x{bp.BOS:02X}, N = "
                                    f"{st.ctl.get('freq_n', 800)} → {_hz(bp.freq_hz(int(st.ctl.get('freq_n', 800))))}")))
+    over = opts.get("ctl", {})
+    if over:
+        prep.append(Step("info", L("plan parameters: ", "параметры плана: ") +
+                         ", ".join(f"{bs.PARAMS.get(k, (k,))[0]} = {v}" for k, v in over.items())))
+    if opts.get("prep", "auto") != "auto":
+        prep.append(Step("info", L("preparation: always", "подготовка: всегда") if opts.get("prep") == "on" else
+                         L("preparation: none (the plan does everything itself)",
+                           "подготовка: нет (план всё делает сам)")))
     if demo:
         prep.append(Step("info", L("DEMO: commands and captures go to the simulated BOS / FSW",
                                    "ДЕМО: команды и записи идут в имитатор БОС / FSW")))
-    out.append(("", L("Before the plan", "Перед планом"), prep))
+    out.append(("", L("Before the plan", "Перед планом"), prep, None))
     state = {"mode": None, "att": int(st.cfg.get("att_code", 0))}
-    for t in tests:
+    for t, ix in zip(tests, idx):
+        if bs.is_step(t):
+            try:
+                steps = step_desc(st, t, state)
+            except Exception as e:
+                steps = [Step("info", f"{type(e).__name__}: {e}")]
+            out.append(("step", bs.summary(t, st), steps, ix))
+            continue
         fn = TESTS.get(t)
         try:
             steps = fn(st, demo, state) if fn else [Step("info", "?")]
         except Exception as e:                       # never break the GUI for a description
             steps = [Step("info", f"{type(e).__name__}: {e}")]
-        out.append((t, None, steps))
+        out.append((t, None, steps, ix))
     end = []
-    if method == "protocol":
+    if method == "protocol" and (builtin or any(bs.is_step(t) and t.get("type") in ("rf", "bos_cmd") for t in tests)):
         end += [Step("can", L("MODE_D — leave the BOS in standby, RF off (if a session is on)",
                               "MODE_D — оставить БОС в дежурном режиме, ВЧ выкл. (если сеанс идёт)"),
                      [Step("info", can_frame(st, 0x01, ack=False))])]
@@ -694,8 +731,57 @@ def describe(st, plan):
                          "заключение НОРМА / НОРМА (замечания) / НЕ НОРМА, выводы, поправки")),
             Step("pc", L("HTML report bos_reports/BOS_<serial>_<date>.html, history bos_history.csv",
                          "отчёт HTML bos_reports/BOS_<номер>_<дата>.html, история bos_history.csv"))]
-    out.append(("", L("After the plan", "После плана"), end))
+    out.append(("", L("After the plan", "После плана"), end, None))
     return out
+
+
+def step_desc(st, s, state):
+    """Plan-view steps of a user-defined step."""
+    import bos_steps as bs
+    t = s["type"]
+    if t == "bos_cmd":
+        code = s.get("code", 0)
+        try:
+            data = bp.encode(code, s.get("params", {}))
+            frame = can_frame(st, code, data, ack=s.get("expect") != "none" and bp.wants_ack(code))
+        except (ValueError, KeyError) as e:
+            return [Step("info", L(f"INVALID: {e}", f"ОШИБКА: {e}"))]
+        line = st.ctl.get("line2" if s.get("line") == 2 else "line", "BOS CAN1")
+        out = [Step("info", frame), Step("info", L(f"line '{line}'", f"линия '{line}'"))]
+        exp = s.get("expect", "КВ+")
+        if exp != "none" and bp.wants_ack(code):
+            out.append(Step("rx", L(f"{exp} expected within 300 ms", f"ожидается {exp} за 300 мс")))
+        if bp.standby_only(code):
+            out.append(Step("info", L("executed only in standby (ДЖР)", "выполняется только в ДЖР")))
+        return out
+    if t == "can":
+        return [Step("can", bs.summary(s, st))]
+    if t == "rf":
+        m = s.get("mode")
+        att = s.get("att") if s.get("att") is not None else state.get("att", 0)
+        state["mode"] = m
+        if st.ctl.get("method", "protocol") != "protocol":
+            return [Step("op" if st.ctl.get("method") == "prompt" else "can",
+                         L(f"switch the BOS to: {dict(bs.RF_MODES).get(m, m)}",
+                           f"переключить БОС: {dict(bs.RF_MODES).get(m, m)}"))]
+        return session(st, m, att)
+    if t == "psu":
+        a = s.get("action")
+        out = [Step("psu", bs.summary(s, st))]
+        if a == "measure" and s.get("settle_s"):
+            out.insert(0, Step("wait", L(f"settle {s['settle_s']:g} s", f"установление {s['settle_s']:g} с")))
+        return out
+    if t == "tlm":
+        return [Step("rx", L(f"telemetry {s.get('key')} (fresh, up to {s.get('timeout_s', 3):g} s)",
+                             f"телеметрия {s.get('key')} (свежая, до {s.get('timeout_s', 3):g} с)")),
+                Step("pc", bs.summary(s, st))]
+    if t == "scpi":
+        return [Step("fsw" if s.get("inst") == "FSW" else "tfg", s.get("cmd", ""))]
+    if t == "operator":
+        return [Step("op", s.get("text", "")), Step("info", dict(bs.OP_MODES).get(s.get("mode"), ""))]
+    if t == "wait":
+        return [Step("wait", bs.summary(s, st))]
+    return [Step("info", s.get("text", ""))]
 
 
 def count_steps(steps):

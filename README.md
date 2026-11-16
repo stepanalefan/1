@@ -128,6 +128,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
+| `bos_steps.py` | User-defined plans: step types (BOS command, CAN frame, RF mode, supply, telemetry, SCPI, operator, wait, note), step and plan editors, per-plan parameters |
 | `bos_analysis.py` | Measurement analysis, diagnosis rules, corrections, BOS simulator (pure NumPy) |
 | `bos_decode.py` | УР data decoding: SP-L, frame sync, CCSDS RS(255,223) (I = 5), transport frame, BER |
 | `bos_shr.py` | ШР: spreading sequences, CCSDS randomizer and turbo code, packet model, streamed multi-core chip receiver (any sample rate ≥ 1.25 × 131 Msym/s, e.g. 275 MS/s), despreading |

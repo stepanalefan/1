@@ -1130,6 +1130,19 @@ class DemoFsw:
                      "trace_mode": "WRIT", "count": 0}
         self.app = "iq"
 
+    def write(self, cmd: str):
+        """SCPI console / plan steps in demo: accepted, nothing happens."""
+
+    def query(self, cmd: str) -> str:
+        c = cmd.strip().upper()
+        if c == "*IDN?":
+            return "Rohde&Schwarz,FSW-43,1312.8000K43/000000,demo"
+        if c == "*OPT?":
+            return self.options
+        if c.startswith("SYST:ERR"):
+            return '0,"No error"'
+        return "0"
+
     def select_app(self, app):
         if app == "vsa" and not self.k70:
             raise RuntimeError("FSW-K70 (VSA) is not installed - use the I/Q (software demod) tab")

@@ -216,6 +216,54 @@ FPGA rails, temperatures, 10 MHz reference) and analyses everything. Results: a 
 warnings / FAIL), a measurement table with limits, **findings** with the most likely faulty block, a block
 diagram of the modulator coloured by suspicion, suggested **corrections**, an HTML report and a history.
 
+### Where are the tests and plans stored?
+| What | Where |
+|---|---|
+| Built-in tests (Carrier, BPSK, OQPSK, attenuator, PA linearity, ШР, BER, …) | program code: `bos_station.py`, methods `_t_<id>` (e.g. `_t_cw`); measurements in `bos_analysis.py` |
+| Their step-by-step description (*Plan sequence* column) | `bos_plan.py` |
+| **Plans** (which tests / steps, in which order) | `bos_station.json` next to the program → `"plans"` |
+| Plan options: preparation, **plan parameters** | `bos_station.json` → `"plan_opts"` |
+| Station settings, limits, unit control | `bos_station.json` → `"cfg"`, `"lim"`, `"ctl"` |
+| BOS commands and their data fields (ПИЛВ 0102-004) | `bos_commands_0102.json` |
+| CAN tab command library and scripts | `can_commands.json` |
+| Main tab sequences | `dashboard.json` |
+
+Back up / copy `bos_station.json` to move plans to another PC.
+
+### How do I make my own plan or change one?
+**Plans ▾ → New empty plan…** (or *New plan…*, *Duplicate plan*, *Edit plan…*). The plan editor lists the items;
+**+ Add ▾** inserts after the selected one:
+* **Built-in test** — any of the station's tests;
+* **BOS command (0102)** — any command of `bos_commands_0102.json`; its data fields appear as inputs (lists for coded
+  values, ranges from the document), a preset fills them, the CAN frame is shown live and prohibited values are
+  refused; expected answer КВ+ / КВ- / none, CAN line 1 or 2;
+* **CAN frame** — any command of the CAN tab library (AFAR, UPNG, other lines);
+* **BOS RF mode** — RF off / carrier / BPSK / OQPSK session with an attenuation (10 MHz reference check and
+  target designation included, as in the built-in tests);
+* **Power supply** — station supply or a given HMP4040 / N6701C / IT6832 output: set V and current limit, output
+  on / off, or **measure V and I against limits** (with a settle time);
+* **Telemetry check** — any telemetry value (temperatures, rails, PLL flags, PulsNumb_10MHz, Err_Ref_LO …) against
+  min / max, on the PC;
+* **Instrument SCPI** — command or query to the FSW or TFG6806, numeric limits or expected text;
+* **Operator step** — instruction to confirm, a Pass / Fail question (with a remark), or a value the operator
+  enters (multimeter, visual check …) against limits; *Abort plan* stops the run;
+* **Wait**, **Note / section**.
+Every step gives rows in the results table and the report (PASS / FAIL against its limits). Double-click edits,
+drag or ▲ ▼ reorders. **Preparation**: *Automatic* runs reference & BOS power-up, CAN1 / CAN2 check and link setup
+only when the plan has built-in BOS tests — a plan of supply / operator / PC steps runs without them and without
+the FSW; *Always* / *Never* force it.
+
+### Can I change command parameters directly in the *Plan sequence* column?
+Yes (when no plan is running):
+* **✎** on a step of your own opens its editor (command parameters, limits, texts); **▲ ▼** move it, **✕**
+  removes it; **+ Step** adds a test or step at the end;
+* **✎** on a built-in test, or next to its →BOS command lines, opens the **plan parameters** of that test —
+  frequency code N, session command, УР / ШР rates, Time_SNR, telemetry periods, sender, CAN lines, reference /
+  TFG settings. Ticked values apply **to this plan only** (the Control / Reference pages stay the station
+  defaults); the column, the CAN frames and the FSW carrier follow them at once, e.g. one plan at N = 656 and
+  another at N = 944.
+Limits stay common (Limits page).
+
 ### What exactly does a plan do? (the *Plan sequence* column)
 The column between the settings and the results lists the selected plan **step by step, in the order the station
 runs it**, built from the current settings (it changes as soon as you change a setting or the plan):
