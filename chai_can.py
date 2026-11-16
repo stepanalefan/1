@@ -25,7 +25,8 @@ CHAI 2.x calls used:
 canmsg_t:  u32 id; u8 data[8]; u8 len; u16 flags (bit 0 RTR, bit 2 EFF = 29-bit id); u32 ts (µs)
 Channels are numbered from 0 over all CAN controllers in the computer (up to 8): first adapter CAN1 = 0,
 CAN2 = 1, ... - CiBoardInfo gives the real numbers. The numeric values of CIO_CAN11 / CIO_CAN29 / CI_LOM_ON are
-not in the guide (only in chai.h): the values below are the CHAI ones as known; check CHAI_INSTALL_DIR\include\chai.h.
+not in the guide: the values below are from chai.h 2.14.x (CHAI_INSTALL_DIR\include\chai.h), as are the structures,
+the error codes and the bit-timing table (BCI_*). No calling convention is declared there (cdecl -> ctypes.CDLL).
 chai.dll: CHAI_INSTALL_DIR\x64 (64-bit Python) or \x32 (32-bit Python), also copied to the Windows system folder
 by the installer. Set the environment variable CHAI_LIB to the full path if it is not found.
 """
@@ -38,11 +39,18 @@ import sys
 import threading
 import time
 
+# chai.h 2.14.x
 CIO_CAN11 = 0x2
 CIO_CAN29 = 0x4
-CI_LOM_ON = 1
+CI_LOM_ON = 0x1
 FRAME_RTR = 0x1
 FRAME_EFF = 0x4
+CI_WAIT_RC, CI_WAIT_TR, CI_WAIT_ER = 0x1, 0x2, 0x4
+ERRORS = {1: "ECIGEN generic error", 2: "ECIBUSY device or resource busy", 3: "ECIMFAULT memory fault",
+          4: "ECISTATE wrong state for this call", 5: "ECIINCALL invalid call", 6: "ECIINVAL invalid parameter",
+          7: "ECIACCES cannot access resource", 8: "ECINOSYS not implemented", 9: "ECIIO input/output error",
+          10: "ECINODEV no such device", 11: "ECIINTR interrupted", 12: "ECINORES no resources",
+          13: "ECITOUT time out"}
 
 # bit rate -> (bt0, bt1), SJA1000 bit timing at 16 MHz (tq = 2·(BRP+1)/16 MHz):
 # bt1 0x1C = TSEG1 13 + TSEG2 2 + sync = 16 tq, 0x16 = 10 tq, 0x14 = 8 tq; bt0 = BRP
@@ -56,6 +64,15 @@ BAUD = {
 class canmsg_t(ctypes.Structure):
     _fields_ = [("id", ctypes.c_uint32), ("data", ctypes.c_uint8 * 8), ("len", ctypes.c_uint8),
                 ("flags", ctypes.c_uint16), ("ts", ctypes.c_uint32)]
+
+
+class canwait_t(ctypes.Structure):
+    _fields_ = [("chan", ctypes.c_uint8), ("wflags", ctypes.c_uint8), ("rflags", ctypes.c_uint8)]
+
+
+class canerrs_t(ctypes.Structure):
+    _fields_ = [("ewl", ctypes.c_uint16), ("boff", ctypes.c_uint16), ("hwovr", ctypes.c_uint16),
+                ("swovr", ctypes.c_uint16), ("wtout", ctypes.c_uint16)]
 
 
 class canboard_t(ctypes.Structure):
@@ -131,6 +148,15 @@ def load():
                 _lib.CiWrite.argtypes = [ctypes.c_uint8, ctypes.POINTER(canmsg_t), ctypes.c_int16]
             if hasattr(_lib, "CiBoardInfo"):
                 _lib.CiBoardInfo.restype, _lib.CiBoardInfo.argtypes = ctypes.c_int16, [ctypes.POINTER(canboard_t)]
+            if hasattr(_lib, "CiWaitEvent"):
+                _lib.CiWaitEvent.restype = ctypes.c_int16
+                _lib.CiWaitEvent.argtypes = [ctypes.POINTER(canwait_t), ctypes.c_int, ctypes.c_int]
+            if hasattr(_lib, "CiErrsGetClear"):
+                _lib.CiErrsGetClear.restype = ctypes.c_int16
+                _lib.CiErrsGetClear.argtypes = [ctypes.c_uint8, ctypes.POINTER(canerrs_t)]
+            if hasattr(_lib, "CiGetFirmwareVer"):
+                _lib.CiGetFirmwareVer.restype = ctypes.c_int16
+                _lib.CiGetFirmwareVer.argtypes = [ctypes.c_uint8, ctypes.POINTER(ctypes.c_uint32)]
             if hasattr(_lib, "CiStrError"):
                 _lib.CiStrError.restype = None
                 _lib.CiStrError.argtypes = [ctypes.c_int16, ctypes.c_char_p, ctypes.c_int16]
@@ -161,7 +187,7 @@ def err_text(r: int) -> str:
                 return f"{buf.value.decode(errors='replace')} ({r})"
         except Exception:
             pass
-    return f"CHAI error {r}"
+    return f"{ERRORS.get(-r, 'CHAI error')} ({r})"
 
 
 def _check(r, what):
@@ -217,13 +243,42 @@ class ChaiChannel:
             raise
         self.buf = (canmsg_t * 64)()
         self.use_write = not hasattr(self.lib, "CiTransmit")         # CHAI < 2.10
-        self.info = f"Marathon CHAI {lib_version()} channel {self.chan} (CAN{self.chan % 2 + 1}), " \
+        fw = ""
+        if hasattr(self.lib, "CiGetFirmwareVer"):
+            v = ctypes.c_uint32(0)
+            if self.lib.CiGetFirmwareVer(self.chan, ctypes.byref(v)) >= 0 and v.value:
+                fw = f", firmware {(v.value >> 16) & 0xFF}.{(v.value >> 8) & 0xFF}.{v.value & 0xFF}"
+        self.info = f"Marathon CHAI {lib_version()} channel {self.chan} (CAN{self.chan % 2 + 1}){fw}, " \
                     f"{bitrate // 1000} kbit/s{lo}"
+        self.bus_errors = {"ewl": 0, "boff": 0, "hwovr": 0, "swovr": 0}
+        self._next_err = 0.0
+
+    def _errors_poll(self):
+        """Once a second: CAN errors since the last call (error warning, bus-off, overruns) -> self.errors."""
+        now = time.monotonic()
+        if now < self._next_err or not hasattr(self.lib, "CiErrsGetClear"):
+            return
+        self._next_err = now + 1.0
+        e = canerrs_t()
+        if self.lib.CiErrsGetClear(self.chan, ctypes.byref(e)) >= 0:
+            for k in self.bus_errors:
+                v = getattr(e, k)
+                self.bus_errors[k] += v
+                self.errors += v
 
     def recv(self) -> list:
-        """Frames received within ~50 ms (CiRead does not block)."""
+        """Frames received within ~50 ms. CiWaitEvent sleeps until frames arrive (no busy polling); without it
+        CiRead (non-blocking) is polled."""
         out = []
+        self._errors_poll()
         t_end = time.monotonic() + 0.05
+        if hasattr(self.lib, "CiWaitEvent"):
+            cw = canwait_t(self.chan, CI_WAIT_RC | CI_WAIT_ER, 0)
+            r = self.lib.CiWaitEvent(ctypes.byref(cw), 1, 50)
+            if r < 0:
+                raise RuntimeError(f"CiWaitEvent failed: {err_text(r)}")
+            if r == 0 or not (cw.rflags & CI_WAIT_RC):
+                return out                                   # time out / only an error event
         while True:
             n = self.lib.CiRead(self.chan, self.buf, len(self.buf))
             if n < 0:
