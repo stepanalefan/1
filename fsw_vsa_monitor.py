@@ -2550,6 +2550,21 @@ class MainWindow(QtWidgets.QMainWindow):
         ts = _dt.datetime.now().strftime("%H:%M:%S")
         self.log.appendHtml(f'<span style="color:#6e7681">{ts}</span> '
                             f'<span style="color:{color}">{text}</span>')
+        self._log_to_file(ts, level, text)
+
+    def _log_to_file(self, ts, level, text):
+        """Every message also goes to messages_log_YYYY-MM-DD.txt next to the program (one file per day), so a
+        run can be looked at / sent later (capture timings, errors, commands)."""
+        try:
+            import re as _re
+            import html as _html
+            folder = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+            day = _dt.datetime.now().strftime("%Y-%m-%d")
+            plain = _html.unescape(_re.sub(r"<[^>]+>", "", str(text)))
+            with open(os.path.join(folder, f"messages_log_{day}.txt"), "a", encoding="utf-8") as fh:
+                fh.write(f"{ts}  {level.upper():<4}  {plain}\n")
+        except OSError:
+            pass
 
     def _set_connected(self, on: bool):
         self.connected = on

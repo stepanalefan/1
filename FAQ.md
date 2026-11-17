@@ -454,13 +454,17 @@ option below the K70 Tx filter (RRC, α) and the measurement filter (auto = matc
 Unit control → **Modulation measured by**: *I/Q recording + software analysis* (raw I/Q from the FSW I/Q Analyzer,
 all station diagnostics: I/Q errors, skew, roll-off, spectrum, decoding, findings), *FSW-K70 (VSA)* (the
 analyzer's own demodulation: MER, EVM, frequency / symbol rate error, I/Q offset, gain imbalance, quadrature - with
-limits; no deeper diagnostics) or *both* side by side. Without K70 the I/Q recording is used (SKIP row). In the plan
-editor each plan can follow this setting or choose its own (*Modulation only*: both). With K70 the Tx filter (RRC,
+limits; no deeper diagnostics) or *both* side by side. Without K70 the I/Q recording is used (SKIP row). **This
+setting applies to every plan**; a plan measures differently only when its editor says so explicitly (*Modulation
+measured by* ≠ "as on the Unit control page"). The log says at the start of each run which setting is used. K70
+measures 4000 symbols per capture (2000 in the result range). With K70 the Tx filter (RRC,
 α) and the measurement filter are set, read back and checked.
 
 ### The analyzer lags during the tests - what helps?
 Every capture logs its times: `capture OQPSK (…): setup 0.05 s, level 0.62 s, acquire 0.01 s, transfer 0.08 s,
-analysis 0.9 s - longest: …`, and the end of a plan sums them up. What was done:
+analysis 0.9 s - longest: …` (K70 steps: settings / level / measure), and the end of a plan sums them up. The
+messages of the log panel at the bottom of the window are also written to `messages_log_YYYY-MM-DD.txt` next to
+the program (one file per day) - send that file when something is slow or fails. What was done:
 * **auto level once per signal** (Unit control → FSW level): ADJ:LEV is a measurement of its own and ran before
   every capture; now it runs at the first capture of a mode / attenuation / frequency and the reference level is
   reused;

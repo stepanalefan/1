@@ -243,6 +243,9 @@ def fmt(v, spec="{:.2f}"):
 # --------------------------------------------------------------------------- #
 #  FSW capture (runs in the FSW worker thread)                                 #
 # --------------------------------------------------------------------------- #
+K70_NSYM = 4000                # symbols per FSW-K70 capture (result range: half of it)
+
+
 def fsw_capture(dev, center, fs, n, autolevel=True, ref_level=0.0):
     """Raw I/Q from the FSW I/Q Analyzer. Only commands already verified in fsw_vsa_monitor.py.
     autolevel: True = ADJ:LEV before the capture (a measurement of its own), False = ref_level is set.
@@ -918,7 +921,7 @@ class BosStation(QtWidgets.QWidget):
                              "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
                              "ref_wait_s": 30},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
-                     "plan_opts": {"Modulation only": {"fsw_mode": "both"}},   # plan -> {"prep", "ctl", "cmds", "k70"}
+                     "plan_opts": {},                 # plan -> {"prep", "ctl", "cmds", "fsw_mode"}
                      "unit": {"serial": "", "operator": ""}}
         try:
             with open(STORE_FILE, encoding="utf-8") as fh:
@@ -931,10 +934,11 @@ class BosStation(QtWidgets.QWidget):
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
                 self.data["plans"].setdefault("Command set (0102)", ["cmds"])
-                if not d.get("k70_ver"):                      # K70 measurement on in "Modulation only" by default
-                    po = d.setdefault("plan_opts", {})
-                    if "Modulation only" in self.data["plans"]:
-                        po.setdefault("Modulation only", {}).setdefault("fsw_mode", "both")
+                if d.get("k70_ver", 0) < 2:                   # the old built-in "both" of "Modulation only" overrode
+                    mo = d.get("plan_opts", {}).get("Modulation only", {})      # the Unit control choice: removed
+                    if mo.get("fsw_mode") == "both" or mo.get("k70"):
+                        mo.pop("fsw_mode", None)
+                        mo.pop("k70", None)
             self.data["plan_opts"] = {k: v for k, v in d.get("plan_opts", {}).items() if k in self.data["plans"]}
             self.data["srmin_ver"] = d.get("srmin_ver", 1)
             for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
@@ -956,7 +960,7 @@ class BosStation(QtWidgets.QWidget):
             self.data["ctl"]["sr_min_s"] = 10                # 30 s was too long: 10 s minimum session
         self.data["srmin_ver"] = 2
         self.data["sender_ver"] = 2
-        self.data["k70_ver"] = 1
+        self.data["k70_ver"] = 2
         self.data["lim_ver"] = 2
         self.cfg, self.lim, self.ctl = self.data["cfg"], self.data["lim"], self.data["ctl"]
         self.sim = ba.BosSimulator(self.cfg)
@@ -2403,6 +2407,11 @@ class BosStation(QtWidgets.QWidget):
         self._collect()
         self._plan_over = dict(opts.get("ctl", {}))
         self._fsw_mode = self.plan_fsw_mode(opts)
+        own = (opts.get("fsw_mode") or "") if opts else ""
+        self.log("BOS station: modulation measured by " + {"iq": "I/Q recording + software analysis",
+                                                          "k70": "FSW-K70 (VSA)", "both": "I/Q recording and FSW-K70"}
+                 .get(self._fsw_mode, self._fsw_mode) + (f" (set in plan '{name}')" if own else " (Unit control)"),
+                 "info")
         self._plan_cmds_run = json.loads(json.dumps(opts.get("cmds", {})))
         self._ctl_logged = set()
         self._skip_pending = None
@@ -3543,7 +3552,9 @@ class BosStation(QtWidgets.QWidget):
             parts = [f"{k} {tm[k]:.2f} s" for k in ("setup", "level", "acquire", "transfer", "analysis") if k in tm]
             slow = max((k for k in ("setup", "level", "acquire", "transfer", "analysis") if k in tm),
                        key=lambda k: tm[k])
-            self.log(f"BOS station: capture {label} ({n:,} samples = {n / fs * 1e3:.1f} ms of signal): "
+            dur = n / fs
+            dtxt = f"{dur:.2f} s" if dur >= 1 else f"{dur * 1e3:.1f} ms" if dur >= 1e-3 else f"{dur * 1e6:.0f} µs"
+            self.log(f"BOS station: capture {label} ({n:,} samples = {dtxt} of signal): "
                      + ", ".join(parts) + f" - longest: {slow}", "info")
             self._timing_log.append((label, n, fs, dict(tm)))
         return r
@@ -3753,32 +3764,46 @@ class BosStation(QtWidgets.QWidget):
         alpha = float(self.cfg.get("alpha", 0.25))
         want = {"modulation": mod, "center": c["carrier"], "symbol_rate": c["symbol_rate"], "tfil_state": rrc,
                 "tfil_name": "RRC", "tfil_alpha": alpha, "mfil_auto": True, "rlen_auto": False,
-                "capture_len": int(min(c["nsym"], 50000)), "sweep_count": 1, "signal_type": "CONT",
+                # short K70 capture: 4000 symbols / 2000 in the result range are enough for its statistics - 50 000
+                # symbols (0.8 s of УР signal plus their demodulation) made the FSW look frozen
+                "capture_len": K70_NSYM, "result_len": K70_NSYM // 2, "sweep_count": 1, "signal_type": "CONT",
                 "burst": False, "pattern": False, "trig_source": "IMM", "equalizer": False}
         autolevel = self.cfg.get("autolevel", True)
 
         def job():
+            t0 = time.perf_counter()
             base = dev.read_settings()
             st_ = dict(base)
             st_.update(want)
             cmds, errs, notes = dev.apply_settings(st_, base)
+            t1 = time.perf_counter()
             if autolevel:
                 dev.auto_level("vsa")
+            t2 = time.perf_counter()
             rb = dev.read_settings()
+            t3 = time.perf_counter()
             res = dev.measure()
+            t4 = time.perf_counter()
             extra = {}
             for k, q in (("gimb", "GIMB"), ("qerr", "QERR"), ("perr", "PERR"), ("merr", "MERR")):
                 try:
                     extra[k] = float(str(dev.query(f"CALC3:MARK:FUNC:DDEM:STAT:{q}?")).split(",")[0])
                 except Exception:
                     extra[k] = float("nan")
-            return {"res": res or {}, "rb": rb, "errs": errs, "cmds": cmds, "extra": extra}
+            return {"res": res or {}, "rb": rb, "errs": errs, "cmds": cmds, "extra": extra,
+                    "timing": {"settings": t1 - t0, "level": t2 - t1, "read back": t3 - t2, "measure": t4 - t3,
+                               "results": time.perf_counter() - t4}}
         self.step_lbl.setText(f"{T}: FSW-K70 measurement …")
         st, out = yield ("fsw", job)
         if st == "err":
             self._row(T, "FSW-K70 measurement", None, "", "", "ERROR", note=str(out))
             return
         rb, res, ex = out["rb"], out["res"], out["extra"]
+        tm = out.get("timing") or {}
+        if tm:
+            self.log(f"BOS station: FSW-K70 {mod} ({K70_NSYM} symbols): " +
+                     ", ".join(f"{k} {v:.2f} s" for k, v in tm.items()) +
+                     f" - longest: {max(tm, key=tm.get)}", "info")
         for e in out["errs"]:
             self.log(f"BOS station: FSW-K70: {e}", "warn")
         name = str(rb.get("tfil_name") or "").strip("'\"").upper()
