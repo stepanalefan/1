@@ -24,6 +24,15 @@ import time
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 import pyqtgraph as pg
 
 try:
@@ -918,7 +927,7 @@ class Dashboard(QtWidgets.QWidget):
             lb = QtWidgets.QLabel(text)
             lb.setStyleSheet(f"color:{C_DIM};")
             hg.addWidget(lb, 0, col)
-        mono = QtGui.QFont("Consolas")
+        mono = _mono_font()
         mono.setStyleHint(QtGui.QFont.Monospace)
         mono.setPointSize(max(8, mono.pointSize() - 1))
         self.hmp_rows = {}
@@ -1019,7 +1028,7 @@ class Dashboard(QtWidgets.QWidget):
             top.addWidget(b)
         sv.addLayout(top)
         self.list = QtWidgets.QListWidget()
-        self.list.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.list.setFont(_mono_font())
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list.itemDoubleClicked.connect(lambda *_: self.edit_step())
         self.list.setToolTip("Double-click to edit a step")

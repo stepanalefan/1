@@ -21,6 +21,15 @@ import datetime as _dt
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
 try:
     from telemetry_ru import T, ru_on
 except Exception:                                   # pragma: no cover
@@ -669,7 +678,7 @@ C_HL = QtGui.QColor("#5a3a12")
 
 
 def _mono():
-    f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    f = _mono_font()
     f.setPointSize(max(9, f.pointSize()))
     return f
 

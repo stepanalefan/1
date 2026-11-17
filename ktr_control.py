@@ -25,6 +25,15 @@ import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
 import bos_protocol as bp
 import bos_steps as bs
 
@@ -34,7 +43,7 @@ except Exception:                                     # pragma: no cover
     dsh = None
 
 C_OK, C_ERR, C_DIM, C_WARN = "#4fd18b", "#ff6b6b", "#8a96a3", "#e3b341"
-MONO = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
+MONO = "font-family:'DejaVu Sans Mono',Consolas,monospace;"
 GROUPS = [("basic", "Basic commands"), ("sr", "Session (СР) control commands"), ("tech", "Technological commands")]
 EQUIPMENT = [("wait", "Pause"), ("hmp", "HMP4040"), ("n67", "N6701C"), ("it68", "IT6832"), ("tfg", "TFG6806"),
              ("fsw", "FSW run / single / level"), ("fsw_set", "FSW settings"), ("can", "CAN library frame"),
@@ -242,7 +251,7 @@ class BosPanel(QtWidgets.QWidget):
                 it = QtWidgets.QTreeWidgetItem([f"0x{c:02X}", d["mnemonic"], dname(d)])
                 it.setData(0, QtCore.Qt.UserRole, c)
                 it.setToolTip(2, dname(d) + (f"\n{dnote(d)}" if dnote(d) else ""))
-                it.setFont(0, QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+                it.setFont(0, _mono_font())
                 if d.get("modes") == "ДЖР":
                     it.setForeground(0, QtGui.QColor(C_WARN))
                     it.setToolTip(0, "executed only in standby (ДЖР)")
@@ -496,7 +505,7 @@ class KtrControl(QtWidgets.QWidget):
             top.addWidget(b)
         rv.addLayout(top)
         self.list = QtWidgets.QListWidget()
-        self.list.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.list.setFont(_mono_font())
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list.itemDoubleClicked.connect(lambda *_: self.edit_step())
         self.list.setToolTip("Double-click a step to edit it (a BOS command opens in the editor on the left)")
@@ -546,7 +555,7 @@ class KtrControl(QtWidgets.QWidget):
         self.out = QtWidgets.QPlainTextEdit()
         self.out.setReadOnly(True)
         self.out.setMaximumBlockCount(5000)
-        self.out.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.out.setFont(_mono_font())
         rv.addWidget(self.out, 2)
         split.addWidget(right)
         for i in range(3):

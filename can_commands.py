@@ -29,6 +29,15 @@ import uuid
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
+
 # --------------------------------------------------------------------------- #
 #  Data                                                                        #
 # --------------------------------------------------------------------------- #
@@ -222,7 +231,7 @@ class CommandPanel(QtWidgets.QGroupBox):
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.table.setFont(_mono_font())
         self.table.horizontalHeader().setStretchLastSection(True)
         for i, w in enumerate((44, 130, 120)):
             self.table.setColumnWidth(i, w)
@@ -529,7 +538,7 @@ class ScriptPanel(QtWidgets.QGroupBox):
         v.addLayout(top)
 
         self.list = QtWidgets.QListWidget()
-        self.list.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.list.setFont(_mono_font())
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
         self.list.model().rowsMoved.connect(self._rows_moved)

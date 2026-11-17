@@ -35,6 +35,15 @@ import time
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 import pyqtgraph as pg
 
 import bos_analysis as ba
@@ -219,7 +228,7 @@ def _tr(text):
 
 
 def _mono():
-    f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    f = _mono_font()
     return f
 
 
@@ -594,7 +603,7 @@ class PlanView(QtWidgets.QWidget):
         self.legend.setToolTip("\n".join(f"{bp_.tag(k)} — {bp_.tag_meaning(k)}" for k, v in bp_.KINDS.items()
                                           if k != "info"))
         e = html.escape
-        mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
+        mono = "font-family:'DejaVu Sans Mono',Consolas,monospace;"
         rows = []
         self._cmdrefs = []                               # (key, code, data) of the ✎ / ✕ links
         k_test = -1

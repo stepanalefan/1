@@ -129,6 +129,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
 | `telemetry_ru.py` | Russian texts of the Telemetry tab (field descriptions, meanings, notes, MD editors) |
+| `ui_fonts.py`, `fonts/` | Bundled interface fonts Inter + DejaVu Sans Mono (free licences in `fonts/LICENSE-*.txt`), loaded at start-up; `--system-font` keeps Segoe UI / Consolas |
 | `bos_rolloff.py` | Roll-off tab: estimated RRC α of the signal (spectrum crossings, matched-filter MER), apply to the station / K70 |
 | `bos_dac_cal.py` | DAC38J82 QMC calibration from FSW measurements: guidance, auto-calibration in live diagnose (DAC calibration tab) |
 | `bos_mdfiles.py` | MD_CONFIG / MD_SETTINGS (0102 v2): layouts, defaults, files, array transfer, editors (Telemetry → BOS) |

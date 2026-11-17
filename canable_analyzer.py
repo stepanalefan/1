@@ -90,6 +90,15 @@ from collections import deque
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
 from can_commands import CommandPanel, ScriptPanel, Store
 
 try:
@@ -1061,7 +1070,7 @@ STYLE = """
 
 
 def _mono() -> QtGui.QFont:
-    f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    f = _mono_font()
     f.setPointSize(max(9, f.pointSize()))
     return f
 

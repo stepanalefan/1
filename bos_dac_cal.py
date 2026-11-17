@@ -33,6 +33,15 @@ import time
 import numpy as np
 from PyQt5 import QtGui, QtWidgets
 
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
 REGS = ["qmc_offseta", "qmc_offsetb", "qmc_gaina", "qmc_gainb", "qmc_phaseab", "coarse_dac"]
 DOC_DEFAULT = {"qmc_offseta": 0x1F84, "qmc_offsetb": 0x1E36, "qmc_gaina": 0x3F4, "qmc_gainb": 0x3F4,
                "qmc_phaseab": 0xFF6, "coarse_dac": 7}          # table 4.43 defaults (raw register values)
@@ -399,7 +408,7 @@ class DacCalPanel(QtWidgets.QWidget):
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(3000)
-        self.log.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        self.log.setFont(_mono_font())
         v.addWidget(self.log, 1)
         note = QtWidgets.QLabel(
             "Targets: carrier offset ≤ -55 dBc, gain imbalance ≤ 0.02 dB, quadrature error ≤ 0.1°. The FSW demodulator "

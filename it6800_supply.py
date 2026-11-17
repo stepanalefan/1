@@ -684,7 +684,7 @@ class IT6800Tab(QtCore.QObject):
         self.con_out.setReadOnly(True)
         self.con_out.setMaximumBlockCount(500)
         self.con_out.setMaximumHeight(110)
-        self.con_out.setStyleSheet("font-family:Consolas,'DejaVu Sans Mono',monospace;")
+        self.con_out.setStyleSheet("font-family:'DejaVu Sans Mono',Consolas,monospace;")
         cv.addWidget(self.con_out)
         root.addWidget(self.g_con)
         # plot

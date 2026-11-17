@@ -33,7 +33,7 @@ def _inline(t: str) -> str:
 
     def keep(m):
         codes.append(f'<code style="background:{C["code_bg"]};color:{C["code"]};'
-                     f'font-family:Consolas,monospace;">&nbsp;{_html.escape(m.group(1))}&nbsp;</code>')
+                     f'font-family:&quot;DejaVu Sans Mono&quot;,Consolas,monospace;">&nbsp;{_html.escape(m.group(1))}&nbsp;</code>')
         return f"\x00{len(codes) - 1}\x00"
     t = _re.sub(r"`([^`]+)`", keep, t)
     t = _html.escape(t, quote=False)
@@ -67,7 +67,7 @@ def md_to_html(md: str) -> str:
             i += 1
             out.append(f'<table width="100%" cellpadding="10" cellspacing="0" style="margin:6px 0 12px 0;">'
                        f'<tr><td style="background:{C["pre_bg"]};border:1px solid {C["line"]};">'
-                       f'<pre style="font-family:Consolas,monospace;color:{C["text"]};margin:0;white-space:pre-wrap;">'
+                       f'<pre style="font-family:&quot;DejaVu Sans Mono&quot;,Consolas,monospace;color:{C["text"]};margin:0;white-space:pre-wrap;">'
                        f'{_html.escape(chr(10).join(code))}</pre></td></tr></table>')
             continue
         m = _re.match(r"(#{1,4})\s+(.*)", s)

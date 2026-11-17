@@ -2015,7 +2015,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(100)
-        self.log.setStyleSheet("font-family:Consolas,monospace;font-size:11px;")
+        self.log.setStyleSheet("font-family:'DejaVu Sans Mono',Consolas,monospace;font-size:11px;")
         root.addWidget(self.log)
         self.status = self.statusBar()
 
@@ -3027,6 +3027,8 @@ def main():
     ap.add_argument("--protocol", choices=["hislip", "vxi11", "socket"], help="LAN protocol")
     ap.add_argument("--connect", action="store_true", help="connect on start-up")
     ap.add_argument("--demo", action="store_true", help="simulated instrument, no hardware needed")
+    ap.add_argument("--system-font", action="store_true",
+                    help="keep the system fonts (Segoe UI / Consolas) instead of the bundled Inter / DejaVu Sans Mono")
     ap.add_argument("--demo-no-k70", action="store_true",
                     help="with --demo: simulate an FSW without K70 (I/Q Analyzer + software demodulation)")
     args = ap.parse_args()
@@ -3037,6 +3039,12 @@ def main():
     set_windows_app_id()
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    if not args.system_font:
+        try:
+            import ui_fonts
+            ui_fonts.install(app)                     # bundled Inter + DejaVu Sans Mono: same look as on Linux
+        except Exception:
+            pass
     icon = QtGui.QIcon(resource_path(ICON_FILE))
     if not icon.isNull():
         app.setWindowIcon(icon)           # title bar, taskbar, Alt+Tab, all dialogs

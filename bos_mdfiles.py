@@ -19,6 +19,15 @@ import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
+def _mono_font():
+    """Bundled DejaVu Sans Mono (ui_fonts), else the system fixed font."""
+    try:
+        import ui_fonts
+        return ui_fonts.mono()
+    except Exception:
+        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+
 import bos_protocol as bp
 
 try:
@@ -256,7 +265,7 @@ def md_frames(md, data, sender, ack=True):
 
 # ---------------------------------------------------------------- editor widget
 def _mono():
-    return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+    return _mono_font()
 
 
 class ValueEdit(QtWidgets.QWidget):

@@ -454,7 +454,7 @@ class StepDialog(QtWidgets.QDialog):
         self.info = QtWidgets.QLabel()
         self.info.setWordWrap(True)
         self.frame = QtWidgets.QLabel()
-        self.frame.setStyleSheet("font-family:Consolas,'DejaVu Sans Mono',monospace;")
+        self.frame.setStyleSheet("font-family:'DejaVu Sans Mono',Consolas,monospace;")
         self.frame.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self.form.addRow("Command", self.cmd)
         self.form.addRow("Preset", self.preset)
@@ -759,7 +759,7 @@ class CmdDialog(QtWidgets.QDialog):
         if d.get("encoder") == "session" or code in (0x0C,):
             f.addRow(QtWidgets.QLabel("The test changes this command's data while it runs (mode, attenuation, "
                                       "frequency); ticked fields are fixed for every time it is sent."))
-        mono = "font-family:Consolas,'DejaVu Sans Mono',monospace;"
+        mono = "font-family:'DejaVu Sans Mono',Consolas,monospace;"
         self.f0 = QtWidgets.QLabel(f"[{len(self.data0)}] {self.data0.hex(' ').upper() or '—'}")
         self.f1 = QtWidgets.QLabel()
         for lab in (self.f0, self.f1):
