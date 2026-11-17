@@ -1109,7 +1109,7 @@ def diagnose(res: dict, tlm: dict, cfg: dict, lim: dict) -> list[Finding]:
     for key, r in mods.items():
         mod = r["expected"]
         det = r.get("detected")
-        mdet = r["mer_by_mod"].get(det) if det else None
+        mdet = r.get("mer_by_mod", {}).get(det) if det else None
         if det and det != mod and _finite(mdet) and mdet >= 15 and mdet > (r.get("mer") or 0) + 3:
             if mod in ("OQPSK", "QPSK") and det == "BPSK":
                 F.append(Finding("fail", f"Only the I rail carries data ({mod} expected, BPSK-like signal)",

@@ -2553,6 +2553,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not on:
             self.run_btn.setChecked(False)
             self.idn_label.setText("not connected")
+            self.idn_label.setStyleSheet("color:#8a96a3;font-size:11px;")
 
     def _resource(self) -> str:
         addr = self.ip_edit.text().strip()
@@ -2812,8 +2813,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_connected(True)
             self.connect_btn.setEnabled(True)
             k70 = getattr(result, "k70", True)
-            self.idn_label.setText(f"{result.idn}\nChannel: {result.channel}"
+            self.idn_label.setText(f"✓ {result.idn}\nChannel: {result.channel}"
                                    + ("" if k70 else "\nNo FSW-K70: constellation from the I/Q Analyzer"))
+            self.idn_label.setStyleSheet("color:#4fd18b;font-size:11px;")
             self.logmsg(f"Connected: {result.idn}", "ok")
             if getattr(result, "options", ""):
                 self.logmsg(f"FSW options: {result.options}")

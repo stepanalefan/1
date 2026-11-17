@@ -1279,8 +1279,9 @@ class SnifferWindow(QtWidgets.QMainWindow):
             except OSError:
                 pass
             n = self.store.migrated
-            QtCore.QTimer.singleShot(0, lambda: self.logmsg(f"{n} BOS command(s) in the library changed to sender "
-                                                            f"0x21 (IDs 0x0629… → 0x0869…)", "warn"))
+            QtCore.QTimer.singleShot(0, lambda: self.logmsg(f"{n} BOS command(s) in the library re-addressed: sender 0x21 "
+                                                            f"(0x0629… → 0x0869…), target designation 0x070D200C",
+                                                            "warn"))
         self.cmd_panel = CommandPanel(self.store, self)
         self.script_panel = ScriptPanel(self.store, self.cmd_panel, self)
         left = QtWidgets.QSplitter(QtCore.Qt.Vertical)

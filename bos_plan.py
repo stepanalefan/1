@@ -180,7 +180,7 @@ def session(st, mode, att):
         par.append(L(f"{cnt} КБД, turbo coding", f"{cnt} КБД, турбокод"))
     par.append(L("continuous", "непрерывно"))
     life = bp.session_seconds(code, cnt, rate_k)
-    need = float(st.ctl.get("sr_min_s", 30) or 0)
+    need = float(st.ctl.get("sr_min_s", 10) or 0)
     sub = [Step("info", fr), _ack(st)]
     if life is not None:
         if need and life < need:
@@ -472,8 +472,9 @@ def t_mod(mod):
         out = set_mode(st, m, state["att"], demo)
         state["mode"] = m
         out += keep_session_note(st)
-        out += _mod_steps(st, mod, demo)
-        if mod == "OQPSK" and st.cfg.get("oqpsk_rrc", True):
+        if not getattr(st, "_desc_k70_only", False):
+            out += _mod_steps(st, mod, demo)
+        if mod == "OQPSK" and st.cfg.get("oqpsk_rrc", True) and not getattr(st, "_desc_k70_only", False):
             sr, a, bw = st.cfg.get("sr_oqpsk", 131.072e6), st.cfg.get("alpha", 0.25), st.cfg.get("fsw_bw")
             sub = [Step("pc", L("α from the 75 / 50 / 25 % power crossings of the raised cosine (α = 6·Δf / sr) and "
                                 "from the receive RRC with the best MER - Roll-off tab",
@@ -771,7 +772,9 @@ def _describe(st, plan, bs):
     out.append(("", L("Before the plan", "Перед планом"), prep, None))
     state = {"mode": None, "att": int(st.cfg.get("att_code", 0))}
     st._desc_cmds = opts.get("cmds", {})
-    st._desc_k70 = bool(opts.get("k70", False))
+    fm = st.plan_fsw_mode(opts) if hasattr(st, "plan_fsw_mode") else ("both" if opts.get("k70") else "iq")
+    st._desc_k70 = fm in ("k70", "both")
+    st._desc_k70_only = fm == "k70"
     for t, ix in zip(tests, idx):
         st._desc_tid = None if bs.is_step(t) else t
         if bs.is_step(t):

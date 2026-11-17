@@ -401,7 +401,7 @@ BOS setup*: NOP, standby, SET_Time_SNR (default 255 s), telemetry periods (ИО�
 transmits with a valid designation (valid 3 s) — and re-starts the session before captures so Time_SNR never ends
 it. At the end the unit is put back into standby.
 The station sends as **ВМ 2 (sender 0x21)**: command IDs to the BOS are `0x0869xxxx` (e.g. MODE_D
-`0x08690001`), target designation `0x084Dxxxx`, acknowledgements come back as `0x0A61xxxx`. If the BOS answers КВ-,
+`0x08690001`), target designation Angle_ErdStation_BKU always from БИОС 1.1 (sender 0x1C) = `0x070D200C`, acknowledgements come back as `0x0A61xxxx`. If the BOS answers КВ-,
 the sender address may not be allowed for that command: choose another sender (ВМ 1 0x20, КПА ИВУ 0x18) on the
 Unit control page / in Control KTR. Settings and CAN-library BOS commands saved with the old default 0x18 are
 switched to 0x21 once, at the first start of this version (the log says so). The alternatives *CAN library* and *Ask the operator* remain for special set-ups.
@@ -449,15 +449,30 @@ Software demodulation: the measurement table shows *Demodulation filter (softwar
 option below the K70 Tx filter (RRC, α) and the measurement filter (auto = matched) are set, read back and checked
 (*FSW-K70 filter (read back)*, PASS / FAIL). The Spectrum Analyzer tab's defaults are now RRC α = 0.25 as well.
 
-### Can a plan use the FSW-K70?
-Plan editor → **FSW-K70: Also measure BPSK / OQPSK with the FSW-K70 (VSA) when it is installed** (on by default in
-*Modulation only*). After the software analysis of each modulation test the K70 measures the same signal: modulation,
-symbol rate, filters set and read back, then K70 MER, EVM, frequency / symbol rate error, I/Q offset, gain imbalance
-and quadrature error are listed next to the software values (limits as for the software values). Without K70 the
-step is a SKIP row.
+### How is the modulation measured - I/Q recording or FSW-K70?
+Unit control → **Modulation measured by**: *I/Q recording + software analysis* (raw I/Q from the FSW I/Q Analyzer,
+all station diagnostics: I/Q errors, skew, roll-off, spectrum, decoding, findings), *FSW-K70 (VSA)* (the
+analyzer's own demodulation: MER, EVM, frequency / symbol rate error, I/Q offset, gain imbalance, quadrature - with
+limits; no deeper diagnostics) or *both* side by side. Without K70 the I/Q recording is used (SKIP row). In the plan
+editor each plan can follow this setting or choose its own (*Modulation only*: both). With K70 the Tx filter (RRC,
+α) and the measurement filter are set, read back and checked.
+
+### The analyzer lags during the tests - what helps?
+Every capture logs its times: `capture OQPSK (…): setup 0.05 s, level 0.62 s, acquire 0.01 s, transfer 0.08 s,
+analysis 0.9 s - longest: …`, and the end of a plan sums them up. What was done:
+* **auto level once per signal** (Unit control → FSW level): ADJ:LEV is a measurement of its own and ran before
+  every capture; now it runs at the first capture of a mode / attenuation / frequency and the reference level is
+  reused;
+* **FSW screen off during plans** (Unit control): the FSW stops redrawing while it is remote-controlled (big
+  saving with long records), restored at the end;
+* roll-off estimation in Live diagnose only every 5th capture.
+The recording itself ("exposure") is short for ШР (32 000 symbols ≈ 0.25 ms), but long for УР with decoding:
+64 000 symbols at 64 ksym/s = 1 s of signal per capture - untick *Decode УР data* on the Unit / signal page when
+the data are not needed, or lower *Symbols per capture*. If *transfer* is the longest, use LAN (HiSLIP) rather than
+USB / VXI-11; if *analysis*, switch the measurement to FSW-K70.
 
 ### Sessions end too early - how long does a session last?
-Unit control → **Minimum session duration** (default 30 s, also a per-plan parameter). Every session command is
+Unit control → **Minimum session duration** (default 10 s, also a per-plan parameter). Every session command is
 sent with the largest count (2047), SET_Time_SNR is raised to at least this time, and the station estimates how
 long the session really lasts: carrier = count in s; УР КБД = 2047 × 10232 bit at the УР rate; ШР КБД = 2047 ×
 17912 bit (+ preambles) at the ШР rate - 36 s at 1024 kbit/s; ШР preambles = 2047 × 128 bit - only 2 s at

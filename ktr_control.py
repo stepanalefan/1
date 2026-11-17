@@ -635,8 +635,6 @@ class KtrControl(QtWidgets.QWidget):
         code = s["code"]
         name = bp.COMMANDS.get(code, (f"0x{code:02X}",))[0]
         st = self._station()
-        if st is not None and st.running:
-            return done({"ok": False, "text": f"{name}: not sent - the BOS Test Station is running a plan"})
         try:
             data = bp.encode(code, s.get("params", {}))
         except (ValueError, KeyError) as e:
@@ -904,8 +902,7 @@ class KtrControl(QtWidgets.QWidget):
             start = rows[0] if rows else 0
         st = self._station()
         if st is not None and st.running:
-            self.result("the BOS Test Station is running a plan - wait until it ends", False)
-            return
+            self.result("note: the BOS Test Station is running a plan - the queue commands go out in between", None)
         self.run_steps = copy.deepcopy(self.steps)
         self.pc, self.stack, self.pending, self.wait_until, self.n_err = start, [], None, 0.0, 0
         self.running = True

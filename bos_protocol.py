@@ -80,7 +80,11 @@ def cmd_id(code: int, sender: int, receiver: int = BOS, ack: bool = True, has_da
 
 
 def command(code: int, sender: int, data: bytes = b"", ack: bool = True, receiver: int = BOS):
-    """(can_id, data) of a command frame. Commands with parameters always carry 8 bytes."""
+    """(can_id, data) of a command frame. Commands with parameters always carry 8 bytes. A command with a fixed
+    sender in the library (Angle_ErdStation_BKU: 0x1C БИОС 1.1 -> 0x070D200C) always uses it."""
+    fixed = fixed_sender(code)
+    if fixed is not None:
+        sender = fixed
     n = COMMANDS.get(code, ("", 8, ""))[1]
     payload = (bytes(data) + bytes(8))[:8] if n else b""
     return cmd_id(code, sender, receiver, ack, bool(n)), payload
@@ -448,6 +452,12 @@ def decode(name_or_code, data: bytes) -> dict:
             v = r
         out[f["name"]] = v
     return out
+
+
+def fixed_sender(code: int):
+    """Sender address the document / bench fixes for this command (bos_commands_0102.json "sender"), or None."""
+    v = DEFS.get(code, {}).get("sender")
+    return int(v, 0) if isinstance(v, str) else v
 
 
 def receiver_of(code: int) -> int:

@@ -244,24 +244,38 @@ def fmt(v, spec="{:.2f}"):
 #  FSW capture (runs in the FSW worker thread)                                 #
 # --------------------------------------------------------------------------- #
 def fsw_capture(dev, center, fs, n, autolevel=True, ref_level=0.0):
-    """Raw I/Q from the FSW I/Q Analyzer. Only commands already verified in fsw_vsa_monitor.py."""
+    """Raw I/Q from the FSW I/Q Analyzer. Only commands already verified in fsw_vsa_monitor.py.
+    autolevel: True = ADJ:LEV before the capture (a measurement of its own), False = ref_level is set.
+    dev.last_timing: seconds of set-up / level / acquisition / transfer; dev.last_ref_level after ADJ:LEV."""
+    t = {}
+    t0 = time.perf_counter()
     dev.select_app("iq")
     dev.write(f"FREQ:CENT {center:.12g}")
     dev.write(f"TRAC:IQ:SRAT {fs:.10g}")
     dev.write(f"TRAC:IQ:RLEN {int(n)}")
+    dev.query("*OPC?")
+    t["setup"] = time.perf_counter() - t0
+    t1 = time.perf_counter()
     if autolevel:
         dev.write("ADJ:LEV")
         dev.query("*OPC?")
+        dev.last_ref_level = dev._qf("DISP:WIND:TRAC:Y:SCAL:RLEV?")
     else:
         dev.write(f"DISP:WIND:TRAC:Y:SCAL:RLEV {ref_level:.4g}")
-    dev.query("*OPC?")
+        dev.query("*OPC?")
+    t["level"] = time.perf_counter() - t1
     errs = dev.errors()
     fs_real = dev._qf("TRAC:IQ:SRAT?") or fs
     dev.iq_fs = fs_real
+    t2 = time.perf_counter()
     dev.write("*CLS;:INIT:IMM;*OPC")
     dev._wait_sweep(lambda: False)
+    t["acquire"] = time.perf_counter() - t2
+    t3 = time.perf_counter()
     raw = np.asarray(dev.inst.query_binary_values("TRAC:IQ:DATA:MEM?", datatype="f", is_big_endian=False,
                                                   container=np.array), dtype=np.float64)
+    t["transfer"] = time.perf_counter() - t3
+    dev.last_timing = t
     m = raw.size // 2 * 2
     return raw[0:m:2] + 1j * raw[1:m:2], fs_real, errs
 
@@ -896,7 +910,7 @@ class BosStation(QtWidgets.QWidget):
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
                      "ctl": {"method": "protocol", "sender": bp.SENDER_DEFAULT, "line": "BOS CAN1", "line2": "BOS CAN2",
                              "can_check": True, "can1_only": False, "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
-                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True, "sr_min_s": 30,
+                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True, "sr_min_s": 10,
                              "tm_enable": True,
                              "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS CAN1",
                              "settle_ms": 1500, "prompt": True,
@@ -904,7 +918,7 @@ class BosStation(QtWidgets.QWidget):
                              "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
                              "ref_wait_s": 30},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
-                     "plan_opts": {"Modulation only": {"k70": True}},   # plan -> {"prep", "ctl", "cmds", "k70"}
+                     "plan_opts": {"Modulation only": {"fsw_mode": "both"}},   # plan -> {"prep", "ctl", "cmds", "k70"}
                      "unit": {"serial": "", "operator": ""}}
         try:
             with open(STORE_FILE, encoding="utf-8") as fh:
@@ -920,8 +934,9 @@ class BosStation(QtWidgets.QWidget):
                 if not d.get("k70_ver"):                      # K70 measurement on in "Modulation only" by default
                     po = d.setdefault("plan_opts", {})
                     if "Modulation only" in self.data["plans"]:
-                        po.setdefault("Modulation only", {}).setdefault("k70", True)
+                        po.setdefault("Modulation only", {}).setdefault("fsw_mode", "both")
             self.data["plan_opts"] = {k: v for k, v in d.get("plan_opts", {}).items() if k in self.data["plans"]}
+            self.data["srmin_ver"] = d.get("srmin_ver", 1)
             for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
                 if self.data["ctl"].get(k) in ("BOS", "AFAR", "UPNG"):
                     self.data["ctl"][k] += " CAN1"
@@ -937,6 +952,9 @@ class BosStation(QtWidgets.QWidget):
             self.data["ctl"]["sender"] = bp.SENDER_DEFAULT        # sender 0x18 -> 0x21 (IDs 0x0629… -> 0x0869…)
             QtCore.QTimer.singleShot(0, lambda: self.log("BOS station: sender address changed 0x18 → 0x21 (ВМ 2): "
                                                          "commands now use IDs 0x0869xxxx", "warn"))
+        if self.data.get("srmin_ver", 1) < 2 and self.data["ctl"].get("sr_min_s") == 30:
+            self.data["ctl"]["sr_min_s"] = 10                # 30 s was too long: 10 s minimum session
+        self.data["srmin_ver"] = 2
         self.data["sender_ver"] = 2
         self.data["k70_ver"] = 1
         self.data["lim_ver"] = 2
@@ -977,6 +995,10 @@ class BosStation(QtWidgets.QWidget):
         self.wait_timer = QtCore.QTimer(self, singleShot=True, timeout=lambda: self._advance(None))
         self.ka_timer = QtCore.QTimer(self, interval=500, timeout=self._keepalive)
         self.ka_timer.start()
+        self._op, self._op_hist = None, {}
+        self._lvl_cache, self._timing_log = {}, []
+        self.op_timer = QtCore.QTimer(self, interval=250, timeout=self._op_show)
+        self.op_timer.start()
 
     # ================================================================ build
     def _build(self):
@@ -1212,7 +1234,7 @@ class BosStation(QtWidgets.QWidget):
         self.p_srmin.setRange(0, 3600)
         self.p_srmin.setSuffix(" s")
         self.p_srmin.setSpecialValueText("as the command gives")
-        self.p_srmin.setValue(int(self.ctl.get("sr_min_s", 30)))
+        self.p_srmin.setValue(int(self.ctl.get("sr_min_s", 10)))
         self.p_srmin.setToolTip("Every session the station starts stays on at least this long: the largest count is "
                                 "sent, Time_SNR is raised to it,\nand when the command itself ends earlier (ШР at high "
                                 "rates, preambles) the station re-issues it before the end -\nnever during a capture.")
@@ -1242,6 +1264,30 @@ class BosStation(QtWidgets.QWidget):
         f.addRow("ШР (OQPSK) rate", self.p_rate_shr)
         f.addRow("Session limit", self.p_tsnr)
         f.addRow("Minimum session duration", self.p_srmin)
+        self.p_fswmode = QtWidgets.QComboBox()
+        for k, t in (("iq", "I/Q recording + software analysis (all diagnostics)"), ("k70", "FSW-K70 (VSA)"),
+                     ("both", "Both: I/Q recording and FSW-K70 side by side")):
+            self.p_fswmode.addItem(t, k)
+        self.p_fswmode.setCurrentIndex(max(0, self.p_fswmode.findData(self.ctl.get("fsw_mode", "iq"))))
+        self.p_fswmode.setToolTip("How the BPSK / OQPSK tests measure the modulation. I/Q recording: raw I/Q from the "
+                                  "FSW I/Q Analyzer,\nanalysed by the station (MER, EVM, I/Q errors, skew, roll-off, "
+                                  "spectrum, decoding, diagnosis).\nFSW-K70: the analyzer's own VSA demodulation (MER, "
+                                  "EVM, errors, I/Q offset, gain imbalance, quadrature) -\nfaster, but no deeper "
+                                  "diagnostics. Without K70 the I/Q recording is used. A plan can override it.")
+        f.addRow("Modulation measured by", self.p_fswmode)
+        self.p_level = QtWidgets.QComboBox()
+        for k, t in (("once", "Auto level once per signal (faster)"), ("every", "Auto level before every capture")):
+            self.p_level.addItem(t, k)
+        self.p_level.setCurrentIndex(max(0, self.p_level.findData(self.ctl.get("level_mode", "once"))))
+        self.p_level.setToolTip("ADJ:LEV is a measurement of its own. 'Once': done at the first capture of a signal "
+                                "(mode, attenuation, frequency, sample rate) and the reference level reused.")
+        f.addRow("FSW level", self.p_level)
+        self.p_disp = QtWidgets.QCheckBox("Switch the FSW screen off during plans (faster captures)")
+        self.p_disp.setChecked(bool(self.ctl.get("fsw_disp_off", True)))
+        f.addRow(self.p_disp)
+        for wd in (self.p_fswmode, self.p_level):
+            wd.currentIndexChanged.connect(lambda *_: self._collect())
+        self.p_disp.toggled.connect(lambda *_: self._collect())
         f.addRow(self.p_keep)
         f.addRow(self.p_tm)
         hb = QtWidgets.QHBoxLayout()
@@ -1896,6 +1942,8 @@ class BosStation(QtWidgets.QWidget):
                             bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
                             rate_ur=self.p_rate_ur.currentData(), rate_shr=self.p_rate_shr.currentData(),
                             time_snr=self.p_tsnr.value(), sr_min_s=self.p_srmin.value(),
+                            fsw_mode=self.p_fswmode.currentData(), level_mode=self.p_level.currentData(),
+                            fsw_disp_off=self.p_disp.isChecked(),
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
             self._sync_carrier()
         if hasattr(self, "r_wait"):
@@ -1969,6 +2017,11 @@ class BosStation(QtWidgets.QWidget):
             if ctl.get("bpsk_cmd", 0xA1) == 0xA1:
                 c["sr_bpsk"] = 2e3 * bp.RATES[int(ctl.get("rate_ur", 2))]
         return c
+
+    def plan_fsw_mode(self, opts) -> str:
+        """iq / k70 / both for a plan: its own choice (old option k70 = both), else the Unit control setting."""
+        m = (opts or {}).get("fsw_mode") or ("both" if (opts or {}).get("k70") else "")
+        return m or self.data["ctl"].get("fsw_mode", "iq")
 
     def plan_ctl(self, plan=None) -> dict:
         """Station settings with the plan's own parameters applied (the stored settings are not changed)."""
@@ -2338,6 +2391,7 @@ class BosStation(QtWidgets.QWidget):
         self._ref_failed = False
         self._gate_rows = set()
         self._tsnr_set, self._sr_life, self._sr_cmd, self._sr_warned = None, None, None, {}
+        self._lvl_cache, self._timing_log = {}, []
         if need_fsw and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
@@ -2348,7 +2402,7 @@ class BosStation(QtWidgets.QWidget):
             return
         self._collect()
         self._plan_over = dict(opts.get("ctl", {}))
-        self._plan_k70 = bool(opts.get("k70", False))
+        self._fsw_mode = self.plan_fsw_mode(opts)
         self._plan_cmds_run = json.loads(json.dumps(opts.get("cmds", {})))
         self._ctl_logged = set()
         self._skip_pending = None
@@ -2370,6 +2424,13 @@ class BosStation(QtWidgets.QWidget):
         if need_fsw:
             self._auto_bandwidth()
         self.live_mode = tests == ["live"]
+        self._disp_restore = None
+        if need_fsw and self.ctl.get("fsw_disp_off", True) and getattr(self.host, "connected", False):
+            dev = getattr(self.host.worker, "dev", None)
+            if dev is not None and hasattr(dev, "set_display_update"):
+                self.host.worker.submit("display", lambda: dev.set_display_update(False))
+                self._disp_restore = bool(getattr(self.host, "disp_upd", None) and self.host.disp_upd.isChecked())
+                self.log("BOS station: FSW screen update off during the plan (faster remote captures)", "info")
         if need_fsw and hasattr(self.host, "run_btn") and self.host.run_btn.isChecked():
             self.host.run_btn.setChecked(False)          # stop the live FSW view while testing
         self.res, self.rows, self.findings = {}, [], []
@@ -2437,6 +2498,7 @@ class BosStation(QtWidgets.QWidget):
 
     def _advance(self, value):
         """Resume the plan generator with the result of the last request."""
+        self._op_end()
         self.pending = None
         if not self.running:
             return
@@ -2457,8 +2519,41 @@ class BosStation(QtWidgets.QWidget):
             return
         self._handle(req)
 
+    # ---- progress of the current step (status line): elapsed time against the duration it took last time
+    def _op_start(self, kind, expected=None):
+        base = self.step_lbl.text().split("  ⏳")[0]
+        key = (kind, base.split(":")[-1].split("(")[0].strip()[:60])
+        if expected is None:
+            expected = self._op_hist.get(key)
+        self._op = {"t0": time.monotonic(), "base": base, "key": key, "exp": expected}
+        self._op_show()
+
+    def _op_end(self):
+        op = getattr(self, "_op", None)
+        if op:
+            d = time.monotonic() - op["t0"]
+            old = self._op_hist.get(op["key"])
+            self._op_hist[op["key"]] = d if old is None else 0.5 * old + 0.5 * d
+        self._op = None
+
+    def _op_show(self):
+        op = getattr(self, "_op", None)
+        if not op or not self.running:
+            return
+        el = time.monotonic() - op["t0"]
+        if el < 0.4:                                        # short steps: no flicker
+            return
+        exp = op["exp"]
+        if exp and exp > 0.5:
+            pct = min(99, int(100 * el / exp))
+            txt = f"  ⏳ {pct} % · {el:.1f} / {exp:.1f} s" + ("  (longer than last time)" if el > 1.3 * exp else "")
+        else:
+            txt = f"  ⏳ {el:.1f} s"
+        self.step_lbl.setText(op["base"] + txt)
+
     def _handle(self, req):
         kind = req[0]
+        self._op_start(kind, req[1] if kind == "sleep" else None)
         if kind == "sleep":
             self.pending = "sleep"
             self.wait_timer.start(max(1, int(req[1] * 1000)))
@@ -2867,7 +2962,7 @@ class BosStation(QtWidgets.QWidget):
         rem = self._sr_remaining() if self.running and self.ctl.get("method") == "protocol" else None
         if rem is not None and rem < min(1.5, 0.5 * self._sr_life) and self.pending != "fsw" and \
                 not getattr(self, "_in_session", False) and getattr(self, "_sr_cmd", None) and \
-                float(self.ctl.get("sr_min_s", 30) or 0) > 0:
+                float(self.ctl.get("sr_min_s", 10) or 0) > 0:
             self._sr_reissue()                              # session would end: start it again (not mid-capture)
 
     def _proto(self, code, data=b"", what="", line=None, expect_neg=False):
@@ -2937,7 +3032,7 @@ class BosStation(QtWidgets.QWidget):
         life = bp.session_seconds(code, 2047, rate)
         tsnr = self._time_snr_now()
         self._sr_life = min(x for x in (life, tsnr, 1e9) if x)
-        need = float(self.ctl.get("sr_min_s", 30) or 0)
+        need = float(self.ctl.get("sr_min_s", 10) or 0)
         if need and self._sr_life < need and not getattr(self, "_sr_warned", {}).get(code):
             self._sr_warned = {**getattr(self, "_sr_warned", {}), code: True}
             why = f"Time_SNR {tsnr:.0f} s" if tsnr and (life is None or tsnr <= life) else \
@@ -2949,7 +3044,7 @@ class BosStation(QtWidgets.QWidget):
         """SET_Time_SNR value to send: the configured one, raised to the minimum session duration (max 255 s);
         0 = leave the unit's value."""
         ts = int(self.ctl.get("time_snr", 255))
-        need = int(math.ceil(float(self.ctl.get("sr_min_s", 30) or 0)))
+        need = int(math.ceil(float(self.ctl.get("sr_min_s", 10) or 0)))
         if ts and need > ts:
             self.log(f"BOS station: Time_SNR {ts} s raised to {min(255, need)} s (minimum session duration)", "info")
             ts = min(255, need)
@@ -3395,6 +3490,14 @@ class BosStation(QtWidgets.QWidget):
         cfg = dict(self.cfg)
         sim = self.sim
         demo = self._is_demo()
+        # auto level once per signal (mode, attenuation, frequency, rate): ADJ:LEV is a measurement of its own and
+        # made every capture slow; the reference level found is reused until the signal changes
+        lkey = (self.cur_mode, self.cur_att, round(center / 1e3), round(fs))
+        lvl_mode = self.ctl.get("level_mode", "once")
+        cached = self._lvl_cache.get(lkey) if lvl_mode == "once" else None
+        auto = cfg["autolevel"] and cached is None
+        ref = cached if cached is not None else cfg["ref_level"]
+        timing = {}
 
         def job():
             dev = self.host.worker.dev
@@ -3404,7 +3507,11 @@ class BosStation(QtWidgets.QWidget):
                 time.sleep(0.05)
                 x, fs_real, errs = sim.capture(center, fs, n, sr, filt), fs, []
             else:
-                x, fs_real, errs = fsw_capture(dev, center, fs, n, cfg["autolevel"], cfg["ref_level"])
+                x, fs_real, errs = fsw_capture(dev, center, fs, n, auto, ref)
+                timing.update(getattr(dev, "last_timing", {}))
+                if auto and cfg["autolevel"] and getattr(dev, "last_ref_level", None) is not None:
+                    timing["ref_level"] = dev.last_ref_level
+            ta = time.perf_counter()
             if cfg.get("save_iq"):
                 try:
                     os.makedirs(os.path.join(REPORT_DIR, "captures"), exist_ok=True)
@@ -3414,8 +3521,10 @@ class BosStation(QtWidgets.QWidget):
                 except Exception:
                     pass
             r = analyze(x, fs_real)
+            timing["analysis"] = time.perf_counter() - ta
             r["fsw_errors"] = errs
             r["t"] = time.time()
+            r["timing"] = dict(timing)
             return r
         rem = self._sr_remaining() if self.ctl.get("method") == "protocol" else None
         if rem is not None and rem < 5.0 + n / max(fs, 1.0):
@@ -3427,6 +3536,16 @@ class BosStation(QtWidgets.QWidget):
             raise _TestError(f"capture {label}: {r}")
         for e in r.get("fsw_errors") or []:
             self.log(f"BOS station: FSW: {e}", "warn")
+        tm = r.get("timing") or {}
+        if tm.get("ref_level") is not None:
+            self._lvl_cache[lkey] = tm["ref_level"]
+        if tm:
+            parts = [f"{k} {tm[k]:.2f} s" for k in ("setup", "level", "acquire", "transfer", "analysis") if k in tm]
+            slow = max((k for k in ("setup", "level", "acquire", "transfer", "analysis") if k in tm),
+                       key=lambda k: tm[k])
+            self.log(f"BOS station: capture {label} ({n:,} samples = {n / fs * 1e3:.1f} ms of signal): "
+                     + ", ".join(parts) + f" - longest: {slow}", "info")
+            self._timing_log.append((label, n, fs, dict(tm)))
         return r
 
     def _mcfg(self, mod):
@@ -3573,6 +3692,19 @@ class BosStation(QtWidgets.QWidget):
     def _mod_test(self, mod):
         T = TEST_NAME[mod.lower()]
         yield from self._set_mode(mod.lower())
+        fmode = getattr(self, "_fsw_mode", "iq") if not self.live_mode else "iq"
+        dev = getattr(getattr(self.host, "worker", None), "dev", None)
+        if fmode in ("k70", "both") and not (dev is not None and getattr(dev, "k70", False)):
+            self._row(T, "FSW-K70 measurement", None, "", "", "SKIP",
+                      note="FSW-K70 not installed - I/Q recording + software analysis used")
+            fmode = "iq"
+        if fmode == "k70":
+            # K70 only: rows with limits from the K70 values; kept under k70_<mod> (the software diagnosis rules need
+            # the full I/Q analysis, so they are not fed with it)
+            yield from self._k70_measure(T, mod, None, main=True)
+            self._row(T, "Software diagnosis", None, "", "", "INFO",
+                      text="not done - modulation measured by the FSW-K70 only (Unit control / plan setting)")
+            return
         r = yield from self._mod_capture(mod)
         self.res[f"mod_{mod}"] = r
         ro = r.get("rolloff")
@@ -3580,7 +3712,7 @@ class BosStation(QtWidgets.QWidget):
             yield from self._rolloff_edges(mod, r)          # signal wider than the FSW band: measure each edge
         self._add_capture(mod, r)
         self._mod_rows(T, mod, r)
-        if getattr(self, "_plan_k70", False):
+        if fmode == "both":
             yield from self._k70_measure(T, mod, r)
 
     def _rolloff_edges(self, mod, r):
@@ -3607,7 +3739,7 @@ class BosStation(QtWidgets.QWidget):
             ro["basis"] = "spectrum, both edges captured off-centre (signal wider than the FSW bandwidth)"
             ro["edge_cut"] = False
 
-    def _k70_measure(self, T, mod, r_sw):
+    def _k70_measure(self, T, mod, r_sw, main=False):
         """The same signal measured by the FSW-K70 (VSA): its Tx / measurement filter set to the station's (RRC with
         the configured α for OQPSK, rectangular SP-L BPSK without Tx filter), read back and checked, then MER, EVM,
         errors compared with the software demodulation."""
@@ -3665,7 +3797,16 @@ class BosStation(QtWidgets.QWidget):
         self._row(T, "FSW-K70 modulation (read back)", None, "", mod, "PASS" if mod_rb.upper() == mod else "FAIL",
                   text=mod_rb or "?")
         L = self.lim
+        r_sw = r_sw or {}
         sw = lambda k, fmt="{:.2f}": (f"software {fmt.format(r_sw[k])}" if _fin(r_sw.get(k)) else "")
+        if main:                                              # K70 is the measurement: power and presence too
+            pw = res.get("power", float("nan"))
+            pw = pw + self.cfg.get("loss_db", 0.0) if _fin(pw) else pw
+            if self._is_demo():                               # the demo FSW's K70 does not see the simulated BOS
+                self._row(T, "Output power (K70)", pw, "dBm", "", "INFO", note="demo FSW: simulated K70 value")
+            else:
+                self._lim_row(T, "Output power (K70)", pw, "dBm", self.cfg["power_nom"] - self.lim["power_tol_db"],
+                              self.cfg["power_nom"] + self.lim["power_tol_db"])
         demo = " (demo FSW: simulated K70 values)" if self._is_demo() else ""
         self._lim_row(T, "K70 MER", res.get("mer", float("nan")), "dB", L["mer_min"], None, note=sw("mer") + demo)
         self._lim_row(T, "K70 EVM RMS", res.get("evm", float("nan")), "%", None, L["evm_max"], note=sw("evm"))
@@ -3681,6 +3822,16 @@ class BosStation(QtWidgets.QWidget):
             self._row(T, "K70 quadrature error", ex.get("qerr"), "°", "", "INFO", spec="{:+.2f}",
                       note=sw("quad_err", "{:+.2f}"))
         self.res[f"k70_{mod}"] = {**res, **ex}
+        if main:
+            pw = res.get("power", float("nan"))
+            return {"kind": "mod", "source": "K70", "expected": mod, "detected": mod,
+                    "present": _fin(res.get("mer")), "mer": res.get("mer", float("nan")),
+                    "evm": res.get("evm", float("nan")), "cfe": res.get("cfe", float("nan")),
+                    "srerr": res.get("srerr", float("nan")), "offset_dbc": res.get("iqoff", float("nan")),
+                    "iqoff": res.get("iqoff", float("nan")),
+                    "gain_imb": ex.get("gimb", float("nan")) if mod != "BPSK" else float("nan"),
+                    "quad_err": ex.get("qerr", float("nan")) if mod != "BPSK" else float("nan"),
+                    "power": pw + self.cfg.get("loss_db", 0.0) if _fin(pw) else pw}
 
     def _mod_rows(self, T, mod, r):
         L = self.lim
@@ -4185,6 +4336,7 @@ class BosStation(QtWidgets.QWidget):
             yield from self._set_mode(mod.lower())
         while not self.abort_flag:
             n += 1
+            self._live_n = n
             self.step_lbl.setText(f"Live diagnose ({mod}), capture {n}")
             if mod == "CW":
                 c = self.cfg
@@ -4445,6 +4597,21 @@ class BosStation(QtWidgets.QWidget):
 
     def _finish2(self, verdict, summary):
         self.pending = None
+        if getattr(self, "_disp_restore", None) is not None and getattr(self.host, "connected", False):
+            dev, on = getattr(self.host.worker, "dev", None), self._disp_restore
+            if dev is not None and hasattr(dev, "set_display_update"):
+                self.host.worker.submit("display", lambda: dev.set_display_update(on))
+            self._disp_restore = None
+        if getattr(self, "_timing_log", None):
+            tot = {}
+            for _, _, _, tm in self._timing_log:
+                for k, v in tm.items():
+                    if k != "ref_level":
+                        tot[k] = tot.get(k, 0.0) + v
+            if tot:
+                self.log("BOS station: FSW time in this run - " + ", ".join(f"{k} {v:.1f} s" for k, v in
+                                                                        sorted(tot.items(), key=lambda kv: -kv[1])),
+                         "info")
         if self.ctl.get("method") == "protocol" and self.cur_mode not in (None, "rf_off"):
             self.cur_test = "end"
             self._send_now(0x01)                            # leave the unit in standby, RF off

@@ -78,7 +78,7 @@ class RolloffPanel(QtWidgets.QWidget):
             h.addWidget(self.p_mer, 2)
             v.addLayout(h, 1)
         bt = QtWidgets.QHBoxLayout()
-        self.live = QtWidgets.QCheckBox("Estimate during Live diagnose (≈ 1 s per capture)")
+        self.live = QtWidgets.QCheckBox("Estimate during Live diagnose (every 5th capture, ≈ 1 s each)")
         self.live.setChecked(bool(st.data.get("rolloff_live", True)))
         self.live.toggled.connect(lambda on: (st.data.__setitem__("rolloff_live", on), st.save()))
         self.navg = QtWidgets.QSpinBox()
@@ -119,7 +119,10 @@ class RolloffPanel(QtWidgets.QWidget):
 
     def wanted(self) -> bool:
         """Estimate in this capture? Always in plans, in Live diagnose when ticked."""
-        return (not self.st.live_mode) or self.live.isChecked()
+        if not self.st.live_mode:
+            return True
+        # live: every 5th capture only - the estimate costs ≈ 1 s and would slow every capture
+        return self.live.isChecked() and getattr(self.st, "_live_n", 1) % 5 == 1
 
     def show_result(self, res):
         r = (res or {}).get("mod_OQPSK") or {}
