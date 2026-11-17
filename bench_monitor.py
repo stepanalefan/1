@@ -650,6 +650,7 @@ class BenchTab(QtCore.QObject):
         self.hmp_conn_btn = QtWidgets.QPushButton("Connect")
         self.hmp_conn_btn.clicked.connect(self.on_hmp_connect)
         self.hmp_status = QtWidgets.QLabel("not connected")
+        QtCore.QTimer.singleShot(0, self._restore_hmp_addr)
         self.hmp_status.setWordWrap(True)
         f.addRow("Address", self.hmp_addr)
         f.addRow(self.hmp_conn_btn)
@@ -815,6 +816,14 @@ class BenchTab(QtCore.QObject):
         self._hmp_next_log = 0.0
 
     # ---------------------------------------------------------------- actions
+    def _restore_hmp_addr(self):
+        try:
+            import device_addresses as da
+            st = da.load("HMP4040")
+            da.fill_combo(self.hmp_addr, "HMP4040", st.get("addr", ""))
+        except Exception:
+            pass
+
     def on_hmp_connect(self):
         if self._hmp_ok:
             self.hmp.submit(self.hmp.disconnect_dev)
@@ -826,6 +835,7 @@ class BenchTab(QtCore.QObject):
             return
         self.hmp_status.setText("connecting…")
         self.hmp_conn_btn.setEnabled(False)
+        self._hmp_addr_pending = None if demo else {"addr": addr}
 
         def job():
             try:
@@ -863,6 +873,10 @@ class BenchTab(QtCore.QObject):
         self._set_hmp_connected(ok)
         if ok:
             self.hmp_status.setText(f"✓ {info}")
+            if getattr(self, "_hmp_addr_pending", None):
+                import device_addresses as da
+                da.save("HMP4040", self._hmp_addr_pending)
+                da.fill_combo(self.hmp_addr, "HMP4040", self._hmp_addr_pending["addr"])
             self.log.emit(f"HMP4040 connected: {info}", "ok")
         else:
             if info == "error":

@@ -578,6 +578,7 @@ class IT6800Tab(QtCore.QObject):
         self.conn_btn.clicked.connect(self.on_connect)
         self.status_lbl = QtWidgets.QLabel("not connected")
         self.status_lbl.setWordWrap(True)
+        QtCore.QTimer.singleShot(0, self._restore_addr)
         f.addRow("Model", self.model_cb)
         f.addRow("Port", prow)
         f.addRow("Baud rate", self.baud)
@@ -752,6 +753,8 @@ class IT6800Tab(QtCore.QObject):
             return
         args = (demo, port, self.baud.currentData(), self.addr_sp.value(), self.proto.currentData(),
                 self.ard.isChecked())
+        self._addr_pending = None if demo else {"addr": port, "baud": args[2], "dev_addr": args[3], "proto": args[4],
+                                                "arduino": args[5], "model": self.model_cb.currentData()}
         self.status_lbl.setText("connecting…")
         self.conn_btn.setEnabled(False)
 
@@ -789,9 +792,32 @@ class IT6800Tab(QtCore.QObject):
         self._next_log = 0.0
 
     # --------------------------------------------------------------- callbacks
+    def _restore_addr(self):
+        try:
+            import device_addresses as da
+            st = da.load("IT6832")
+            if not st:
+                return
+            if st.get("model") and self.model_cb.findData(st["model"]) >= 0:
+                self.model_cb.setCurrentIndex(self.model_cb.findData(st["model"]))
+            da.fill_combo(self.port, "IT6832", st.get("addr", ""))
+            if self.baud.findData(st.get("baud")) >= 0:
+                self.baud.setCurrentIndex(self.baud.findData(st["baud"]))
+            if st.get("dev_addr") is not None:
+                self.addr_sp.setValue(int(st["dev_addr"]))
+            if self.proto.findData(st.get("proto")) >= 0:
+                self.proto.setCurrentIndex(self.proto.findData(st["proto"]))
+            if st.get("arduino") is not None:
+                self.ard.setChecked(bool(st["arduino"]))
+        except Exception:
+            pass
+
     def _on_connected(self, ok, info):
         self.conn_btn.setEnabled(True)
         self._set_connected(ok)
+        if ok and getattr(self, "_addr_pending", None):
+            import device_addresses as da
+            da.save("IT6832", self._addr_pending)
         if ok:
             self.status_lbl.setText(f"✓ {info}")
             self.log.emit(f"{self.model} connected: {info}", "ok")

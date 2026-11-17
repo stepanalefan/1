@@ -129,6 +129,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
 | `telemetry_ru.py` | Russian texts of the Telemetry tab (field descriptions, meanings, notes, MD editors) |
+| `device_addresses.py` | Remembers the instrument addresses (FSW, HMP4040, N6701C, IT6832, TFG6806) in `device_addresses.json` after each successful connection |
 | `ui_fonts.py`, `fonts/` | Bundled interface fonts Inter + DejaVu Sans Mono (free licences in `fonts/LICENSE-*.txt`), loaded at start-up; `--system-font` keeps Segoe UI / Consolas |
 | `bos_rolloff.py` | Roll-off tab: estimated RRC α of the signal (spectrum crossings, matched-filter MER), apply to the station / K70 |
 | `bos_dac_cal.py` | DAC38J82 QMC calibration from FSW measurements: guidance, auto-calibration in live diagnose (DAC calibration tab) |
@@ -150,5 +151,5 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `telemetry.py`, `log_viewer.py`, `help_tab.py` | Telemetry, Logs and Help tabs |
 | `build_exe.bat`, `rthook_visa.py` | Build `dist\KTR_TEST.exe` |
 
-Settings (`bos_station.json`, `dashboard.json`, `ktr_control.json`, `can_commands.json`, `can_lines.json`), reports
+Settings (`bos_station.json`, `dashboard.json`, `ktr_control.json`, `device_addresses.json`, `can_commands.json`, `can_lines.json`), reports
 (`bos_reports/`) and daily logs (`*_log_YYYY-MM-DD.csv`) are kept next to the program.

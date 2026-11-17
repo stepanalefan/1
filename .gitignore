@@ -22,3 +22,4 @@ bos_reports/
 ui_language.txt
 it68*_log_*.csv
 ktr_control.json
+device_addresses.json

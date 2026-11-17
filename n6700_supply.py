@@ -443,6 +443,7 @@ class N6700Tab(QtCore.QObject):
         self.conn_btn = QtWidgets.QPushButton("Connect")
         self.conn_btn.clicked.connect(self.on_connect)
         self.status_lbl = QtWidgets.QLabel("not connected")
+        QtCore.QTimer.singleShot(0, self._restore_addr)
         self.status_lbl.setWordWrap(True)
         f.addRow("Address", self.addr)
         f.addRow(self.conn_btn)
@@ -537,6 +538,7 @@ class N6700Tab(QtCore.QObject):
         if not demo and not addr:
             self.log.emit("Enter the N6701C address (IP or VISA string)", "warn")
             return
+        self._addr_pending = None if demo else {"addr": addr}
         self.status_lbl.setText("connecting…")
         self.conn_btn.setEnabled(False)
 
@@ -568,9 +570,21 @@ class N6700Tab(QtCore.QObject):
         self._next_log = 0.0
 
     # --------------------------------------------------------------- callbacks
+    def _restore_addr(self):
+        try:
+            import device_addresses as da
+            a = da.load("N6701C").get("addr")
+            if a and not self.addr.text().strip():
+                self.addr.setText(a)
+        except Exception:
+            pass
+
     def _on_connected(self, ok, info):
         self.conn_btn.setEnabled(True)
         self._set_connected(ok)
+        if ok and getattr(self, "_addr_pending", None):
+            import device_addresses as da
+            da.save("N6701C", self._addr_pending)
         if ok:
             dev = self.worker.dev
             self.channels = list(dev.channels)

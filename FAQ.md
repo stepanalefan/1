@@ -662,6 +662,13 @@ Yes: Main tab → *+ BOS test*. The step waits for the verdict and can stop the 
 
 ---
 
+### Do I have to type the instrument addresses every time?
+No. After every successful connection the address and its settings are written to `device_addresses.json` next to
+the program (FSW: address, protocol, timeout; HMP4040 and N6701C: address; IT6832: COM port, baud rate, device
+address, protocol, Arduino option, model; TFG6806: LAN / USB, IP, port, USB resource) and filled in at the next
+start - like `can_lines.json` for the CAN lines. Demo connections are not saved. The address lists (HMP4040 address,
+IT6832 COM port) also offer the last few addresses used. A `--ip` given on the command line still wins for the FSW.
+
 ## 7. CAN and telemetry
 
 ### How are the CAN lines set up? (two per unit)

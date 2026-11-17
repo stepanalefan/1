@@ -1540,6 +1540,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.failed.connect(self.on_failed)
         self.worker_thread.start()
 
+        try:                                                 # last successful connection (device_addresses.json)
+            import device_addresses as _da
+            _s = _da.load("FSW")
+            if _s.get("addr"):
+                self.ip_edit.setText(_s["addr"])
+            if _s.get("proto") in PROTOCOLS[:3]:
+                self.proto.setCurrentIndex(PROTOCOLS.index(_s["proto"]))
+            if _s.get("timeout"):
+                self.timeout_spin.setValue(int(_s["timeout"]))
+        except Exception:
+            pass
         if args.ip:
             self.ip_edit.setText(args.ip)
         if args.protocol:
@@ -2677,6 +2688,8 @@ class MainWindow(QtWidgets.QMainWindow):
         demo = self.proto.currentIndex() == 3
         res = None if demo else self._resource()
         tmo = self.timeout_spin.value() * 1000
+        self._addr_pending = None if demo else {"addr": self.ip_edit.text().strip(), "proto": self.proto.currentText(),
+                                                "timeout": self.timeout_spin.value()}
         self.connect_btn.setEnabled(False)
         self.logmsg("Starting DEMO (simulated FSW)…" if demo else f"Connecting to {res} …")
 
@@ -2817,6 +2830,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                    + ("" if k70 else "\nNo FSW-K70: constellation from the I/Q Analyzer"))
             self.idn_label.setStyleSheet("color:#4fd18b;font-size:11px;")
             self.logmsg(f"Connected: {result.idn}", "ok")
+            if getattr(self, "_addr_pending", None):
+                import device_addresses as _da
+                _da.save("FSW", self._addr_pending)
             if getattr(result, "options", ""):
                 self.logmsg(f"FSW options: {result.options}")
             self.on_display_update(self.disp_upd.isChecked())

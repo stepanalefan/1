@@ -1225,6 +1225,7 @@ class TfgTab(QtWidgets.QWidget):
         self.worker.after_connect = [self.f_couple._read_job, self.f_count._read_job, self.f_sys._read_job]
         self._set_enabled(False)
         self._iface_changed()
+        QtCore.QTimer.singleShot(0, self._restore_addr)
 
     @property
     def out_on(self) -> dict:
@@ -1483,10 +1484,32 @@ class TfgTab(QtWidgets.QWidget):
             return
         self.status.setText("connecting…")
         self.conn_btn.setEnabled(False)
+        self._addr_pending = None if demo else {"iface": iface, "addr": addr, "port": port,
+                                                "host": self.host.text().strip(), "usb": self.usb.currentText().strip()}
         self.worker.submit(lambda: self.worker.connect_dev(demo, iface, addr, port))
+
+    def _restore_addr(self):
+        try:
+            import device_addresses as da
+            st = da.load("TFG6806")
+            if not st:
+                return
+            if self.iface.findData(st.get("iface")) >= 0:
+                self.iface.setCurrentIndex(self.iface.findData(st["iface"]))
+            if st.get("host"):
+                self.host.setText(st["host"])
+            if st.get("port"):
+                self.port.setValue(int(st["port"]))
+            if st.get("usb"):
+                self.usb.setEditText(st["usb"])
+        except Exception:
+            pass
 
     def _on_connected(self, ok, info):
         self.conn_btn.setEnabled(True)
+        if ok and getattr(self, "_addr_pending", None):
+            import device_addresses as da
+            da.save("TFG6806", self._addr_pending)
         self.is_connected = ok
         self.idn = info if ok else ""
         self._set_enabled(ok)
