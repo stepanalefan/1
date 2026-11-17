@@ -1264,6 +1264,14 @@ class SnifferWindow(QtWidgets.QMainWindow):
 
         # left: command library + block scripts
         self.store = Store(os.path.join(script_dir(), "can_commands.json"))
+        if self.store.migrated:                          # sender 0x18 -> 0x21: keep the change
+            try:
+                self.store.save()
+            except OSError:
+                pass
+            n = self.store.migrated
+            QtCore.QTimer.singleShot(0, lambda: self.logmsg(f"{n} BOS command(s) in the library changed to sender "
+                                                            f"0x21 (IDs 0x0629… → 0x0869…)", "warn"))
         self.cmd_panel = CommandPanel(self.store, self)
         self.script_panel = ScriptPanel(self.store, self.cmd_panel, self)
         left = QtWidgets.QSplitter(QtCore.Qt.Vertical)

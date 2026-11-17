@@ -217,7 +217,7 @@ orange are executed only in standby (ДЖР).
 ### How do I send a command?
 Pick it: the editor shows its section, where it is executed, receiver, number of data bytes, notes, and **every
 data field** of the document (lists for coded values, ranges, units; time fields take `now` / `now+30`). A
-*Preset* fills the fields. The frame is shown live (`BOS CAN1: ID 0x06296004 [8] FF 00 …`); values the document
+*Preset* fills the fields. The frame is shown live (`BOS CAN1: ID 0x08696004 [8] FF 00 …`); values the document
 prohibits are refused before sending. Choose sender, CAN line 1 / 2, *Request КВ* and the expected answer
 (КВ+ / КВ- / any), then **▶ Send now** — the answer (КВ+ / КВ- with the reason, the line it came back on, the time)
 appears under the button. In demo mode the commands go to the simulated BOS.
@@ -400,8 +400,11 @@ BOS setup*: NOP, standby, SET_Time_SNR (default 255 s), telemetry periods (ИО�
 ИОК_КОНФИГ (CRC-16 checked). While transmitting it sends a target designation (0°, 0°) every 0.5 s — the BOS only
 transmits with a valid designation (valid 3 s) — and re-starts the session before captures so Time_SNR never ends
 it. At the end the unit is put back into standby.
-If the BOS answers КВ-, the sender address may not be allowed for that command: try ВМ 1 (0x20) instead of
-КПА ИВУ (0x18). The alternatives *CAN library* and *Ask the operator* remain for special set-ups.
+The station sends as **ВМ 2 (sender 0x21)**: command IDs to the BOS are `0x0869xxxx` (e.g. MODE_D
+`0x08690001`), target designation `0x084Dxxxx`, acknowledgements come back as `0x0A61xxxx`. If the BOS answers КВ-,
+the sender address may not be allowed for that command: choose another sender (ВМ 1 0x20, КПА ИВУ 0x18) on the
+Unit control page / in Control KTR. Settings and CAN-library BOS commands saved with the old default 0x18 are
+switched to 0x21 once, at the first start of this version (the log says so). The alternatives *CAN library* and *Ask the operator* remain for special set-ups.
 
 ### Which symbol rates are used?
 BPSK is the narrowband mode (УР): symbol rate = 2 × data rate (32 kbit/s → 64 ksym/s, 128 kbit/s → 256 ksym/s).

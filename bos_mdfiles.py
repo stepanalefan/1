@@ -503,7 +503,7 @@ class MdEditor(QtWidgets.QWidget):
             line = ca.resolve_line(line, c.line_names() if c is not None else [])
         except Exception:
             pass
-        return st, c, ctl.get("sender", 0x18), line, bool(st and st._is_demo())
+        return st, c, ctl.get("sender", bp.SENDER_DEFAULT), line, bool(st and st._is_demo())
 
     def _busy(self, st):
         if st is not None and st.running:

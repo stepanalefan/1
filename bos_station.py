@@ -205,6 +205,11 @@ def _ru(text):
         return text
 
 
+def d_ver_sender(data) -> bool:
+    """True once for settings saved before the sender default became 0x21."""
+    return data.get("sender_ver", 1) < 2
+
+
 def _tr(text):
     try:
         import i18n
@@ -880,7 +885,7 @@ class BosStation(QtWidgets.QWidget):
         self.host = host
         self.data = {"cfg": {k: d for k, _, _, d, _, _ in CFG_FIELDS},
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
-                     "ctl": {"method": "protocol", "sender": 0x18, "line": "BOS CAN1", "line2": "BOS CAN2",
+                     "ctl": {"method": "protocol", "sender": bp.SENDER_DEFAULT, "line": "BOS CAN1", "line2": "BOS CAN2",
                              "can_check": True, "can1_only": False, "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
                              "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
                              "tm_enable": True,
@@ -899,6 +904,7 @@ class BosStation(QtWidgets.QWidget):
                 self.data[k].update(d.get(k, {}))
             for k in ("supply", "plan"):
                 self.data[k] = d.get(k, self.data[k])
+            self.data["sender_ver"] = d.get("sender_ver", 1)
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
                 self.data["plans"].setdefault("Command set (0102)", ["cmds"])
@@ -914,6 +920,11 @@ class BosStation(QtWidgets.QWidget):
         except Exception as e:
             msg = f"BOS station: cannot read {STORE_FILE}: {e}"
             QtCore.QTimer.singleShot(0, lambda: self.log(msg, "err"))
+        if d_ver_sender(self.data) and self.data["ctl"].get("sender") == 0x18:
+            self.data["ctl"]["sender"] = bp.SENDER_DEFAULT        # sender 0x18 -> 0x21 (IDs 0x0629… -> 0x0869…)
+            QtCore.QTimer.singleShot(0, lambda: self.log("BOS station: sender address changed 0x18 → 0x21 (ВМ 2): "
+                                                         "commands now use IDs 0x0869xxxx", "warn"))
+        self.data["sender_ver"] = 2
         self.data["lim_ver"] = 2
         self.cfg, self.lim, self.ctl = self.data["cfg"], self.data["lim"], self.data["ctl"]
         self.sim = ba.BosSimulator(self.cfg)
@@ -1137,7 +1148,7 @@ class BosStation(QtWidgets.QWidget):
         self.p_sender = QtWidgets.QComboBox()
         for a, name in bp.SENDERS:
             self.p_sender.addItem(f"0x{a:02X}  {name}", a)
-        self.p_sender.setCurrentIndex(max(0, self.p_sender.findData(self.ctl.get("sender", 0x18))))
+        self.p_sender.setCurrentIndex(max(0, self.p_sender.findData(self.ctl.get("sender", bp.SENDER_DEFAULT))))
         self.p_sender.setToolTip("Sender address of the station. The BOS executes commands only from allowed\n"
                                  "addresses and answers КВ- otherwise - then try ВМ 1 (0x20).")
         self.p_line = QtWidgets.QLineEdit(self.ctl.get("line", "BOS CAN1"))
@@ -2148,7 +2159,7 @@ class BosStation(QtWidgets.QWidget):
     def on_frames(self, frames):
         if self.pending == "ack":
             for fr in frames:
-                a = bp.parse_ack(fr.can_id, fr.ext, fr.data, self.ctl.get("sender", 0x18))
+                a = bp.parse_ack(fr.can_id, fr.ext, fr.data, self.ctl.get("sender", bp.SENDER_DEFAULT))
                 if a and a["code"] == self._ack_code:
                     a["bus"] = getattr(fr, "bus", "")
                     self.pending = "ack-received"
@@ -2799,7 +2810,7 @@ class BosStation(QtWidgets.QWidget):
             send, data = self._cmd_ctl(code, data)
             if not send:
                 return True
-        can_id, payload = bp.command(code, self.ctl.get("sender", 0x18), data, ack, receiver)
+        can_id, payload = bp.command(code, self.ctl.get("sender", bp.SENDER_DEFAULT), data, ack, receiver)
         if c is None:
             return False
         return c.send_frame(c.FRAME(0, can_id, True, False, None, payload,

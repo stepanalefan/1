@@ -103,7 +103,7 @@ def can_frame(st, code, data=b"", ack=True, receiver=None):
         send, data = bs.apply_cmd(over, code, data0)
         skipped, edited = not send, send and bytes(data) != data0
     receiver = bp.receiver_of(code) if receiver is None else receiver
-    cid, payload = bp.command(code, st.ctl.get("sender", 0x18), data, ack, receiver)
+    cid, payload = bp.command(code, st.ctl.get("sender", bp.SENDER_DEFAULT), data, ack, receiver)
     name = bp.COMMANDS.get(code, ("?",))[0]
     hexd = " ".join(f"{b:02X}" for b in payload) if payload else "—"
     t = FrameText(f"0x{code:02X} {name}   ID 0x{cid:08X}   [{len(payload)}] {hexd}")
@@ -120,8 +120,8 @@ def proto(st, code, data=b"", what=""):
     name = bp.COMMANDS.get(code, ("?", 0, ""))
     s = Step("can", f"{what or name[0]}  —  {L(name[2], name[2])}" if not what else what,
              [Step("info", can_frame(st, code, data)), _ack(st)],
-             tip=L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', 0x18):02X}",
-                   f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель 0x{st.ctl.get('sender', 0x18):02X}"))
+             tip=L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', bp.SENDER_DEFAULT):02X}",
+                   f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель 0x{st.ctl.get('sender', bp.SENDER_DEFAULT):02X}"))
     return [s]
 
 
@@ -715,11 +715,11 @@ def _describe(st, plan, bs):
             "prompt": L("control: the operator switches the BOS", "управление: оператор переключает БОС")}
     prep.append(Step("info", mtxt.get(method, method)))
     if method == "protocol":
-        prep.append(Step("info", L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', 0x18):02X}, "
+        prep.append(Step("info", L(f"CAN line '{st.ctl.get('line', 'BOS CAN1')}', sender 0x{st.ctl.get('sender', bp.SENDER_DEFAULT):02X}, "
                                    f"BOS 0x{bp.BOS:02X}, N = {st.ctl.get('freq_n', 800)} → "
                                    f"{_hz(bp.freq_hz(int(st.ctl.get('freq_n', 800))))}",
                                    f"линия CAN '{st.ctl.get('line', 'BOS CAN1')}', отправитель "
-                                   f"0x{st.ctl.get('sender', 0x18):02X}, БОС 0x{bp.BOS:02X}, N = "
+                                   f"0x{st.ctl.get('sender', bp.SENDER_DEFAULT):02X}, БОС 0x{bp.BOS:02X}, N = "
                                    f"{st.ctl.get('freq_n', 800)} → {_hz(bp.freq_hz(int(st.ctl.get('freq_n', 800))))}")))
     over = opts.get("ctl", {})
     if over:

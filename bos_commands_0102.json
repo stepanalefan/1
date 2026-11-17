@@ -11,7 +11,7 @@
   "addresses": {
    "BOS": "0x29",
    "group": "0x0D",
-   "sender_default": "0x18"
+   "sender_default": "0x21"
   },
   "data": "commands with data always carry 8 bytes (unused bytes 0x00); multi-byte values little-endian",
   "modes": "ДЖР = executed only in standby (the BOS rejects / ignores it during a session); all = any mode",

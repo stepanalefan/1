@@ -114,7 +114,7 @@ class BosPanel(QtWidgets.QWidget):
         self.sender = QtWidgets.QComboBox()
         for a, n in bp.SENDERS:
             self.sender.addItem(f"0x{a:02X}  {n}", a)
-        self.sender.setCurrentIndex(max(0, self.sender.findData(ktr.data.get("sender", 0x18))))
+        self.sender.setCurrentIndex(max(0, self.sender.findData(ktr.data.get("sender", bp.SENDER_DEFAULT))))
         self.sender.setToolTip("Sender address (AO) in the CAN identifier. The BOS executes commands only from "
                                "allowed addresses.")
         self.sender.currentIndexChanged.connect(self._opts_changed)
@@ -402,7 +402,7 @@ class KtrControl(QtWidgets.QWidget):
     def __init__(self, host):
         super().__init__()
         self.host = host
-        self.data = {"queues": {"Queue 1": []}, "queue": "Queue 1", "sender": 0x18, "line": 1, "ack_ms": 300,
+        self.data = {"queues": {"Queue 1": []}, "queue": "Queue 1", "sender": bp.SENDER_DEFAULT, "line": 1, "ack_ms": 300,
                      "stop_on_err": True}
         try:
             with open(STORE_FILE, encoding="utf-8") as fh:
@@ -411,6 +411,10 @@ class KtrControl(QtWidgets.QWidget):
             pass
         except Exception as e:
             QtCore.QTimer.singleShot(0, lambda: self.log(f"Control KTR: cannot read {STORE_FILE}: {e}", "err"))
+        if self.data.get("sender_ver", 1) < 2:           # sender 0x18 -> 0x21 (IDs 0x0629… -> 0x0869…)
+            if self.data.get("sender") == 0x18:
+                self.data["sender"] = bp.SENDER_DEFAULT
+            self.data["sender_ver"] = 2
         if not self.data["queues"]:
             self.data["queues"] = {"Queue 1": []}
         if self.data.get("queue") not in self.data["queues"]:

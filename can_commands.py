@@ -80,11 +80,18 @@ class Store:
         self.commands: list[Command] = []
         self.scripts: dict[str, list[dict]] = {}
         self.error = ""
+        self.migrated = 0
         try:
             with open(path, encoding="utf-8") as f:
                 d = json.load(f)
             self.commands = [Command.from_dict(c) for c in d.get("commands", [])]
             self.scripts = {k: list(v) for k, v in d.get("scripts", {}).items()}
+            self.migrated = 0
+            if d.get("sender_ver", 1) < 2:                    # BOS frames: sender 0x18 -> 0x21 (0x0629… -> 0x0869…)
+                for c in self.commands:
+                    if c.ext and (c.can_id >> 22) & 0x3F == 0x18 and (c.can_id >> 16) & 0x3F in (0x29, 0x0D):
+                        c.can_id = (c.can_id & ~(0x3F << 22)) | (0x21 << 22)
+                        self.migrated += 1
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -95,7 +102,7 @@ class Store:
     def save(self):
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"commands": [c.to_dict() for c in self.commands], "scripts": self.scripts},
+            json.dump({"commands": [c.to_dict() for c in self.commands], "scripts": self.scripts, "sender_ver": 2},
                       f, indent=1, ensure_ascii=False)
         os.replace(tmp, self.path)
 

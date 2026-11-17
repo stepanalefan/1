@@ -24,8 +24,9 @@ from __future__ import annotations
 
 BOS = 0x29
 GROUP_ANGLE = 0x0D            # УПНГ+АФАР+БОС: target designation commands, no acknowledgement
+SENDER_DEFAULT = 0x21          # station sender address (АО): ВМ 2 -> command IDs 0x0869xxxx (BOS 0x29)
 SENDERS = [  # address, name
-    (0x18, "КПА ИВУ (test equipment)"), (0x20, "ВМ 1"), (0x21, "ВМ 2"),
+    (0x21, "ВМ 2"), (0x20, "ВМ 1"), (0x18, "КПА ИВУ (test equipment)"),
     (0x1C, "БИОС 1.1"), (0x1D, "БИОС 1.2"), (0x1E, "БИОС 2.1"), (0x1F, "БИОС 2.2"), (0x16, "БЭС"),
 ]
 
@@ -447,7 +448,7 @@ def presets(code: int | None = None) -> list[tuple[int, dict]]:
     return [(c, p) for c, d in DEFS.items() if code in (None, c) for p in d.get("presets", [])]
 
 
-def library(sender: int = 0x18, line: str = "BOS CAN1") -> list[dict]:
+def library(sender: int = SENDER_DEFAULT, line: str = "BOS CAN1") -> list[dict]:
     """Every preset as a CAN-tab command (can_commands.json format). Acknowledgement requested where the
     document requires it; target designation goes to the group address."""
     out = []
@@ -467,7 +468,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="BOS 0102 command library: list / build frames / export for the CAN tab")
     ap.add_argument("--list", action="store_true", help="list every command and preset with its CAN frame")
-    ap.add_argument("--sender", type=lambda x: int(x, 0), default=0x18, help="sender address (default 0x18 КПА ИВУ)")
+    ap.add_argument("--sender", type=lambda x: int(x, 0), default=SENDER_DEFAULT, help="sender address (default 0x21 ВМ 2)")
     ap.add_argument("--line", default="BOS CAN1")
     ap.add_argument("--export", metavar="FILE", help="write the presets as a can_commands.json-style file")
     ap.add_argument("cmd", nargs="?", help="mnemonic or code to encode, followed by name=value parameters")

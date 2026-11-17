@@ -514,7 +514,7 @@ class StepDialog(QtWidgets.QDialog):
         try:
             data = bp.encode(code, self._params())
             ack = self.expect.currentData() != "none" and bp.wants_ack(code)
-            sender = (self.st.ctl.get("sender", 0x18) if self.st else 0x18)
+            sender = (self.st.ctl.get("sender", bp.SENDER_DEFAULT) if self.st else bp.SENDER_DEFAULT)
             cid, pl = bp.command(code, sender, data, ack, bp.receiver_of(code))
             self.frame.setText(f"ID 0x{cid:08X}  [{len(pl)}] {pl.hex(' ').upper() or '—'}")
             self.err.setText("")
