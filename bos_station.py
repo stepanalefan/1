@@ -887,7 +887,7 @@ class BosStation(QtWidgets.QWidget):
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
                      "ctl": {"method": "protocol", "sender": bp.SENDER_DEFAULT, "line": "BOS CAN1", "line2": "BOS CAN2",
                              "can_check": True, "can1_only": False, "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
-                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True,
+                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True, "sr_min_s": 30,
                              "tm_enable": True,
                              "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS CAN1",
                              "settle_ms": 1500, "prompt": True,
@@ -1191,6 +1191,14 @@ class BosStation(QtWidgets.QWidget):
         self.p_tsnr.setValue(int(self.ctl.get("time_snr", 255)))
         self.p_tsnr.setToolTip("SET_Time_SNR before the test: the BOS ends a session after this time\n"
                                "(factory default 30 s). Not saved to flash.")
+        self.p_srmin = QtWidgets.QSpinBox()
+        self.p_srmin.setRange(0, 3600)
+        self.p_srmin.setSuffix(" s")
+        self.p_srmin.setSpecialValueText("as the command gives")
+        self.p_srmin.setValue(int(self.ctl.get("sr_min_s", 30)))
+        self.p_srmin.setToolTip("Every session the station starts stays on at least this long: the largest count is "
+                                "sent, Time_SNR is raised to it,\nand when the command itself ends earlier (ШР at high "
+                                "rates, preambles) the station re-issues it before the end -\nnever during a capture.")
         self.p_keep = QtWidgets.QCheckBox("Send target designation every 0.5 s (0°, 0°)")
         self.p_keep.setChecked(bool(self.ctl.get("keepalive", True)))
         self.p_keep.setToolTip("The BOS transmits only while it has a valid target designation\n"
@@ -1199,7 +1207,7 @@ class BosStation(QtWidgets.QWidget):
         self.p_tm.setChecked(bool(self.ctl.get("tm_enable", True)))
         for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate_ur, self.p_rate_shr):
             wd.currentIndexChanged.connect(lambda *_: self._collect())
-        for wd in (self.p_freq, self.p_tsnr):
+        for wd in (self.p_freq, self.p_tsnr, self.p_srmin):
             wd.valueChanged.connect(lambda *_: self._collect())
         for wd in (self.p_keep, self.p_tm):
             wd.toggled.connect(lambda *_: self._collect())
@@ -1216,6 +1224,7 @@ class BosStation(QtWidgets.QWidget):
         f.addRow("УР (BPSK) rate", self.p_rate_ur)
         f.addRow("ШР (OQPSK) rate", self.p_rate_shr)
         f.addRow("Session limit", self.p_tsnr)
+        f.addRow("Minimum session duration", self.p_srmin)
         f.addRow(self.p_keep)
         f.addRow(self.p_tm)
         hb = QtWidgets.QHBoxLayout()
@@ -1869,7 +1878,7 @@ class BosStation(QtWidgets.QWidget):
                             can1_only=self.p_can1.isChecked(), freq_n=self.p_freq.value(),
                             bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
                             rate_ur=self.p_rate_ur.currentData(), rate_shr=self.p_rate_shr.currentData(),
-                            time_snr=self.p_tsnr.value(),
+                            time_snr=self.p_tsnr.value(), sr_min_s=self.p_srmin.value(),
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
             self._sync_carrier()
         if hasattr(self, "r_wait"):
@@ -2311,6 +2320,7 @@ class BosStation(QtWidgets.QWidget):
         need_fsw = not offline and bsteps.needs_fsw(tests)
         self._ref_failed = False
         self._gate_rows = set()
+        self._tsnr_set, self._sr_life, self._sr_cmd, self._sr_warned = None, None, None, {}
         if need_fsw and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
             self.log(f"BOS station: {msg}", "err")
@@ -2557,6 +2567,8 @@ class BosStation(QtWidgets.QWidget):
             self._row(T, name, None, "", exp, "FAIL", text="КВ- / no КВ", note=str(e))
             return
         got = "КВ-" if a["negative"] else "КВ+"
+        if code == 0x04 and got == "КВ+":
+            self._tsnr_set = data[0]
         self._row(T, name, None, "", exp, "PASS" if got == exp else "FAIL", text=f"{got}  [{hexd}]",
                   note="" if got == exp else (f"expected {exp}" + (" — executed only in standby (ДЖР)"
                                                                    if bp.standby_only(code) else "")))
@@ -2834,6 +2846,11 @@ class BosStation(QtWidgets.QWidget):
         if self.ctl.get("method") == "protocol" and self.ctl.get("keepalive", True) and \
                 self.cur_mode not in (None, "rf_off"):
             self._send_now(0x0C, bp.p_angle(0.0, 0.0))
+        rem = self._sr_remaining() if self.running and self.ctl.get("method") == "protocol" else None
+        if rem is not None and rem < min(1.5, 0.5 * self._sr_life) and self.pending != "fsw" and \
+                not getattr(self, "_in_session", False) and getattr(self, "_sr_cmd", None) and \
+                float(self.ctl.get("sr_min_s", 30) or 0) > 0:
+            self._sr_reissue()                              # session would end: start it again (not mid-capture)
 
     def _proto(self, code, data=b"", what="", line=None, expect_neg=False):
         """Send a command with acknowledgement request (on `line`, default CAN line 1); returns the
@@ -2884,16 +2901,64 @@ class BosStation(QtWidgets.QWidget):
             return
         code = {"cw": 0xA0, "bpsk": self.ctl.get("bpsk_cmd", 0xA1), "oqpsk": self.ctl.get("oqpsk_cmd", 0xA4),
                 "shr_pre": 0xA2, "shr_kbd": 0xA4}[self.cur_mode]
+        rate = int(self.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2))
         data = bp.p_session(code, int(self.ctl.get("freq_n", 800)), min(bp.ATTEN_MAX_DB, self.cur_att),
-                            coding=1 if code == 0xA4 else 0, continuous=True,
-                            count=2 if self.cur_mode == "shr_kbd" else 2047,
-                            rate=int(self.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2)),
+                            coding=1 if code == 0xA4 else 0, continuous=True, count=2047, rate=rate,
                             reg=5 if code == 0xA1 else 1)
         yield from self._ref_gate(bp.COMMANDS[code][0])      # 10 MHz reference ready before a mode command
-        self._keepalive()                                   # valid target designation before the session
+        self._sr_t = time.monotonic()
+        self._in_session = True                             # no timer re-issue while this one is sent
+        try:
+            self._keepalive()                               # valid target designation before the session
+        finally:
+            self._in_session = False
         yield from self._proto(code, data, f"{bp.COMMANDS[code][0]} (N={self.ctl.get('freq_n')}, "
                                            f"att {self.cur_att} dB)")
         self._sr_t = time.monotonic()
+        self._sr_cmd = (code, data)
+        life = bp.session_seconds(code, 2047, rate)
+        tsnr = self._time_snr_now()
+        self._sr_life = min(x for x in (life, tsnr, 1e9) if x)
+        need = float(self.ctl.get("sr_min_s", 30) or 0)
+        if need and self._sr_life < need and not getattr(self, "_sr_warned", {}).get(code):
+            self._sr_warned = {**getattr(self, "_sr_warned", {}), code: True}
+            why = f"Time_SNR {tsnr:.0f} s" if tsnr and (life is None or tsnr <= life) else \
+                f"2047 × {'КБД' if code != 0xA2 else 'preambles'} at {bp.RATES.get(rate)} kbit/s"
+            self.log(f"BOS station: {bp.COMMANDS[code][0]} lasts ≈ {self._sr_life:.1f} s ({why}) < {need:g} s - "
+                     f"re-issued before it ends", "warn")
+
+    def _time_snr_setting(self):
+        """SET_Time_SNR value to send: the configured one, raised to the minimum session duration (max 255 s);
+        0 = leave the unit's value."""
+        ts = int(self.ctl.get("time_snr", 255))
+        need = int(math.ceil(float(self.ctl.get("sr_min_s", 30) or 0)))
+        if ts and need > ts:
+            self.log(f"BOS station: Time_SNR {ts} s raised to {min(255, need)} s (minimum session duration)", "info")
+            ts = min(255, need)
+        return ts
+
+    def _time_snr_now(self):
+        """Session limit the BOS applies now (s), None = none: what the station set, else the КОНФИГ read, else
+        the factory default 30 s."""
+        if getattr(self, "_tsnr_set", None) is not None:
+            return self._tsnr_set or None
+        if self.cfg_rx:
+            return self.cfg_rx[1].get("Time_SNR") or None
+        return 30.0
+
+    def _sr_remaining(self):
+        if self.cur_mode in (None, "rf_off") or not getattr(self, "_sr_life", None):
+            return None
+        return self._sr_life - (time.monotonic() - getattr(self, "_sr_t", 0))
+
+    def _sr_reissue(self):
+        """Fire-and-forget restart of the running session (keep-alive timer, never during a capture)."""
+        code, data = self._sr_cmd
+        self._sr_t = time.monotonic()
+        if self.ctl.get("keepalive", True):
+            self._send_now(0x0C, bp.p_angle(0.0, 0.0))     # valid target designation for the new session
+        self._send_now(code, data)
+        self._sr_reissues = getattr(self, "_sr_reissues", 0) + 1
 
     # ---- 10 MHz reference (TFG6806) and BOS power-up
     def _fresh_osn(self, after=None, timeout=3.0):
@@ -3143,9 +3208,10 @@ class BosStation(QtWidgets.QWidget):
         self.cur_mode = "rf_off"
         yield from self._proto(0x01, what="MODE_D (standby)")
         self._row(T, "Standby (MODE_D)", None, "", "КВ+", "PASS", text="КВ+")
-        ts = int(self.ctl.get("time_snr", 255))
+        ts = self._time_snr_setting()
         if ts:
             yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s")
+            self._tsnr_set = ts
             self._row(T, "Session limit (SET_Time_SNR)", ts, "s", "КВ+", "PASS", spec="{:.0f}")
         if not self.ctl.get("tm_enable", True):
             return
@@ -3228,9 +3294,10 @@ class BosStation(QtWidgets.QWidget):
         # SET_CONFIG_PROM reloads the stored КОНФИГ: the station's own (unsaved) link setup is applied again
         if self.ctl.get("can1_only", False):
             yield from self._proto(0x06, bytes([0x01]), "SET_CAN - transmission via CAN1 only (re-applied)")
-        ts = int(self.ctl.get("time_snr", 255))
+        ts = self._time_snr_setting()
         if ts:
             yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s (re-applied)")
+            self._tsnr_set = ts
         if self.ctl.get("tm_enable", True):
             for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
                 yield from self._proto(0x10, bp.p_period_tm(tm, per), f"SET_PeriodTM {bp.TM_TYPES[tm]} {per:g} s "
@@ -3332,9 +3399,9 @@ class BosStation(QtWidgets.QWidget):
             r["fsw_errors"] = errs
             r["t"] = time.time()
             return r
-        if self.ctl.get("method") == "protocol" and self.cur_mode not in (None, "rf_off") and \
-                time.monotonic() - getattr(self, "_sr_t", 0) > 20 and not self.live_mode:
-            yield from self._session()                      # keep the session inside Time_SNR
+        rem = self._sr_remaining() if self.ctl.get("method") == "protocol" else None
+        if rem is not None and rem < 5.0 + n / max(fs, 1.0):
+            yield from self._session()                      # would end during the capture: start it again first
             yield ("sleep", 0.6 if not self._is_demo() else 0.02)
         self.step_lbl.setText(f"{TEST_NAME.get(self.cur_test, self.cur_test)}: capturing {label} …")
         st, r = yield ("fsw", job)
@@ -3371,8 +3438,10 @@ class BosStation(QtWidgets.QWidget):
             n = int(math.ceil(n / den)) * den
         return n
 
-    def _mod_capture(self, mod, label=None):
+    def _mod_capture(self, mod, label=None, nsym=None):
         c = self._mcfg(mod)
+        if nsym:
+            c = dict(c, nsym=int(nsym))
         fs = c["fs"]
         n = self._mod_n(c)
         r = yield from self._capture("mod", c["carrier"], fs, n,
@@ -3620,15 +3689,35 @@ class BosStation(QtWidgets.QWidget):
             return {"kind": "shr", "shr": bos_shr.decode_shr(chips, rate, pre, max_cbd=2)}
         # 1) preambles only (PRS 3 restarts every bit: any part of the stream can be despread)
         self.cur_mode = "shr_pre"
-        if self.ctl.get("method") == "protocol":
+        n = int(72 * sfp * spc)                          # ≥ 2 whole preambles at any phase
+        rate_code = int(self.ctl.get("rate_shr", 4))
+        pre_life = bp.session_seconds(0xA2, 2047, rate_code)
+        trig = self.ctl.get("method") == "protocol" and not self._is_demo() and pre_life < 2.0
+        if trig:                                         # 2047 preambles last < 2 s: arm the FSW, then start
+            lvl = self.cfg["power_nom"] - self.cfg.get("loss_db", 0)
+            self.log(f"BOS station: preamble session lasts only {pre_life * 1e3:.0f} ms at "
+                     f"{bp.RATES.get(rate_code)} kbit/s - captured with the FSW IF power trigger", "info")
+
+            def arm_pre():
+                return fsw_arm(self.host.worker.dev, c["carrier"], fs, n, lvl + 5, lvl - 20)
+            st, a = yield ("fsw", arm_pre)
+            if st == "err":
+                raise _TestError(f"FSW trigger: {a}")
+            yield from self._session()
+
+            def fetch_pre():
+                return analyze(fsw_fetch(self.host.worker.dev), a[0])
+            st, r = yield ("fsw", fetch_pre)
+        elif self.ctl.get("method") == "protocol":
             yield from self._session()
             yield ("sleep", 0.6 if not self._is_demo() else 0.02)
         elif not self._is_demo():
             ok = yield ("prompt", "Start a ШР session with <b>preambles only</b> (many preambles).")
             if not ok:
                 return
-        n = int(72 * sfp * spc)                          # ≥ 2 whole preambles at any phase
-        if self._is_demo():
+        if trig:
+            pass
+        elif self._is_demo():
             sim = self.sim
 
             def job():
@@ -3948,6 +4037,15 @@ class BosStation(QtWidgets.QWidget):
     def _t_live(self):
         mod = self.live_mod.currentText()
         n = 0
+        if getattr(self, "_live_session", False) and mod != "CW":    # DAC calibration: the station runs the session
+            self._tsnr_set, self._sr_warned = None, {}
+            self.cur_mode = "rf_off"
+            yield from self._proto(0x01, what="MODE_D (standby) - Time_SNR is set in standby only")
+            ts = self._time_snr_setting()
+            if ts:
+                yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s")
+                self._tsnr_set = ts
+            yield from self._set_mode(mod.lower())
         while not self.abort_flag:
             n += 1
             self.step_lbl.setText(f"Live diagnose ({mod}), capture {n}")
@@ -3957,7 +4055,8 @@ class BosStation(QtWidgets.QWidget):
                                              lambda x, f: ba.analyze_cw(x, f, c, (c["pn_lo"], c["pn_hi"])), "carrier")
                 self.res = {"cw": r}
             else:
-                r = yield from self._mod_capture(mod)
+                cal = getattr(self.dac_cal, "auto", None) is not None
+                r = yield from self._mod_capture(mod, nsym=self.dac_cal.opts["nsym"] if cal else None)
                 self.res = {f"mod_{mod}": r}
             self.sig_src.blockSignals(True)
             self.sig_src.clear()
@@ -3967,7 +4066,10 @@ class BosStation(QtWidgets.QWidget):
             regs = self.dac_cal.live_step(self.res) if mod != "CW" else None
             if regs:                                         # auto-calibration: next DAC setting, then settle
                 self.dac_cal._send(regs)
-                yield ("sleep", 0.5 if not self._is_demo() else 0.05)
+                yield ("sleep", float(self.dac_cal.opts["settle_s"]) if not self._is_demo() else 0.05)
+                continue
+            if getattr(self.dac_cal, "auto", None) is not None:
+                yield ("sleep", 0.05)
                 continue
             yield ("sleep", 0.2)
 

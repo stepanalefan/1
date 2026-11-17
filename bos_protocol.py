@@ -135,6 +135,26 @@ def p_session(code: int, freq_n: int, atten_db: int = 0, coding: int = 0, polyn1
     return bytes(b)
 
 
+KBD_UR_BITS = 10232            # КБД in УР: 1279 bytes (marker + code block + check symbols)
+KBD_SR_BITS = 17912            # КБД in ШР: 2239 bytes (turbo coded, bos_shr.CBD_SR_BITS)
+PREAMB_BITS = 32 * 4           # one ШР preamble: 32 bits, 4 × the chips of a data bit
+
+
+def session_seconds(code: int, count: int, rate: int, n_pre: int = 5):
+    """Estimated length of a session (СР) from its command parameters (without Time_SNR); None = unknown.
+    Carrier: count = seconds; УР КБД: count КБД at the УР rate; ШР: count preambles / КБД (+ n_pre preambles)."""
+    bps = RATES.get(int(rate), 8) * 1e3
+    if code == 0xA0:
+        return float(count)
+    if code in (0xA1, 0xAD, 0xAE):
+        return count * KBD_UR_BITS / bps
+    if code in (0xA2, 0xA5):
+        return count * PREAMB_BITS / bps
+    if code in (0xA4, 0xA7, 0xAF):
+        return (n_pre * PREAMB_BITS + count * KBD_SR_BITS) / bps
+    return None
+
+
 def parse_session(data: bytes) -> dict:
     d = bytes(data) + bytes(8)
     return {"freq_n": d[0] | (d[1] & 7) << 8, "atten_db": d[1] >> 3, "coding": d[2] >> 6,

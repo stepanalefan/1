@@ -154,7 +154,7 @@ def session(st, mode, att):
     n = int(st.ctl.get("freq_n", 800))
     gate = ref_gate(st, bp.COMMANDS[code][0])
     rate_k = int(st.ctl.get("rate_ur" if code == 0xA1 else "rate_shr", 2))
-    cnt = 2 if mode == "shr_kbd" else 2047
+    cnt = 2047
     out = list(gate)
     if st.ctl.get("keepalive", True):
         out.append(Step("can", L("target designation Angle_ErdStation_BKU (0°, 0°) — before the session and "
@@ -179,8 +179,18 @@ def session(st, mode, att):
     if code == 0xA4:
         par.append(L(f"{cnt} КБД, turbo coding", f"{cnt} КБД, турбокод"))
     par.append(L("continuous", "непрерывно"))
-    out.append(Step("can", f"{bp.COMMANDS[code][0]} — {L('session', 'сеанс')}: {what}  ({', '.join(par)})",
-                    [Step("info", fr), _ack(st)]))
+    life = bp.session_seconds(code, cnt, rate_k)
+    need = float(st.ctl.get("sr_min_s", 30) or 0)
+    sub = [Step("info", fr), _ack(st)]
+    if life is not None:
+        if need and life < need:
+            sub.append(Step("info", L(f"lasts ≈ {life:.1f} s < {need:g} s: re-issued before it ends (not during a "
+                                      f"capture)", f"длится ≈ {life:.1f} с < {need:g} с: повторяется до окончания "
+                                      f"(не во время записи)")))
+        else:
+            sub.append(Step("info", L(f"lasts ≈ {min(life, 9999):.0f} s (limited by Time_SNR)",
+                                      f"длится ≈ {min(life, 9999):.0f} с (ограничено Time_SNR)")))
+    out.append(Step("can", f"{bp.COMMANDS[code][0]} — {L('session', 'сеанс')}: {what}  ({', '.join(par)})", sub))
     return out
 
 

@@ -429,6 +429,16 @@ compares them with *External 10 MHz expected*. Only the RF is locked to the exte
 internal oscillator; carrier error alone while locked to the external 10 MHz → the TFG6806 or the LMX2594 frequency
 plan (repeat on the internal source to tell which).
 
+### Sessions end too early - how long does a session last?
+Unit control → **Minimum session duration** (default 30 s, also a per-plan parameter). Every session command is
+sent with the largest count (2047), SET_Time_SNR is raised to at least this time, and the station estimates how
+long the session really lasts: carrier = count in s; УР КБД = 2047 × 10232 bit at the УР rate; ШР КБД = 2047 ×
+17912 bit (+ preambles) at the ШР rate - 36 s at 1024 kbit/s; ШР preambles = 2047 × 128 bit - only 2 s at
+128 kbit/s, 0.26 s at 1024 kbit/s. When that (or Time_SNR) is shorter than the minimum, the station re-issues the
+session command before it ends - never during a capture (a capture that would not fit restarts the session first).
+Preamble sessions shorter than 2 s are captured with the FSW IF power trigger (armed, then the session is started).
+The plan view shows the estimate for each session command.
+
 ### How do I calibrate the DAC (QMC offsets, gain, phase) from the FSW?
 BOS Test Station → **DAC calibration** tab. After any BPSK / OQPSK measurement (plan or Live diagnose) it shows the
 carrier offset (LO leakage), I/Q gain imbalance and quadrature error and how many LSB the DAC38J82 QMC registers
@@ -443,6 +453,12 @@ lock orientation, like LO-leakage nulling with a spectrum analyser), the optimum
 the targets (offset ≤ -55 dBc, gain ≤ 0.02 dB, quadrature ≤ 0.1°) the next round uses half the probe steps (up to 4
 rounds; on failure the best values measured are put back). The register scales found are kept per unit serial.
 The BOS must be transmitting (session on, e.g. from Control KTR), the DAC is off in standby.
+
+Measurement settings (panel *Auto-calibration measurement*): **captures per setting** (default 3 - |offset|²,
+gain² and phase² are averaged; the spread is logged), **discard after a change** (1 capture thrown away after every
+Change_DAC_1), **settle after a change** (1 s), **symbols per capture** during the calibration (32 000 instead of
+the station's 4000), and **station starts and keeps the session** (MODE_D, SET_Time_SNR, session command, target
+designation, re-issued before it ends, MODE_D at the end). One round is then ≈ 41 captures.
 
 Then **Write to MD_SETTINGS…** puts the values into a DAC_offsets row with a DAC temperature threshold (send it
 from Telemetry → BOS → MD_SETTINGS) - Change_DAC_1 alone lasts only until a reset / MD SETUP; repeat at a few

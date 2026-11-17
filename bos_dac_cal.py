@@ -47,6 +47,7 @@ NOMINAL = {  # register scales before a unit has been calibrated (DAC38J82 data-
 TARGET = {"off_dbc": -55.0, "gain_db": 0.02, "quad_deg": 0.1}
 STEP = {"off": 160, "gain": 16, "phase": 64}         # first-round probe steps (LSB); halved every round
 STEP_MIN = {"off": 12, "gain": 2, "phase": 6}
+OPTS = {"n_avg": 3, "skip": 1, "settle_s": 1.0, "nsym": 32000, "own_session": True}   # defaults of the panel
 
 
 def to_signed(name, raw_v):
@@ -116,7 +117,9 @@ def _vertex(y_m, y_0, y_p, s):
 class AutoCal:
     """Probe / fit / apply rounds driven by successive measurements (live diagnose)."""
 
-    def __init__(self, regs_raw, model, max_rounds=4):
+    def __init__(self, regs_raw, model, max_rounds=4, n_avg=3, skip=1):
+        self.n_avg, self.skip = max(1, int(n_avg)), max(0, int(skip))
+        self.buf, self.to_skip = [], self.skip      # captures of the current setting / still to discard (the working point was just sent)
         self.center = signed(regs_raw)             # working point (signed register values)
         self.model = copy.deepcopy(model)
         self.max_rounds = max_rounds
@@ -170,11 +173,44 @@ class AutoCal:
         return sc
 
     def feed(self, m):
-        """Measurement taken with self.regs -> registers to send next, or None when finished."""
+        """One capture with self.regs. Returns the registers to send next, None when finished, or "wait" while
+        captures of this setting are still being collected (after a change the first `skip` are discarded, then
+        `n_avg` are averaged: |c|², g², q² - the quantities the fit uses)."""
+        if self.to_skip > 0:
+            self.to_skip -= 1
+            self.log.append(f"  capture discarded (settling after the change)")
+            return "wait"
+        self.buf.append(m)
+        if len(self.buf) < self.n_avg:
+            return "wait"
+        ms, self.buf = self.buf, []
+        nxt = self._feed(self._average(ms))
+        if isinstance(nxt, dict):
+            self.to_skip = self.skip
+        return nxt
+
+    def _average(self, ms):
+        P = [abs(x["c"]) ** 2 for x in ms]
+        G = [x["g"] ** 2 for x in ms if math.isfinite(x["g"])]
+        Q = [x["q"] ** 2 for x in ms if math.isfinite(x["q"])]
+        avg = {"c": complex(math.sqrt(float(np.mean(P))), 0.0),
+               "g": math.sqrt(float(np.mean(G))) if G else float("nan"),
+               "q": math.sqrt(float(np.mean(Q))) if Q else float("nan"),
+               "mer": float(np.mean([x["mer"] for x in ms])), "mer_corr": float(np.mean([x["mer_corr"] for x in ms])),
+               "mod": ms[0]["mod"], "n": len(ms)}
+        if len(ms) > 1:
+            d = [dbc(x["c"]) for x in ms]
+            avg["spread"] = f" (±{np.std(d):.1f} dB over {len(ms)} captures)"
+        else:
+            avg["spread"] = ""
+        return avg
+
+    def _feed(self, m):
         if self.bpsk is None:
             self.bpsk = not (math.isfinite(m["g"]) and math.isfinite(m["q"]))
         if self.cur is None:                        # working point (start or after a correction)
-            self.log.append(f"{'start' if self.round == 0 else 'check'}: offset {dbc(m['c']):.1f} dBc" +
+            self.log.append(f"{'start' if self.round == 0 else 'check'}: offset {dbc(m['c']):.1f} dBc"
+                            f"{m.get('spread', '')}" +
                             ("" if self.bpsk else f", gain {abs(m['g']):.3f} dB, quad {abs(m['q']):.2f}°") +
                             f", MER {m['mer']:.1f} dB")
             sc = self._score(m)
@@ -189,6 +225,8 @@ class AutoCal:
                                            f"the best values measured are applied")
             return self._start_round(m)
         self.y[self.cur] = self._y(m)
+        self.log.append(f"  {self.cur}: offset {dbc(m['c']):.1f} dBc{m.get('spread', '')}" +
+                        ("" if self.bpsk else f", gain {abs(m['g']):.3f} dB, quad {abs(m['q']):.2f}°"))
         if self.plan:
             return self._next()
         return self._solve()
@@ -254,6 +292,7 @@ class DacCalPanel(QtWidgets.QWidget):
         self.st = st
         d = st.data.setdefault("dac_cal", {})
         self.regs = dict(d.get("regs") or DOC_DEFAULT)
+        self.opts = {**OPTS, **d.get("opts", {})}
         self.models = d.get("models", {})               # serial -> model
         self.m = None
         self.auto = None
@@ -298,6 +337,45 @@ class DacCalPanel(QtWidgets.QWidget):
         self.model_lbl = QtWidgets.QLabel()
         self.model_lbl.setWordWrap(True)
         right.addWidget(self.model_lbl)
+        og = QtWidgets.QGroupBox("Auto-calibration measurement")
+        of = QtWidgets.QFormLayout(og)
+        self.o_avg = QtWidgets.QSpinBox()
+        self.o_avg.setRange(1, 20)
+        self.o_avg.setValue(int(self.opts["n_avg"]))
+        self.o_avg.setToolTip("Captures averaged at every register setting (|offset|², gain², phase² are averaged)")
+        self.o_skip = QtWidgets.QSpinBox()
+        self.o_skip.setRange(0, 5)
+        self.o_skip.setValue(int(self.opts["skip"]))
+        self.o_skip.setToolTip("Captures thrown away after every Change_DAC_1 (may contain the old setting)")
+        self.o_settle = QtWidgets.QDoubleSpinBox()
+        self.o_settle.setRange(0, 30)
+        self.o_settle.setDecimals(1)
+        self.o_settle.setSuffix(" s")
+        self.o_settle.setValue(float(self.opts["settle_s"]))
+        self.o_settle.setToolTip("Wait after every Change_DAC_1 before the next capture")
+        self.o_nsym = QtWidgets.QSpinBox()
+        self.o_nsym.setRange(2000, 1_000_000)
+        self.o_nsym.setSingleStep(4000)
+        self.o_nsym.setValue(int(self.opts["nsym"]))
+        self.o_nsym.setToolTip("Symbols per capture during the calibration (the station setting is used otherwise)")
+        self.o_sess = QtWidgets.QCheckBox("Station starts and keeps the session (OQPSK / BPSK)")
+        self.o_sess.setChecked(bool(self.opts["own_session"]))
+        self.o_sess.setToolTip("Protocol control: the station sends the session command itself, keeps the target "
+                               "designation and re-issues the session before it ends (minimum session duration); "
+                               "MODE_D at the end. Off: the operator keeps the BOS transmitting.")
+        of.addRow("Captures per setting", self.o_avg)
+        of.addRow("Discard after a change", self.o_skip)
+        of.addRow("Settle after a change", self.o_settle)
+        of.addRow("Symbols per capture", self.o_nsym)
+        of.addRow(self.o_sess)
+        for w in (self.o_avg, self.o_skip, self.o_nsym):
+            w.valueChanged.connect(self._opts_changed)
+        self.o_settle.valueChanged.connect(self._opts_changed)
+        self.o_sess.toggled.connect(self._opts_changed)
+        right.addWidget(og)
+        self.est = QtWidgets.QLabel()
+        self.est.setStyleSheet("color:#8a96a3;")
+        right.addWidget(self.est)
         bt = QtWidgets.QHBoxLayout()
         self.b_auto = QtWidgets.QPushButton("▶ Auto-calibrate (live)")
         self.b_auto.setStyleSheet("font-weight:700;padding:5px 12px;")
@@ -334,6 +412,7 @@ class DacCalPanel(QtWidgets.QWidget):
         note.setStyleSheet("color:#8a96a3;")
         v.addWidget(note)
         self._refresh()
+        self._estimate()
 
     # ---- state
     def serial(self):
@@ -343,7 +422,7 @@ class DacCalPanel(QtWidgets.QWidget):
         return self.models.get(self.serial()) or NOMINAL
 
     def _save(self):
-        self.st.data["dac_cal"] = {"regs": self.regs, "models": self.models}
+        self.st.data["dac_cal"] = {"regs": self.regs, "models": self.models, "opts": self.opts}
         self.st.save()
 
     def set_regs(self, regs):
@@ -358,6 +437,20 @@ class DacCalPanel(QtWidgets.QWidget):
     def _regs_edited(self, *_):
         self.regs = raw({k: sp.value() for k, sp in self.ed.items()})
         self._save()
+
+    def _opts_changed(self, *_):
+        self.opts = {"n_avg": self.o_avg.value(), "skip": self.o_skip.value(), "settle_s": self.o_settle.value(),
+                     "nsym": self.o_nsym.value(), "own_session": self.o_sess.isChecked()}
+        self._save()
+        self._estimate()
+
+    def _estimate(self):
+        per = self.opts["n_avg"] + self.opts["skip"]
+        n = 1 + 9 * per + per                                # start, 9 probes, check
+        sr = self.st.cfg.get("sr_oqpsk", 131.072e6)
+        self.est.setText(f"≈ {n} captures per round ({self.opts['nsym']:,} symbols = "
+                         f"{self.opts['nsym'] / sr * 1e3:.2f} ms of signal each, ≥ {self.opts['settle_s']:g} s "
+                         f"settling after each of 10 changes)")
 
     def say(self, text):
         self.log.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")
@@ -417,6 +510,7 @@ class DacCalPanel(QtWidgets.QWidget):
     def toggle_auto(self):
         if self.auto is not None:
             self.auto = None
+            self.st._live_session = False
             self.b_auto.setText("▶ Auto-calibrate (live)")
             self.say("auto-calibration stopped - sending back the working point")
             self._send(self.regs)
@@ -425,7 +519,8 @@ class DacCalPanel(QtWidgets.QWidget):
         if st.running and not st.live_mode:
             self.say("the station is running a plan - wait until it ends")
             return
-        self.auto = AutoCal(self.regs, self.model())
+        self.auto = AutoCal(self.regs, self.model(), n_avg=self.opts["n_avg"], skip=self.opts["skip"])
+        st._live_session = bool(self.opts["own_session"]) and st.ctl.get("method") == "protocol"
         self.b_auto.setText("■ Stop calibration")
         self.say(f"auto-calibration started (unit '{self.serial()}'), working point " +
                  ", ".join(f"{k} {v:+d}" for k, v in signed(self.regs).items()))
@@ -448,11 +543,14 @@ class DacCalPanel(QtWidgets.QWidget):
         nxt = self.auto.feed(m)
         for line in self.auto.log[n0:]:
             self.say(line)
+        if nxt == "wait":
+            return None
         if self.auto.done:
             a, self.auto = self.auto, None
             self.b_auto.setText("▶ Auto-calibrate (live)")
             if a.model.get("learned"):
                 self.models[self.serial()] = a.model
+            self.st._live_session = False
             self.set_regs(a.regs)
             self.say("registers in the unit: " + ", ".join(f"{k} {v:+d} (0x{a.regs[k]:X})"
                                                           for k, v in signed(a.regs).items()))

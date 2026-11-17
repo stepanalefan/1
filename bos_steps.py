@@ -77,6 +77,7 @@ PARAMS = {
     "rate_ur": ("УР rate", "choice", [(k, f"{bp.RATES[k]} kbit/s") for k in range(0, 6)], ""),
     "rate_shr": ("ШР rate", "choice", [(k, f"{bp.RATES[k]} kbit/s") for k in range(1, 8)], ""),
     "time_snr": ("Session limit SET_Time_SNR", "int", (0, 255), " s"),
+    "sr_min_s": ("Minimum session duration (re-issued before it ends)", "int", (0, 3600), " s"),
     "tm_enable": ("Set telemetry periods (SET_PeriodTM)", "bool", None, ""),
     "sender": ("Sender address", "choice", [(a, f"0x{a:02X}  {n}") for a, n in bp.SENDERS], ""),
     "line": ("CAN line 1", "str", None, ""),
@@ -95,7 +96,7 @@ PARAMS = {
                                             ("none", "Already on")], ""),
     "ref_wait_s": ("Wait for the reference up to", "int", (0, 600), " s"),
 }
-_MOD = ["freq_n", "settle_ms", "keepalive", "time_snr"]
+_MOD = ["freq_n", "settle_ms", "keepalive", "time_snr", "sr_min_s"]
 TEST_PARAMS = {
     "ref": ["tfg_setup", "tfg_src", "tfg_feed", "tfg_ref_apply", "tfg_ref_amp", "tfg_ref_offs", "power_up",
             "ref_wait_s"],
