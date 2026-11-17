@@ -429,6 +429,33 @@ compares them with *External 10 MHz expected*. Only the RF is locked to the exte
 internal oscillator; carrier error alone while locked to the external 10 MHz → the TFG6806 or the LMX2594 frequency
 plan (repeat on the internal source to tell which).
 
+### Which roll-off does the unit really use? (Roll-off tab)
+BOS Test Station → **Roll-off** (next to DAC calibration). Every OQPSK measurement estimates the RRC roll-off α:
+* **spectrum** - the power spectrum of an RRC signal is a raised cosine; its 75 % / 50 % / 25 % power crossings
+  give α = 6·Δf / symbol rate on both sides (PA regrowth and noise stay below -6 dB and do not bias it). When the
+  signal is wider than the FSW bandwidth (131 Msym/s, α 0.25 = 164 MHz > B160) the plans add two captures tuned
+  ±0.4·symbol rate off the carrier, so each transition band is measured inside the analysis bandwidth; about ±0.02;
+* **matched filter** - the receive RRC α with the highest MER (after removing the I/Q errors): shows how much a
+  wrong α costs; a flat curve means the roll-off does not limit the MER; with a band-limited capture its peak
+  describes the capture, not the unit.
+The measurement table gets a row *RRC roll-off α of the signal* (WARN when it differs from the set α by more than
+0.05). Live diagnose averages the last N captures. **Use estimated α in the station** sets the OQPSK roll-off
+(demodulation, OBW / ACLR, K70 filter); **Set FSW-K70 filter to it** writes DDEM:TFIL RRC / ALPH and MFIL:AUTO ON
+and reads them back.
+
+### Is the FSW set to the right filter?
+Software demodulation: the measurement table shows *Demodulation filter (software)* - RRC with the station's α
+(matched) for OQPSK, none for the SP-L BPSK (УР is rectangular SP-L per 0102, not RRC). FSW-K70: with the plan
+option below the K70 Tx filter (RRC, α) and the measurement filter (auto = matched) are set, read back and checked
+(*FSW-K70 filter (read back)*, PASS / FAIL). The Spectrum Analyzer tab's defaults are now RRC α = 0.25 as well.
+
+### Can a plan use the FSW-K70?
+Plan editor → **FSW-K70: Also measure BPSK / OQPSK with the FSW-K70 (VSA) when it is installed** (on by default in
+*Modulation only*). After the software analysis of each modulation test the K70 measures the same signal: modulation,
+symbol rate, filters set and read back, then K70 MER, EVM, frequency / symbol rate error, I/Q offset, gain imbalance
+and quadrature error are listed next to the software values (limits as for the software values). Without K70 the
+step is a SKIP row.
+
 ### Sessions end too early - how long does a session last?
 Unit control → **Minimum session duration** (default 30 s, also a per-plan parameter). Every session command is
 sent with the largest count (2047), SET_Time_SNR is raised to at least this time, and the station estimates how

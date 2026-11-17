@@ -859,6 +859,14 @@ class PlanEditor(QtWidgets.QDialog):
                              "'Automatic' adds them when the plan has built-in BOS tests; a plan of supply,\n"
                              "operator or PC steps then runs without them (and without the FSW).")
         f.addRow("Preparation", self.prep)
+        self.k70 = QtWidgets.QCheckBox("Also measure BPSK / OQPSK with the FSW-K70 (VSA) when it is installed")
+        self.k70.setChecked(bool(self.opts.get("k70", False)))
+        self.k70.setToolTip("After the software demodulation of each modulation test the FSW-K70 measures the same "
+                            "signal:\nits Tx filter is set to RRC with the station's roll-off (OQPSK) / off (SP-L "
+                            "BPSK), the measurement filter to auto,\nboth read back and checked; MER, EVM, frequency, "
+                            "symbol rate, I/Q offset, gain imbalance and quadrature error\nare reported next to the "
+                            "software values. Skipped (SKIP row) when the FSW has no K70.")
+        f.addRow("FSW-K70", self.k70)
         v.addLayout(f)
         h = QtWidgets.QHBoxLayout()
         self.list = QtWidgets.QListWidget()
@@ -972,6 +980,7 @@ class PlanEditor(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Test plan", "Add at least one step or test.")
             return
         self.opts["prep"] = self.prep.currentData()
+        self.opts["k70"] = self.k70.isChecked()
         super().accept()
 
     def value(self):

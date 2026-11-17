@@ -30,7 +30,7 @@ for %%F in (FAQ.md README.md ABOUT.md bos_commands_0102.json) do if exist %%F se
   --name KTR_TEST %ICONARGS% ^
   --hidden-import bench_monitor --hidden-import canable_analyzer ^
   --hidden-import can_commands --hidden-import telemetry ^
-  --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod --hidden-import bos_station --hidden-import bos_analysis --hidden-import bos_protocol --hidden-import bos_decode --hidden-import bos_shr --hidden-import bos_iqfile --hidden-import i18n --hidden-import bos_ru --hidden-import bos_plan --hidden-import bos_steps --hidden-import ktr_control --hidden-import bos_mdfiles --hidden-import bos_dac_cal --hidden-import telemetry_ru --hidden-import it6800_supply --hidden-import chai_can ^
+  --hidden-import dashboard --hidden-import log_viewer --hidden-import tfg_generator --hidden-import help_tab --hidden-import n6700_supply --hidden-import iq_demod --hidden-import bos_station --hidden-import bos_analysis --hidden-import bos_protocol --hidden-import bos_decode --hidden-import bos_shr --hidden-import bos_iqfile --hidden-import i18n --hidden-import bos_ru --hidden-import bos_plan --hidden-import bos_steps --hidden-import ktr_control --hidden-import bos_mdfiles --hidden-import bos_dac_cal --hidden-import bos_rolloff --hidden-import telemetry_ru --hidden-import it6800_supply --hidden-import chai_can ^
   --hidden-import pyvisa_py --hidden-import serial.tools.list_ports ^
   --collect-submodules pyvisa --collect-submodules pyvisa_py --hidden-import pyvisa.ctwrapper --collect-submodules can ^
   --runtime-hook rthook_visa.py --exclude-module tkinter --exclude-module matplotlib ^

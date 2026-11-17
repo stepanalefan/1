@@ -329,7 +329,7 @@ DETECTORS = [("Auto", "AUTO"), ("Positive peak", "POS"), ("RMS", "RMS"), ("Avera
              ("Negative peak", "NEG"), ("Sample", "SAMP"), ("Auto peak", "APE")]
 TRACE_MODES = [("Clear/Write", "WRIT"), ("Max hold", "MAXH"), ("Min hold", "MINH"),
                ("Average", "AVER"), ("View", "VIEW")]
-IQ_DEFAULTS = {"modulation": "QPSK", "symbol_rate": 16e3, "sps": 8, "filter": "RRC", "alpha": 0.35,
+IQ_DEFAULTS = {"modulation": "QPSK", "symbol_rate": 16e3, "sps": 8, "filter": "RRC", "alpha": 0.25,
                "nsym": 2000}
 IQ_SOFT = tuple(IQ_DEFAULTS)            # demodulator parameters kept in the program, not on the FSW
 IQ_SPS = ["2", "4", "8", "16"]
@@ -1122,7 +1122,7 @@ class DemoFsw:
         self.cfe = 150.0
         self.s = {"center": 2.4e9, "ref_level": -10.0, "att_auto": True, "att": 10.0,
                   "preamp": False, "modulation": "16QAM", "symbol_rate": 10e6, "prat": 4,
-                  "tfil_state": True, "tfil_name": "RRC", "tfil_alpha": 0.35,
+                  "tfil_state": True, "tfil_name": "RRC", "tfil_alpha": 0.25,
                   "mfil_auto": True, "rlen_auto": False, "capture_len": 4000,
                   "result_len": 1000, "sweep_count": 1, "equalizer": False,
                   "signal_type": "CONT", "pattern_sig": False,

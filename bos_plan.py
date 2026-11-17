@@ -472,7 +472,33 @@ def t_mod(mod):
         out = set_mode(st, m, state["att"], demo)
         state["mode"] = m
         out += keep_session_note(st)
-        return out + _mod_steps(st, mod, demo)
+        out += _mod_steps(st, mod, demo)
+        if mod == "OQPSK" and st.cfg.get("oqpsk_rrc", True):
+            sr, a, bw = st.cfg.get("sr_oqpsk", 131.072e6), st.cfg.get("alpha", 0.25), st.cfg.get("fsw_bw")
+            sub = [Step("pc", L("α from the 75 / 50 / 25 % power crossings of the raised cosine (α = 6·Δf / sr) and "
+                                "from the receive RRC with the best MER - Roll-off tab",
+                                "α по переходам спектра через 75 / 50 / 25 % мощности (α = 6·Δf / sr) и по RRC "
+                                "приёма с лучшим MER - вкладка «Скругление»"))]
+            if bw and sr * (1 + a) > 0.97 * bw:
+                sub.insert(0, Step("fsw", L(f"signal wider than the FSW bandwidth: 2 more captures at carrier ± "
+                                            f"{0.4 * sr / 1e6:.0f} MHz, one transition band each",
+                                            f"сигнал шире полосы FSW: ещё 2 записи на несущей ± {0.4 * sr / 1e6:.0f} "
+                                            f"МГц, по одному склону в каждой")))
+            out.append(Step("pc", L("RRC roll-off of the signal", "скругление RRC сигнала"), sub))
+        if getattr(st, "_desc_k70", False):
+            a = st.cfg.get("alpha", 0.25)
+            rrc = mod == "OQPSK" and st.cfg.get("oqpsk_rrc", True)
+            out.append(Step("fsw", L("FSW-K70 (VSA): same signal measured by the analyzer", "FSW-K70 (VSA): тот же "
+                                     "сигнал измеряется анализатором"), [
+                Step("info", f"DDEM:FORM / QPSK:FORM {mod}, DDEM:SRAT, DDEM:TFIL:STAT {'ON' if rrc else 'OFF'}" +
+                     (f", DDEM:TFIL:NAME 'RRC', DDEM:TFIL:ALPH {a:g}" if rrc else "") + ", DDEM:MFIL:AUTO ON"),
+                Step("rx", L("filter and modulation read back and checked", "фильтр и модуляция считываются и "
+                             "проверяются")),
+                Step("pc", L("K70 MER, EVM, frequency / symbol rate error, I/Q offset, gain imbalance, quadrature "
+                             "error next to the software values (skipped without K70)",
+                             "MER, EVM, ошибки частоты / символьной скорости, смещение I/Q, дисбаланс, квадратура K70 "
+                             "рядом с программными значениями (без K70 - пропуск)"))]))
+        return out
     return f
 
 
@@ -745,6 +771,7 @@ def _describe(st, plan, bs):
     out.append(("", L("Before the plan", "Перед планом"), prep, None))
     state = {"mode": None, "att": int(st.cfg.get("att_code", 0))}
     st._desc_cmds = opts.get("cmds", {})
+    st._desc_k70 = bool(opts.get("k70", False))
     for t, ix in zip(tests, idx):
         st._desc_tid = None if bs.is_step(t) else t
         if bs.is_step(t):

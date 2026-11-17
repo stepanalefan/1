@@ -411,6 +411,177 @@ def bpsk_isi(i_sym) -> dict:
             "isi_side": side}
 
 
+def _rc_psd(f, sr, a):
+    """Raised-cosine power spectrum (= |RRC|²), unit height, at frequencies f."""
+    af = np.abs(f)
+    f1, f2 = sr * (1 - a) / 2, sr * (1 + a) / 2
+    out = np.where(af <= f1, 1.0, 0.0)
+    mid = (af > f1) & (af < f2)
+    out[mid] = 0.5 * (1 + np.cos(np.pi / (sr * a) * (af[mid] - f1)))
+    return out
+
+
+def _isi_mer(z, mod):
+    """MER after removing the fitted I/Q gain / quadrature / offset: what is left is noise and ISI (the part a
+    roll-off mismatch changes)."""
+    pts = iq_demod.ideal_points(mod)
+    z = z[len(z) // 20: -len(z) // 20 or None]
+    d = pts[np.argmin(np.abs(z[:, None] - pts[None, :]), axis=1)]
+    A = np.column_stack([d.real, d.imag, np.ones(len(d))])
+    if np.linalg.matrix_rank(A[:, :2]) < 2:
+        A = np.column_stack([d.real, np.ones(len(d))])
+    cr = np.linalg.lstsq(A, z.real, rcond=None)[0]
+    ci = np.linalg.lstsq(A, z.imag, rcond=None)[0]
+    zf = A @ cr + 1j * (A @ ci)
+    return _db(float(np.mean(np.abs(zf) ** 2)) / max(float(np.mean(np.abs(z - zf) ** 2)), 1e-30))
+
+
+def rolloff_from_edges(caps, fs, sr, fsw_bw=None):
+    """α from captures tuned off the carrier (caps = [(x, shift_hz)]): each one holds one transition band well
+    inside the FSW bandwidth; the 75 / 50 / 25 % crossings of that side give α = 6·Δf / sr."""
+    ests = []
+    lim = 0.45 * (fsw_bw or 0.94 * fs)
+    for x, shift in caps:
+        f, p = psd(np.asarray(x, complex), fs, 4096)
+        keep = np.abs(f) < lim
+        fb = f[keep]                                        # baseband frequency of the capture
+        f, p = fb + shift, p[keep]                          # frequency relative to the carrier
+        df = float(np.median(np.diff(f)))
+        k = max(9, int(0.02 * sr / df) | 1)
+        ps = np.convolve(p, np.ones(k) / k, mode="same")
+        cen = (np.abs(f) < 0.2 * sr) & (np.abs(fb) < 0.7 * lim)   # passband level from the flat middle only
+        if not np.any(cen):
+            continue
+        ref = float(np.median(ps[cen]))
+        side = np.sign(shift)
+        sel = (side * f > 0.2 * sr) & (side * f < 0.95 * sr)     # where a transition band (α ≤ 0.9) can be
+        fs_, pp = np.abs(f[sel]), ps[sel]
+        o = np.argsort(fs_)
+        fs_, pp = fs_[o], pp[o]
+
+        def cross(level):
+            idx = np.nonzero(pp >= level * ref)[0]
+            if not len(idx) or idx[-1] >= len(pp) - 1:
+                return None
+            i = idx[-1]
+            return float(fs_[i] + (pp[i] - level * ref) / max(pp[i] - pp[i + 1], 1e-30) * (fs_[i + 1] - fs_[i]))
+        f75, f50, f25 = cross(0.75), cross(0.5), cross(0.25)
+        if f75 is not None and f50 is not None:
+            ests.append(6 * (f50 - f75) / sr)
+        if f25 is not None and f50 is not None:
+            ests.append(6 * (f25 - f50) / sr)
+    if not ests:
+        return None
+    return {"alpha_edges": float(np.median(ests)), "edges_spread": float(np.ptp(ests)) if len(ests) > 1 else 0.0,
+            "n": len(ests)}
+
+
+def estimate_rolloff(x, fs, sr, mod="OQPSK", alpha_set=0.25, fsw_bw=None, cfe=0.0, mer_search=True):
+    """RRC roll-off of the transmitted signal, two independent ways:
+
+    * spectrum: the PSD of an RRC-shaped signal is a raised cosine (only inside the FSW bandwidth);
+    * matched filter: the demodulator's RRC matches the transmitter only at the right α - otherwise ISI lowers the
+      MER; a golden-section search over α finds the maximum MER.
+    Spectrum: α from the 75 % / 50 % / 25 % power crossings of the raised cosine on both sides (robust to PA
+    regrowth and noise, which stay far below -6 dB; referenced to the measured 50 % point, so frequency offsets
+    cancel). Returns {"alpha_spec", "spec_spread", "alpha_mer", "mer_set", "mer_best", "mer_prominence", "curve",
+    "alpha_rec", "basis", "plot"}."""
+    out = {"alpha_set": alpha_set}
+    x = np.asarray(x, complex)
+    if cfe:
+        x = x * np.exp(-2j * np.pi * cfe * np.arange(len(x)) / fs)
+    f, p = psd(x, fs, 4096)
+    lim = 0.47 * fs
+    if fsw_bw:
+        lim = min(lim, 0.45 * fsw_bw)                     # the FSW I/Q filter bends the edges
+    use = np.abs(f) < lim
+    f, p = f[use], np.maximum(p[use], 1e-30)
+    # level crossings of the raised cosine: f50 = sr/2 for any α, f75 = sr/2 - sr·α/6, f25 = sr/2 + sr·α/6
+    df = float(np.median(np.diff(f))) if len(f) > 1 else 1.0
+    k = max(9, int(0.02 * sr / df) | 1)                   # smooth over ~2 % of the symbol rate
+    ps = np.convolve(p, np.ones(k) / k, mode="same")
+    ref = float(np.median(ps[np.abs(f) < 0.2 * sr]))
+    ests, cuts = [], False
+    for sign in (1, -1):
+        sel = (sign * f > 0.2 * sr)
+        fs_, pp = np.abs(f[sel]), ps[sel]
+        order = np.argsort(fs_)
+        fs_, pp = fs_[order], pp[order]
+
+        def cross(level):
+            """Outermost frequency where the spectrum is still above level (searched from the edge inwards,
+            so ripple inside the passband cannot trigger it)."""
+            idx = np.nonzero(pp >= level * ref)[0]
+            if not len(idx) or idx[-1] >= len(pp) - 1:
+                return None                                # still above the level at the edge: cut off
+            i = idx[-1]
+            f0, f1, y0, y1 = fs_[i], fs_[i + 1], pp[i], pp[i + 1]
+            return float(f0 + (y0 - level * ref) / max(y0 - y1, 1e-30) * (f1 - f0))
+        f75, f50, f25 = cross(0.75), cross(0.5), cross(0.25)
+        if f75 is not None and f50 is not None:
+            ests.append(6 * (f50 - f75) / sr)
+        if f25 is not None and f50 is not None and f25 < 0.98 * lim:
+            ests.append(6 * (f25 - f50) / sr)
+        else:
+            cuts = True
+    if ests:
+        out["alpha_spec"] = float(np.clip(np.median(ests), 0.0, 1.0))
+        out["spec_spread"] = float(np.ptp(ests)) if len(ests) > 1 else float("nan")
+        out["edge_cut"] = cuts
+    best = (out["alpha_spec"], 0.0) if ests else None
+    if mer_search:
+        xd, fsd = x, fs
+        if abs(fs / sr - round(fs / sr)) > 1e-6 or round(fs / sr) < DEMOD_SPS:
+            xd, fsd = resample(x, fs, sr * DEMOD_SPS)
+        cache = {}
+
+        def mer(a):
+            a = round(float(a), 4)
+            if a not in cache:
+                try:
+                    r = iq_demod.demodulate(xd, fsd, sr, mod, "RRC", a)
+                    cache[a] = _isi_mer(r["i"] + 1j * r["q"], mod)
+                except Exception:
+                    cache[a] = float("nan")
+            return cache[a] if math.isfinite(cache[a]) else -1e9
+        grid = [round(a, 3) for a in np.arange(0.10, 0.6001, 0.025)]
+        ms = [mer(a) for a in grid]
+        k = int(np.argmax(ms))
+        a_best = grid[k]
+        if 0 < k < len(grid) - 1:                          # parabola through the peak and its neighbours
+            y0, y1, y2 = ms[k - 1], ms[k], ms[k + 1]
+            den = y0 - 2 * y1 + y2
+            if den < 0:
+                a_best = grid[k] + 0.025 * 0.5 * (y0 - y2) / den
+        a_best = float(min(0.6, max(0.1, a_best)))
+        out["alpha_mer"] = round(a_best, 3)
+        out["mer_best"] = mer(a_best)
+        out["mer_set"] = mer(alpha_set)
+        near = [mer(a) for a in (a_best - 0.1, a_best + 0.1) if 0.05 <= a <= 0.8]
+        near = [m for m in near if m > -1e8]
+        out["mer_prominence"] = float(out["mer_best"] - max(near)) if near else float("nan")
+        out["curve"] = sorted((a, m) for a, m in cache.items() if math.isfinite(m) and m > -1e8)
+    # spectrum for the plot (≤ 600 points): measured, fitted RC, RC at the set α
+    if best:
+        step = max(1, len(f) // 600)
+        A = np.column_stack([_rc_psd(f, sr, best[0]), np.ones_like(f)])
+        coef = np.maximum(np.linalg.lstsq(A, p, rcond=None)[0], [0, 1e-30])
+        out["plot"] = {"f": f[::step], "p": ps[::step], "fit": (A @ coef)[::step],
+                       "set": (np.column_stack([_rc_psd(f, sr, alpha_set), np.ones_like(f)]) @ coef)[::step]}
+    # which estimate to believe: the MER curve when it has a clear peak, else the spectrum fit
+    a_sig = max(out.get("alpha_spec", alpha_set), alpha_set)     # a low centred estimate must not hide it
+    out["band_limited"] = bool(fsw_bw and sr * (1 + a_sig) > 0.97 * fsw_bw)
+    if out["band_limited"] and "alpha_spec" in out:
+        # the FSW bandwidth cuts the signal edges: the best receive α then describes the capture, not the unit
+        out["alpha_rec"] = round(out["alpha_spec"], 3)
+        out["basis"] = "spectrum (signal wider than the FSW bandwidth: the MER peak reflects the band limit)"
+    elif _finite(out.get("mer_prominence")) and out["mer_prominence"] >= 0.5:
+        out["alpha_rec"], out["basis"] = out["alpha_mer"], "matched-filter MER peak"
+    elif "alpha_spec" in out:
+        out["alpha_rec"], out["basis"] = round(out["alpha_spec"], 3), "spectrum fit (MER curve flat)"
+    return out
+
+
 def analyze_modulated(x, fs, cfg, expected_mod):
     """Full analysis of one modulated capture. cfg: symbol_rate, alpha, carrier, loss_db."""
     sr, alpha = cfg["symbol_rate"], cfg["alpha"]
@@ -479,6 +650,11 @@ def analyze_modulated(x, fs, cfg, expected_mod):
     ph = np.angle(z / d)
     out.update(mer=r["mer"], evm=r["evm"], cfe=r["cfe"], srerr=r["srerr"], iqoff=r["iqoff"],
                nsym=r["nsym"], i=r["i"], q=r["q"])
+    if cfg.get("est_rolloff") and filt == "RRC":
+        try:
+            out["rolloff"] = estimate_rolloff(x, fs, sr, expected_mod, alpha, cfg.get("fsw_bw"), r["cfe"])
+        except Exception as e:                            # never fail the measurement for it
+            out["rolloff"] = {"error": f"{type(e).__name__}: {e}"}
     out["cfe_ppm"] = r["cfe"] / cfg["carrier"] * 1e6 if cfg.get("carrier") else float("nan")
     out["phase_err_deg"] = float(np.degrees(np.sqrt(np.mean(ph ** 2))))
     out["mag_err_pct"] = float(100 * np.sqrt(np.mean((np.abs(z) / np.abs(d) - 1) ** 2)))
@@ -1321,6 +1497,7 @@ FAULTS = [  # key, label, default magnitude, unit
     ("gain_imb", "Q path gain error", 2.0, "dB"),
     ("quad", "Quadrature error", 8.0, "deg"),
     ("iq_skew", "I/Q time skew (Q path delayed)", 400.0, "ps"),
+    ("true_alpha", "Real RRC roll-off of the unit (≠ the setting)", 0.35, ""),
     ("bb_slow", "Baseband filter too slow (corner, × symbol rate)", 0.6, "× SR"),
     ("leak", "LO leakage", -22.0, "dBc"),
     ("pn", "Excess phase noise", 6.0, "deg"),
@@ -1481,6 +1658,16 @@ class BosSimulator:
         if "lo_unlock" in self.faults:
             cfe += rng.uniform(-3e5, 3e5)
         clk = ppm_int + self.faults.get("clk_ppm", 0.0)
+        if self.mode != "cw" and not getattr(self, "_oversampling", False) and \
+                abs(f_set - center) + sr * 0.9 > fs / 2:
+            # tuned off the carrier (roll-off edge captures): the FSW filters before sampling, so simulate at 2 × fs,
+            # band-limit and decimate - otherwise the far edge of the signal would alias into the capture
+            self._oversampling = True
+            try:
+                x2 = self.capture(center, 2 * fs, 2 * n, sr, filt)
+            finally:
+                self._oversampling = False
+            return band_limit(x2, 2 * fs, min(cfg.get("fsw_bw") or fs, 0.9 * fs))[::2]
         if abs(cfe) > fs / 2:
             return noise
         if self.mode == "cw":
@@ -1490,15 +1677,15 @@ class BosSimulator:
             sps = int(round(fs / sr))
             if abs(fs / sr - sps) > 1e-6 or sps < 2:      # FSW rate not a multiple: generate at 4 sps, resample
                 n4 = int(math.ceil(n * 4 * sr / fs)) + 64
-                s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
+                s4 = iq_demod.simulate(mod, sr, 4, n4 // 4 + 1, snr_db=80, cfo=0.0, alpha=self.faults.get("true_alpha", cfg["alpha"]), filt=filt,
                                        clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)
                 s = resample(s4, 4 * sr, fs)[0][:n]
             elif mod == "BPSK" and sps >= 2:
-                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
+                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=self.faults.get("true_alpha", cfg["alpha"]), filt=filt,
                                       clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng,
                                       symbols=self.ur_symbols(n // sps + 61))[:n]
             else:
-                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=cfg["alpha"], filt=filt,
+                s = iq_demod.simulate(mod, sr, sps, n // sps + 1, snr_db=80, cfo=0.0, alpha=self.faults.get("true_alpha", cfg["alpha"]), filt=filt,
                                       clock_ppm=clk, delay=rng.random(), phase=0.0, rng=rng)[:n]
             if len(s) < n:
                 s = np.r_[s, np.zeros(n - len(s))]

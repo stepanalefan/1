@@ -895,7 +895,7 @@ class BosStation(QtWidgets.QWidget):
                              "tfg_ref_apply": True, "tfg_ref_amp": 2.0, "tfg_ref_offs": 2.0,
                              "ref_wait_s": 30},
                      "supply": "none", "plans": dict(DEFAULT_PLANS), "plan": "Full test",
-                     "plan_opts": {},                 # plan -> {"prep": auto/on/off, "ctl": {overrides}}
+                     "plan_opts": {"Modulation only": {"k70": True}},   # plan -> {"prep", "ctl", "cmds", "k70"}
                      "unit": {"serial": "", "operator": ""}}
         try:
             with open(STORE_FILE, encoding="utf-8") as fh:
@@ -908,6 +908,10 @@ class BosStation(QtWidgets.QWidget):
             if d.get("plans"):
                 self.data["plans"] = d["plans"]
                 self.data["plans"].setdefault("Command set (0102)", ["cmds"])
+                if not d.get("k70_ver"):                      # K70 measurement on in "Modulation only" by default
+                    po = d.setdefault("plan_opts", {})
+                    if "Modulation only" in self.data["plans"]:
+                        po.setdefault("Modulation only", {}).setdefault("k70", True)
             self.data["plan_opts"] = {k: v for k, v in d.get("plan_opts", {}).items() if k in self.data["plans"]}
             for k in ("line", "att_line"):                # one line per unit before: "BOS" -> "BOS CAN1"
                 if self.data["ctl"].get(k) in ("BOS", "AFAR", "UPNG"):
@@ -925,6 +929,7 @@ class BosStation(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, lambda: self.log("BOS station: sender address changed 0x18 → 0x21 (ВМ 2): "
                                                          "commands now use IDs 0x0869xxxx", "warn"))
         self.data["sender_ver"] = 2
+        self.data["k70_ver"] = 1
         self.data["lim_ver"] = 2
         self.cfg, self.lim, self.ctl = self.data["cfg"], self.data["lim"], self.data["ctl"]
         self.sim = ba.BosSimulator(self.cfg)
@@ -1049,6 +1054,9 @@ class BosStation(QtWidgets.QWidget):
         import bos_dac_cal
         self.dac_cal = bos_dac_cal.DacCalPanel(self)
         self.tabs.addTab(self.dac_cal, "DAC calibration")
+        import bos_rolloff
+        self.rolloff = bos_rolloff.RolloffPanel(self)
+        self.tabs.addTab(self.rolloff, "Roll-off")
         self.tabs.addTab(self._build_history(), "History")
         split.addWidget(self.tabs)
         split.setCollapsible(1, True)
@@ -2331,6 +2339,7 @@ class BosStation(QtWidgets.QWidget):
             return
         self._collect()
         self._plan_over = dict(opts.get("ctl", {}))
+        self._plan_k70 = bool(opts.get("k70", False))
         self._plan_cmds_run = json.loads(json.dumps(opts.get("cmds", {})))
         self._ctl_logged = set()
         self._skip_pending = None
@@ -3419,8 +3428,10 @@ class BosStation(QtWidgets.QWidget):
             return dict(self.cfg, symbol_rate=sr, fs=sr * self.cfg["sps_bpsk"], nsym=nsym,
                         filter="NONE" if self.cfg.get("bpsk_rect", True) else "RRC")
         sr = self.cfg["sr_oqpsk"]
+        ro = getattr(self, "rolloff", None)
         return dict(self.cfg, symbol_rate=sr, fs=min(self.cfg["fs_oqpsk"], sr * 8),
-                    filter="RRC" if self.cfg.get("oqpsk_rrc", True) else "NONE")
+                    filter="RRC" if self.cfg.get("oqpsk_rrc", True) else "NONE",
+                    est_rolloff=bool(ro is not None and ro.wanted()))
 
     def _obw_nom(self, mod):
         """Expected occupied bandwidth: symbol rate × (1 + roll-off), at most the FSW I/Q bandwidth."""
@@ -3555,8 +3566,112 @@ class BosStation(QtWidgets.QWidget):
         yield from self._set_mode(mod.lower())
         r = yield from self._mod_capture(mod)
         self.res[f"mod_{mod}"] = r
+        ro = r.get("rolloff")
+        if ro and ro.get("band_limited") and not self.live_mode:
+            yield from self._rolloff_edges(mod, r)          # signal wider than the FSW band: measure each edge
         self._add_capture(mod, r)
         self._mod_rows(T, mod, r)
+        if getattr(self, "_plan_k70", False):
+            yield from self._k70_measure(T, mod, r)
+
+    def _rolloff_edges(self, mod, r):
+        """Two captures tuned ±0.4·symbol rate off the carrier: each transition band of the raised cosine then lies
+        inside the FSW bandwidth (a 131 Msym/s signal with α 0.35 is 177 MHz wide)."""
+        c = self._mcfg(mod)
+        c["est_rolloff"] = False
+        c["nsym"] = max(int(c["nsym"]), 32000)               # ±0.02 needs enough spectrum averages
+        sr, fs = c["symbol_rate"], c["fs"]
+        n = self._mod_n(c)
+        caps = []
+        for sgn in (1, -1):
+            shift = sgn * 0.4 * sr
+            x = yield from self._capture("raw", c["carrier"] + shift, fs, n, lambda x, f: {"x": x},
+                                         f"roll-off edge {'+' if sgn > 0 else '-'}{abs(shift) / 1e6:.0f} MHz",
+                                         sr=sr, filt=c["filter"])
+            caps.append((x["x"], shift))
+        e = ba.rolloff_from_edges(caps, fs, sr, self.cfg.get("fsw_bw"))
+        ro = r["rolloff"]
+        if e:
+            ro.update(e)
+            ro["alpha_spec_centre"] = ro.get("alpha_spec")
+            ro["alpha_spec"] = ro["alpha_rec"] = round(e["alpha_edges"], 3)
+            ro["basis"] = "spectrum, both edges captured off-centre (signal wider than the FSW bandwidth)"
+            ro["edge_cut"] = False
+
+    def _k70_measure(self, T, mod, r_sw):
+        """The same signal measured by the FSW-K70 (VSA): its Tx / measurement filter set to the station's (RRC with
+        the configured α for OQPSK, rectangular SP-L BPSK without Tx filter), read back and checked, then MER, EVM,
+        errors compared with the software demodulation."""
+        dev = getattr(getattr(self.host, "worker", None), "dev", None)
+        if dev is None or not getattr(dev, "k70", False):
+            self._row(T, "FSW-K70 measurement", None, "", "", "SKIP",
+                      note="FSW-K70 not installed - software demodulation only")
+            return
+        c = self._mcfg(mod)
+        rrc = c["filter"] == "RRC"
+        alpha = float(self.cfg.get("alpha", 0.25))
+        want = {"modulation": mod, "center": c["carrier"], "symbol_rate": c["symbol_rate"], "tfil_state": rrc,
+                "tfil_name": "RRC", "tfil_alpha": alpha, "mfil_auto": True, "rlen_auto": False,
+                "capture_len": int(min(c["nsym"], 50000)), "sweep_count": 1, "signal_type": "CONT",
+                "burst": False, "pattern": False, "trig_source": "IMM", "equalizer": False}
+        autolevel = self.cfg.get("autolevel", True)
+
+        def job():
+            base = dev.read_settings()
+            st_ = dict(base)
+            st_.update(want)
+            cmds, errs, notes = dev.apply_settings(st_, base)
+            if autolevel:
+                dev.auto_level("vsa")
+            rb = dev.read_settings()
+            res = dev.measure()
+            extra = {}
+            for k, q in (("gimb", "GIMB"), ("qerr", "QERR"), ("perr", "PERR"), ("merr", "MERR")):
+                try:
+                    extra[k] = float(str(dev.query(f"CALC3:MARK:FUNC:DDEM:STAT:{q}?")).split(",")[0])
+                except Exception:
+                    extra[k] = float("nan")
+            return {"res": res or {}, "rb": rb, "errs": errs, "cmds": cmds, "extra": extra}
+        self.step_lbl.setText(f"{T}: FSW-K70 measurement …")
+        st, out = yield ("fsw", job)
+        if st == "err":
+            self._row(T, "FSW-K70 measurement", None, "", "", "ERROR", note=str(out))
+            return
+        rb, res, ex = out["rb"], out["res"], out["extra"]
+        for e in out["errs"]:
+            self.log(f"BOS station: FSW-K70: {e}", "warn")
+        name = str(rb.get("tfil_name") or "").strip("'\"").upper()
+        if rrc:
+            ok = rb.get("tfil_state") is not False and name.startswith("RRC") and _fin(rb.get("tfil_alpha")) and \
+                abs(rb["tfil_alpha"] - alpha) < 1e-3 and rb.get("mfil_auto") is not False
+            self._row(T, "FSW-K70 filter (read back)", None, "", f"Tx RRC α={alpha:g}, meas. filter auto",
+                      "PASS" if ok else "FAIL",
+                      text=f"Tx {name or '?'} α={rb.get('tfil_alpha')}, state {rb.get('tfil_state')}, meas. filter "
+                           f"auto {rb.get('mfil_auto')}")
+        else:
+            self._row(T, "FSW-K70 filter (read back)", None, "", "no Tx filter (SP-L)",
+                      "PASS" if rb.get("tfil_state") is False else "WARN",
+                      text=f"Tx filter state {rb.get('tfil_state')}")
+        mod_rb = str(rb.get("modulation") or "")
+        self._row(T, "FSW-K70 modulation (read back)", None, "", mod, "PASS" if mod_rb.upper() == mod else "FAIL",
+                  text=mod_rb or "?")
+        L = self.lim
+        sw = lambda k, fmt="{:.2f}": (f"software {fmt.format(r_sw[k])}" if _fin(r_sw.get(k)) else "")
+        demo = " (demo FSW: simulated K70 values)" if self._is_demo() else ""
+        self._lim_row(T, "K70 MER", res.get("mer", float("nan")), "dB", L["mer_min"], None, note=sw("mer") + demo)
+        self._lim_row(T, "K70 EVM RMS", res.get("evm", float("nan")), "%", None, L["evm_max"], note=sw("evm"))
+        self._lim_row(T, "K70 carrier frequency error", res.get("cfe", float("nan")), "Hz", -L["cfe_max_hz"],
+                      L["cfe_max_hz"], "{:+.1f}", note=sw("cfe", "{:+.1f}"))
+        self._lim_row(T, "K70 symbol rate error", res.get("srerr", float("nan")), "ppm", -L["srerr_max_ppm"],
+                      L["srerr_max_ppm"], "{:+.2f}", note=sw("srerr", "{:+.2f}"))
+        self._lim_row(T, "K70 I/Q offset", res.get("iqoff", float("nan")), "dB", None, L["iq_offset_max_dbc"],
+                      "{:.1f}", note=sw("offset_dbc", "{:.1f}"))
+        if mod != "BPSK":
+            self._row(T, "K70 gain imbalance", ex.get("gimb"), "dB", "", "INFO", spec="{:+.3f}",
+                      note=sw("gain_imb", "{:+.3f}"))
+            self._row(T, "K70 quadrature error", ex.get("qerr"), "°", "", "INFO", spec="{:+.2f}",
+                      note=sw("quad_err", "{:+.2f}"))
+        self.res[f"k70_{mod}"] = {**res, **ex}
 
     def _mod_rows(self, T, mod, r):
         L = self.lim
@@ -3596,6 +3711,19 @@ class BosStation(QtWidgets.QWidget):
             self._row(T, "Carrier frequency wander (10 ms windows)", fw["pp_hz"], "Hz p-p", "", "INFO", spec="{:.0f}",
                       note=f"max {fw['max_rate_hz_s']:.0f} Hz/s over {fw['span_s']:.1f} s")
         self._row(T, "MER after I/Q correction", r["mer_corr"], "dB", "", "INFO")
+        c_ = self._mcfg(mod)
+        self._row(T, "Demodulation filter (software)", None, "", "", "INFO",
+                  text=f"RRC α = {self.cfg.get('alpha', 0.25):g} (matched)" if c_["filter"] == "RRC" else
+                  "none - rectangular pulses (SP-L)")
+        ro = r.get("rolloff")
+        if ro and "error" not in ro and _fin(ro.get("alpha_spec")):
+            a_set = self.cfg.get("alpha", 0.25)
+            rec = ro.get("alpha_rec", ro["alpha_spec"])
+            off = abs(rec - a_set) > 0.05
+            self._row(T, "RRC roll-off α of the signal", rec, "", f"set {a_set:g} ± 0.05", "WARN" if off else "PASS",
+                      spec="{:.3f}", note=f"spectrum {ro['alpha_spec']:.3f}, best MER {ro.get('alpha_mer', float('nan')):.3f} "
+                                          f"({ro.get('basis', '')}); MER {ro.get('mer_set', float('nan')):.1f} → "
+                                          f"{ro.get('mer_best', float('nan')):.1f} dB with the best α - see the Roll-off tab")
         self._lim_row(T, "PA compression (PAPR loss)", r["compression_db"], "dB", None, L["compression_max_db"],
                       none_ok=r.get("compression_note", "n/a"))
         sp = r["spectrum"]
@@ -4187,6 +4315,8 @@ class BosStation(QtWidgets.QWidget):
     def _update_diagnosis(self):
         if hasattr(self, "dac_cal"):
             self.dac_cal.show_result(self.res)
+        if hasattr(self, "rolloff"):
+            self.rolloff.show_result(self.res)
         res = {k: v for k, v in self.res.items() if not k.startswith("_") and k != "extra"}
         offline = self.run_info.get("tests") == ["file"]
         self.findings = ba.diagnose(res, {} if offline else self.tlm_snapshot(), self.cfg, self.lim) + \
