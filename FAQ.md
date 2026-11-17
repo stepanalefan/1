@@ -69,6 +69,7 @@ All next to the program / EXE (logs: in the log folder chosen on the HMP4040 tab
 | `dashboard.json` | Test sequences, telemetry watch list, Main-tab settings |
 | `can_commands.json` | CAN command library and CAN scripts |
 | `can_lines.json` | CAN line setup (adapter, channel, bitrate per line) |
+| `device_addresses.json` | Instrument addresses and connection settings (FSW, HMP4040, N6701C, IT6832, TFG6806), saved after each successful connection |
 | `hmp_log_YYYY-MM-DD.csv` | HMP4040: master, on/off, set and measured V / A / W per channel |
 | `telemetry_log_YYYY-MM-DD.csv` | Telemetry watch list values (optionally only changes) |
 | `can_log_*.log` | CAN recording (candump format, line name as interface) |
