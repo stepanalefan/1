@@ -226,6 +226,14 @@ Pass|Conforme|Bestanden|Conforme|合格|Норма
 Fail|Non conforme|Nicht bestanden|Non conforme|不合格|Не норма
 Abort plan|Arrêter le plan|Plan abbrechen|Interrompi piano|計画を中止|Прервать план
 Control KTR|Contrôle KTR|KTR-Steuerung|Controllo KTR|KTR制御|Управление КТР
+Choose a command|Choisir une commande|Befehl wählen|Scegli un comando|コマンドを選択|Выберите команду
+Data field|Champ de données|Datenfeld|Campo dati|データフィールド|Поле данных
+Filter: code, mnemonic or text …|Filtre : code, mnémonique ou texte …|Filter: Code, Mnemonik oder Text …|Filtro: codice, mnemonico o testo …|フィルタ: コード、ニーモニック、テキスト …|Фильтр: код, мнемоника или текст …
+expect КВ+|attendre КВ+|КВ+ erwarten|attendi КВ+|КВ+を期待|ожидать КВ+
+expect КВ-|attendre КВ-|КВ- erwarten|attendi КВ-|КВ-を期待|ожидать КВ-
+any answer|toute réponse|beliebige Antwort|qualsiasi risposta|任意の応答|любой ответ
+Byte|Octet|Byte|Byte|バイト|Байт
+Bits|Bits|Bits|Bit|ビット|Биты
 DAC calibration|Étalonnage DAC|DAC-Kalibrierung|Calibrazione DAC|DAC校正|Калибровка ЦАП
 ▶ Auto-calibrate (live)|▶ Auto-étalonnage (direct)|▶ Autokalibrierung (live)|▶ Auto-calibrazione (live)|▶ 自動校正 (ライブ)|▶ Автокалибровка (онлайн)
 Write to MD_SETTINGS…|Écrire dans MD_SETTINGS…|In MD_SETTINGS schreiben…|Scrivi in MD_SETTINGS…|MD_SETTINGSへ書込…|Записать в MD_SETTINGS…

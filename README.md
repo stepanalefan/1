@@ -128,6 +128,7 @@ CAN ID filter syntax: `100-1FF` range · `7E8` single · `!7DF` exclude · `18FE
 | `fsw_vsa_monitor.py` | **Start file**: main window, Spectrum Analyzer |
 | `bos_station.py` | BOS Test Station tab: plans, runner, unit control, views, reports, history |
 | `bos_plan.py` | Step-by-step description of a test plan (the *Plan sequence* column) |
+| `telemetry_ru.py` | Russian texts of the Telemetry tab (field descriptions, meanings, notes, MD editors) |
 | `bos_dac_cal.py` | DAC38J82 QMC calibration from FSW measurements: guidance, auto-calibration in live diagnose (DAC calibration tab) |
 | `bos_mdfiles.py` | MD_CONFIG / MD_SETTINGS (0102 v2): layouts, defaults, files, array transfer, editors (Telemetry → BOS) |
 | `ktr_control.py` | **Control KTR** tab (first tab): BOS commands of 0102 v2 by group with a field editor, send now / command queue with equipment steps (`ktr_control.json`) |

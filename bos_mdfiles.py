@@ -21,6 +21,12 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 import bos_protocol as bp
 
+try:
+    from telemetry_ru import T
+except Exception:                                   # pragma: no cover
+    def T(text):
+        return text
+
 MD_CONFIG, MD_STATE, MD_SETTINGS = 0x01, 0x03, 0x04
 CONFIG_LEN, SETTINGS_LEN = 136, 1024
 C_OK, C_ERR, C_DIM, C_WARN = "#4fd18b", "#ff6b6b", "#8a96a3", "#e3b341"
@@ -266,7 +272,7 @@ class ValueEdit(QtWidgets.QWidget):
         if k == "enum":
             self.w = QtWidgets.QComboBox()
             for v, t in f["values"].items():
-                self.w.addItem(f"{v} — {t}", v)
+                self.w.addItem(f"{v} — {T(t)}", v)
             self.w.currentIndexChanged.connect(self.changed)
         elif k == "i8" or (k == "u" and f.get("max", 255) <= 0xFFFF):
             self.w = QtWidgets.QSpinBox()
@@ -314,6 +320,8 @@ class MdEditor(QtWidgets.QWidget):
         self.data = default(kind)
         self.path = ""
         self.edits = {}
+        self.desc_items = []                    # (table item, field) of the Description column
+        self.note_lbl = None
         self.waiting = None                     # ("ack", t_end) / ("read", t_end)
         self.timer = QtCore.QTimer(self, singleShot=True, timeout=self._timeout)
         v = QtWidgets.QVBoxLayout(self)
@@ -364,6 +372,8 @@ class MdEditor(QtWidgets.QWidget):
             note.setWordWrap(True)
             note.setStyleSheet(f"color:{C_DIM};")
             v.addWidget(note)
+            self.note_lbl = (note, note.text())
+            note.setText(T(note.text()))
         self.hexv = QtWidgets.QPlainTextEdit()
         self.hexv.setReadOnly(True)
         self.hexv.setFont(_mono())
@@ -390,7 +400,8 @@ class MdEditor(QtWidgets.QWidget):
                 n = f.get("len", 1)
                 by = f"{f['byte']}" + (f"-{f['byte'] + n - 1}" if n > 1 else "")
             items = [QtWidgets.QTableWidgetItem(by), QtWidgets.QTableWidgetItem(f["name"]),
-                     None, QtWidgets.QTableWidgetItem(f.get("note", ""))]
+                     None, QtWidgets.QTableWidgetItem(T(f.get("note", "")))]
+            self.desc_items.append((items[3], f))
             for c, it in enumerate(items):
                 if it is not None:
                     if f.get("ro"):
@@ -420,6 +431,21 @@ class MdEditor(QtWidgets.QWidget):
                 self.edits[f["name"]] = e
         t.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         return t
+
+    def retranslate(self):
+        """Descriptions and value lists in the interface language."""
+        for it, f in self.desc_items:
+            it.setText(T(f.get("note", "")))
+        for f in self.k["fields"]:
+            e = self.edits[f["name"]]
+            if isinstance(e.w, QtWidgets.QComboBox):
+                for i in range(e.w.count()):
+                    v = e.w.itemData(i)
+                    t = f["values"].get(v)
+                    if t is not None:
+                        e.w.setItemText(i, f"{v} — {T(t)}")
+        if self.note_lbl:
+            self.note_lbl[0].setText(T(self.note_lbl[1]))
 
     # ---- model <-> view
     def _edited(self, f, e):

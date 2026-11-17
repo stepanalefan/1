@@ -224,23 +224,24 @@ class BosPanel(QtWidgets.QWidget):
         open_ = {self.tree.topLevelItem(i).data(0, QtCore.Qt.UserRole) for i in range(self.tree.topLevelItemCount())
                  if self.tree.topLevelItem(i).isExpanded()} if self.tree.topLevelItemCount() else {"basic"}
         self.tree.clear()
+        self._built_ru = _ru()
         bold = QtGui.QFont()
         bold.setBold(True)
         for g, gname in GROUPS:
             cmds = [(c, d) for c, d in bp.DEFS.items() if d.get("group", "basic") == g]
             if q:
-                cmds = [(c, d) for c, d in cmds if q in f"0x{c:02x} {d['mnemonic']} {d['name']}".lower()]
-            top = QtWidgets.QTreeWidgetItem([_tr(gname), "", f"{len(cmds)}"])
+                cmds = [(c, d) for c, d in cmds
+                        if q in f"0x{c:02x} {d['mnemonic']} {d['name']} {d.get('name_ru', '')}".lower()]
+            top = QtWidgets.QTreeWidgetItem([f"{_tr(gname)}  ({len(cmds)})", "", ""])
             top.setData(0, QtCore.Qt.UserRole, g)
-            top.setFirstColumnSpanned(False)
             for col in range(3):
                 top.setFont(col, bold)
             top.setFlags(top.flags() & ~QtCore.Qt.ItemIsSelectable)
             self.tree.addTopLevelItem(top)
             for c, d in cmds:
-                it = QtWidgets.QTreeWidgetItem([f"0x{c:02X}", d["mnemonic"], d["name"]])
+                it = QtWidgets.QTreeWidgetItem([f"0x{c:02X}", d["mnemonic"], dname(d)])
                 it.setData(0, QtCore.Qt.UserRole, c)
-                it.setToolTip(2, d["name"] + (f"\n{d['note']}" if d.get("note") else ""))
+                it.setToolTip(2, dname(d) + (f"\n{dnote(d)}" if dnote(d) else ""))
                 it.setFont(0, QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
                 if d.get("modes") == "ДЖР":
                     it.setForeground(0, QtGui.QColor(C_WARN))
@@ -249,8 +250,12 @@ class BosPanel(QtWidgets.QWidget):
                     for col in range(3):
                         it.setForeground(col, QtGui.QColor(C_DIM))
                 top.addChild(it)
+            top.setFirstColumnSpanned(True)               # group title over the whole row: Code stays narrow
             top.setExpanded(bool(q) or g in open_)
+        self.tree.setHeaderLabels(["Код", "Команда", "Описание"] if _ru() else ["Code", "Command", "Description"])
         self.tree.resizeColumnToContents(0)
+        self.tree.setColumnWidth(0, self.tree.columnWidth(0) + 8)
+        self.tree.resizeColumnToContents(1)
 
     def select_code(self, code):
         for i in range(self.tree.topLevelItemCount()):
@@ -275,15 +280,22 @@ class BosPanel(QtWidgets.QWidget):
         if d is None:
             return
         self.code = code
-        self.title.setText(f"0x{code:02X}  {d['mnemonic']} — {d['name']}")
+        self.title.setText(f"0x{code:02X}  {d['mnemonic']} — {dname(d)}")
         mode = "only in standby (ДЖР)" if d.get("modes") == "ДЖР" else "in any mode"
         recv = {"group": "group УПНГ+АФАР+БОС 0x0D"}.get(d.get("receiver"), "BOS 0x29")
         n = 8 if d.get("encoder") == "session" else d.get("bytes", 0)
-        self.info.setText(f"§{d.get('section', '')} · {_tr(dict(GROUPS).get(d.get('group', 'basic')))} · "
-                          f"executed {mode} · receiver {recv} · {n} data byte(s) · "
-                          + ("acknowledgement КВ requested" if d.get("ack", True) else "sent without КВ"))
-        self.note.setText(d.get("note", ""))
-        self.note.setVisible(bool(d.get("note")))
+        grp = _tr(dict(GROUPS).get(d.get("group", "basic")))
+        if _ru():
+            mode = "только в ДЖР" if d.get("modes") == "ДЖР" else "в любом режиме"
+            recv = {"group": "группа УПНГ+АФАР+БОС 0x0D"}.get(d.get("receiver"), "БОС 0x29")
+            self.info.setText(f"п.{d.get('section', '')} · {grp} · выполняется {mode} · получатель {recv} · "
+                              f"байт данных: {n} · " + ("с запросом КВ" if d.get("ack", True) else "без КВ"))
+        else:
+            self.info.setText(f"§{d.get('section', '')} · {grp} · executed {mode} · receiver {recv} · "
+                              f"{n} data byte(s) · "
+                              + ("acknowledgement КВ requested" if d.get("ack", True) else "sent without КВ"))
+        self.note.setText(dnote(d))
+        self.note.setVisible(bool(dnote(d)))
         self.preset.clear()
         self.preset.addItem("(fill from a preset)", None)
         for p in d.get("presets", []):
@@ -387,6 +399,23 @@ class BosPanel(QtWidgets.QWidget):
     def update_step(self):
         if self.edit_row is not None and self._update():
             self.k.queue_replace(self.edit_row, self.step())
+
+
+def _ru() -> bool:
+    try:
+        import i18n
+        return i18n.CURRENT == "ru"
+    except Exception:
+        return False
+
+
+def dname(d) -> str:
+    """Command name in the interface language (bos_commands_0102.json: name / name_ru)."""
+    return d.get("name_ru") or d["name"] if _ru() else d["name"]
+
+
+def dnote(d) -> str:
+    return (d.get("note_ru") or d.get("note", "")) if _ru() else d.get("note", "")
 
 
 def _tr(text):
@@ -571,6 +600,14 @@ class KtrControl(QtWidgets.QWidget):
             return name
 
     def _show_mode(self):
+        b = self.bos
+        if getattr(b, "_built_ru", None) != _ru():          # language switched: command texts follow
+            b._fill()
+            if b.code is not None:
+                keep = (b.code, b.params(), b.line.currentData(), b.ack.isChecked(), b.expect.currentData())
+                row = b.edit_row
+                b.show_cmd(*keep)
+                b.edit_row = row
         if self.demo():
             t, col = "DEMO: simulated BOS", C_WARN
         else:

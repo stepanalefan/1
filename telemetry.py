@@ -21,6 +21,15 @@ import datetime as _dt
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+try:
+    from telemetry_ru import T, ru_on
+except Exception:                                   # pragma: no cover
+    def T(text):
+        return text
+
+    def ru_on():
+        return False
+
 # --------------------------------------------------------------------------- #
 #  Arrays                                                                      #
 # --------------------------------------------------------------------------- #
@@ -680,6 +689,7 @@ class ArrayHeader(QtWidgets.QLabel):
         self.setWordWrap(True)
 
     def show_info(self, base, name, size, data, ts, count, errors):
+        self.last = (base, name, size, data, ts, count, errors)
         ok = len(data) == size
         t = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S.%f")[:-3]
         self.setText(f"<b>{name}</b> &nbsp; ID {base:08X} &nbsp;·&nbsp; last {t} &nbsp;·&nbsp; "
@@ -688,6 +698,14 @@ class ArrayHeader(QtWidgets.QLabel):
                                                    f"expected {size} B</span>")
                      + (f" &nbsp;·&nbsp; <span style='color:#f0b03e'>incomplete arrays: {errors}</span>"
                         if errors else ""))
+        if ru_on():
+            self.setText(T(self.text()))
+
+    def retranslate(self):
+        if getattr(self, "last", None):
+            self.show_info(*self.last)
+        else:
+            self.setText(T("no array received yet - connect the CAN tab or open a log there"))
 
 
 class FieldView(QtWidgets.QWidget):
@@ -725,27 +743,48 @@ class FieldView(QtWidgets.QWidget):
                     it.setForeground(C_DIM)
                 self.table.setItem(r, c, it)
             self.table.item(r, 5).setToolTip(f.desc)
+        self.notes_src = notes
         h = self.table.horizontalHeader()
         for c, w in enumerate((60, 50, 170, 185, 250)):
             self.table.setColumnWidth(c, w)
         h.setStretchLastSection(True)
         v.addWidget(self.table, 1)
+        self.note = None
         if notes:
             note = QtWidgets.QLabel(notes)
             note.setWordWrap(True)
             note.setStyleSheet("color:#6e7681;font-size:11px;")
             v.addWidget(note)
+            self.note = note
         self.hl = QtCore.QTimer(self, singleShot=True, interval=1500, timeout=self._clear_hl)
+        self.last_data = None
+        self.retranslate()
 
-    def update_array(self, base, data, ts, errors):
-        self.count += 1
+    def retranslate(self):
+        """Description / meaning / notes in the interface language (Russian from telemetry_ru)."""
+        for r, f in enumerate(self.fields):
+            it = self.table.item(r, 5)
+            it.setText(T(f.desc))
+            it.setToolTip(T(f.desc))
+        if self.note is not None:
+            self.note.setText(T(self.notes_src))
+        self.header.retranslate()
+        if self.last_data is not None:
+            prev, self.prev = self.prev, None
+            self.update_array(*self.last_data, count=False)
+            self.prev = prev
+
+    def update_array(self, base, data, ts, errors, count=True):
+        self.last_data = (base, data, ts, errors)
+        if count:
+            self.count += 1
         self.header.show_info(base, self.name, self.size, data, ts, self.count, errors)
         vals = [f.raw(data) for f in self.fields]
         for r, (f, v) in enumerate(zip(self.fields, vals)):
             val_it, mean_it = self.table.item(r, 3), self.table.item(r, 4)
             if v is None:
                 val_it.setText("—")
-                mean_it.setText("not in array")
+                mean_it.setText(T("not in array"))
                 mean_it.setForeground(C_WARN)
                 continue
             text, warn = f.meaning(v)
@@ -758,7 +797,7 @@ class FieldView(QtWidgets.QWidget):
                 text, warn = ((f"= {f.compare[1]}", False) if ref == v else
                               (f"MISMATCH with {f.compare[1]} (0x{ref:04X})", True))
             val_it.setText(f.value_str(v))
-            mean_it.setText(text)
+            mean_it.setText(T(text))
             mean_it.setForeground(C_WARN if warn else QtGui.QBrush())
             changed = self.prev is not None and self.prev[r] != v
             for it in (val_it, mean_it):
@@ -782,8 +821,9 @@ class RawView(QtWidgets.QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         self.header = ArrayHeader()
         v.addWidget(self.header)
-        info = QtWidgets.QLabel(f"Field layout of {name} not entered yet - raw bytes of the last array:")
+        info = QtWidgets.QLabel(T(f"Field layout of {name} not entered yet - raw bytes of the last array:"))
         info.setStyleSheet("color:#8a96a3;")
+        self.info, self.info_src = info, f"Field layout of {name} not entered yet - raw bytes of the last array:"
         v.addWidget(info)
         self.dump = QtWidgets.QPlainTextEdit()
         self.dump.setReadOnly(True)
@@ -794,6 +834,10 @@ class RawView(QtWidgets.QWidget):
         self.count += 1
         self.header.show_info(base, self.name, self.size, data, ts, self.count, errors)
         self.dump.setPlainText(hexdump(data))
+
+    def retranslate(self):
+        self.info.setText(T(self.info_src))
+        self.header.retranslate()
 
 
 class DopView(QtWidgets.QWidget):
@@ -928,6 +972,19 @@ class TelemetryTab(QtWidgets.QTabWidget):
                     sub.addTab(QtWidgets.QLabel(f"MD editors not available: {e}"), "MD_CONFIG")
             self.addTab(sub, f"{unit}  (ID 0x{prefix:04X}xxxx)")
         self.setCurrentIndex(0)
+        self._lang_ru = ru_on()
+        self.lang_timer = QtCore.QTimer(self, interval=1000, timeout=self._check_lang)
+        self.lang_timer.start()
+
+    def _check_lang(self):
+        """Descriptions follow the interface language (the global translator leaves these cells alone)."""
+        if ru_on() == self._lang_ru:
+            return
+        self._lang_ru = ru_on()
+        for v in list(self.views.values()) + list(self.md_editors):
+            fn = getattr(v, "retranslate", None)
+            if fn:
+                fn()
 
     def on_frames(self, frames):
         """Listener for canable_analyzer.SnifferWindow.ingest()."""
