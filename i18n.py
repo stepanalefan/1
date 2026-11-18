@@ -624,6 +624,13 @@ Power rails|Alimentations|Versorgungsspannungen|Alimentazioni|電源系|Пита
 FPGA|FPGA|FPGA|FPGA|FPGA|ПЛИС
 suspicion: green < 10 % · yellow · orange · red > 65 %   (click a block to filter the findings)|suspicion : vert < 10 % · jaune · orange · rouge > 65 %   (cliquer un bloc pour filtrer les constats)|Verdacht: grün < 10 % · gelb · orange · rot > 65 %   (Block anklicken = Befunde filtern)|sospetto: verde < 10 % · giallo · arancio · rosso > 65 %   (clic su un blocco per filtrare)|疑い度: 緑 < 10 % · 黄 · 橙 · 赤 > 65 %   (ブロックをクリックで所見を絞込み)|подозрение: зелёный < 10 % · жёлтый · оранжевый · красный > 65 %   (щелчок по блоку — фильтр выводов)
 filter (serial, verdict, plan …)|filtre (n° de série, verdict, plan …)|Filter (Seriennr., Ergebnis, Plan …)|filtro (seriale, esito, piano …)|フィルタ(製番, 判定, 計画 …)|фильтр (номер, вердикт, план …)
+Back to the main window|Retour à la fenêtre principale|Zurück ins Hauptfenster|Torna alla finestra principale|メインウィンドウに戻す|Вернуть в главное окно
+Open in a separate window|Ouvrir dans une fenêtre séparée|In eigenem Fenster öffnen|Apri in una finestra separata|別ウィンドウで開く|Открыть в отдельном окне
+Bring all windows back|Rapatrier toutes les fenêtres|Alle Fenster zurückholen|Riporta tutte le finestre|すべてのウィンドウを戻す|Вернуть все окна
+Connect the saved devices and CAN lines at start-up|Connecter au démarrage les appareils et lignes CAN enregistrés|Gespeicherte Geräte und CAN-Leitungen beim Start verbinden|Collega all'avvio dispositivi e linee CAN salvati|起動時に保存済みの機器とCANラインを接続|Подключать сохранённые приборы и линии CAN при запуске
+АФАР БПУ set (SET_BPU_AFAR_mode)|Jeu БПУ АФАР (SET_BPU_AFAR_mode)|АФАР-БПУ-Satz (SET_BPU_AFAR_mode)|Set БПУ АФАР (SET_BPU_AFAR_mode)|АФАР БПУセット (SET_BPU_AFAR_mode)|Комплект БПУ АФАР (SET_BPU_AFAR_mode)
+automatic selection|sélection automatique|automatische Auswahl|selezione automatica|自動選択|автоматический выбор
+don't send|ne pas envoyer|nicht senden|non inviare|送信しない|не отправлять
 """
 
 TABLE: dict[str, dict[str, str]] = {}
@@ -713,6 +720,7 @@ class Translator(QtCore.QObject):
         self.root, self.lang = root, lang
         CURRENT = lang
         self._src: dict = {}                              # (id(obj), slot) -> (english, shown)
+        self.extra_roots: list = []                       # separate top-level windows (tabs moved out)
         self.timer = QtCore.QTimer(self, interval=1500, timeout=self.apply)
         self.timer.start()
 
@@ -741,7 +749,13 @@ class Translator(QtCore.QObject):
     def apply(self):
         if self.lang == "en" and not self._src:
             return
-        for w in [self.root] + self.root.findChildren(QtWidgets.QWidget):
+        ws = [self.root] + self.root.findChildren(QtWidgets.QWidget)
+        for r in list(self.extra_roots):
+            try:
+                ws += [r] + r.findChildren(QtWidgets.QWidget)
+            except RuntimeError:
+                self.extra_roots.remove(r)
+        for w in ws:
             try:
                 if isinstance(w, (QtWidgets.QLabel, QtWidgets.QAbstractButton)) and not isinstance(
                         w, QtWidgets.QToolButton) or isinstance(w, QtWidgets.QToolButton) and w.text():

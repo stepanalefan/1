@@ -361,6 +361,15 @@ def t_can12(st, demo, state):
     return out
 
 
+def _bpu_steps(st, extra=""):
+    bpu = int(st.ctl.get("bpu_afar", 1) or 0)
+    if not bpu:
+        return []
+    name = {1: "БПУ1", 2: "БПУ2", 3: L("automatic selection", "автоматический выбор")}.get(bpu, str(bpu))
+    return proto(st, 0x08, bytes([bpu]), f"SET_BPU_AFAR_mode {name}{extra} — " +
+                 L("in standby; without it the BOS starts no session", "в ДЖР; без неё БОС не начинает сеанс"))
+
+
 def t_link(st, demo, state):
     out = proto(st, 0x00, what=L("NOP — link check", "NOP — проверка связи"))
     out += proto(st, 0x01, what=L("MODE_D — standby, RF off", "MODE_D — дежурный режим, ВЧ выкл."))
@@ -369,6 +378,7 @@ def t_link(st, demo, state):
     if ts:
         out += proto(st, 0x04, bp.p_byte(ts), L(f"SET_Time_SNR {ts} s — session limit", f"SET_Time_SNR {ts} с — "
                                                                                           f"длительность сеанса"))
+    out += _bpu_steps(st)
     if st.ctl.get("tm_enable", True):
         for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
             out += proto(st, 0x10, bp.p_period_tm(tm, per), f"SET_Period_TM {bp.TM_TYPES[tm]} {per:g} "
@@ -692,6 +702,7 @@ def t_cmds(st, demo, state):
     if ts:
         out += proto(st, 0x04, bp.p_byte(ts), L(f"SET_Time_SNR {ts} s re-applied (КОНФИГ was reloaded)",
                                                 f"SET_Time_SNR {ts} с повторно (КОНФИГ перезагружен)"))
+    out += _bpu_steps(st, L(" re-applied", " повторно"))
     if st.ctl.get("tm_enable", True):
         for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
             out += proto(st, 0x10, bp.p_period_tm(tm, per), f"SET_PeriodTM {bp.TM_TYPES[tm]} {per:g} "

@@ -692,7 +692,14 @@ start-up*) or start the program with `--no-autoconnect`. Not done in `--demo`.
 Yes. **Right-click a tab → Open in a separate window**, or double-click it. The page then lives in its own window
 (e.g. *Main* on one screen, *Telemetry* or *BOS Test Station* on the other) and keeps working as before. *Back to
 the main window* - or closing that window - puts it back at its old place; right-click a tab → *Bring all windows
-back* does it for all. Which tabs were separate, and where their windows were, is remembered for the next start.
+back* does it for all. Which tabs were separate, and where their windows were, is remembered for the next start. Each
+separate window has its own taskbar button and Alt-Tab entry.
+
+### Why does every plan send SET_BPU_AFAR_mode?
+After power-up the BOS starts no session until the АФАР БПУ set has been chosen. Every plan therefore sends
+**SET_BPU_AFAR_mode** in standby after SET_Time_SNR (*Control link & BOS setup*), again after a КОНФИГ reload, and in
+Live diagnose; if a plan has no link step, it is sent before the first session command. The set is chosen on
+**Unit control → АФАР БПУ set**: БПУ1 (default), БПУ2, automatic selection, or *don't send*.
 
 ## 7. CAN and telemetry
 

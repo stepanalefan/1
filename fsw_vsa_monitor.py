@@ -1290,11 +1290,14 @@ class DemoFsw:
 #  Worker thread: owns the instrument, runs jobs and the sweep loop            #
 # --------------------------------------------------------------------------- #
 class DetachedTab(QtWidgets.QWidget):
-    """A main-window tab in a window of its own (second monitor). Closing it puts the tab back."""
+    """A main-window tab in a window of its own (second monitor). Closing it puts the tab back. No parent window:
+    an owned window (parent = main window) gets no taskbar button and no Alt-Tab entry on Windows."""
 
     def __init__(self, host, page, title):
-        super().__init__(host, QtCore.Qt.Window)
+        super().__init__(None, QtCore.Qt.Window)
         self.host, self.page, self.title = host, page, title
+        self.setStyleSheet(host.styleSheet())
+        self.setFont(host.font())
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(4, 4, 4, 4)
         bar = QtWidgets.QHBoxLayout()
@@ -1314,6 +1317,9 @@ class DetachedTab(QtWidgets.QWidget):
         self.setWindowIcon(host.windowIcon())
 
     def closeEvent(self, ev):
+        if getattr(self.host, "_closing", False):         # program ends: the page goes with this window
+            ev.accept()
+            return
         lay = self.layout()
         lay.removeWidget(self.page)
         self.host.reattach(self)
@@ -2609,6 +2615,8 @@ class MainWindow(QtWidgets.QMainWindow):
             win.resize(max(900, self.width() * 2 // 3), max(600, self.height() * 3 // 4))
             win.move(self.x() + 60, self.y() + 60)
         self._detached.append(win)
+        if self.translator:
+            self.translator.extra_roots.append(win)
         win.show()
         self._save_detached()
         return win
@@ -2617,6 +2625,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if win not in self._detached:
             return
         self._detached.remove(win)
+        if self.translator and win in self.translator.extra_roots:
+            self.translator.extra_roots.remove(win)
         order = [w for w, _ in self._tab_order]
         k = order.index(win.page) if win.page in order else len(order)
         pos = sum(1 for w in order[:k] if self.tabs.indexOf(w) >= 0)
@@ -3181,6 +3191,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         if self.csv_file:
             self.csv_file.close()
+        self._closing = True                          # separate tab windows are independent: close them too
+        for win in list(self._detached):
+            win.close()
         ev.accept()
 
 

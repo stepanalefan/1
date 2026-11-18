@@ -914,7 +914,7 @@ class BosStation(QtWidgets.QWidget):
                      "lim": {k: d for k, _, d, _ in LIM_FIELDS},
                      "ctl": {"method": "protocol", "sender": bp.SENDER_DEFAULT, "line": "BOS CAN1", "line2": "BOS CAN2",
                              "can_check": True, "can1_only": False, "freq_n": 800, "rate_ur": 2, "rate_shr": 4,
-                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "keepalive": True, "sr_min_s": 10,
+                             "bpsk_cmd": 0xA1, "oqpsk_cmd": 0xA4, "time_snr": 255, "bpu_afar": 1, "keepalive": True, "sr_min_s": 10,
                              "tm_enable": True,
                              "cmd": {}, "att_mode": "prompt", "att_id": "", "att_data": "XX", "att_line": "BOS CAN1",
                              "settle_ms": 1500, "prompt": True,
@@ -1238,6 +1238,12 @@ class BosStation(QtWidgets.QWidget):
         self.p_tsnr.setValue(int(self.ctl.get("time_snr", 255)))
         self.p_tsnr.setToolTip("SET_Time_SNR before the test: the BOS ends a session after this time\n"
                                "(factory default 30 s). Not saved to flash.")
+        self.p_bpu = QtWidgets.QComboBox()
+        for k, t in ((1, "БПУ1"), (2, "БПУ2"), (3, "automatic selection"), (0, "don't send")):
+            self.p_bpu.addItem(t, k)
+        self.p_bpu.setCurrentIndex(max(0, self.p_bpu.findData(int(self.ctl.get("bpu_afar", 1)))))
+        self.p_bpu.setToolTip("SET_BPU_AFAR_mode (0x08) sent in standby after power-up, before the first session:\n"
+                              "without it the BOS does not start a session. Default БПУ1.")
         self.p_srmin = QtWidgets.QSpinBox()
         self.p_srmin.setRange(0, 3600)
         self.p_srmin.setSuffix(" s")
@@ -1252,7 +1258,7 @@ class BosStation(QtWidgets.QWidget):
                                "(Angle_ErdStation_BKU, valid for 3 s)")
         self.p_tm = QtWidgets.QCheckBox("Enable ИОК_ДОП / ОСН / СОСТОЯНИЕ and read ИОК_КОНФИГ")
         self.p_tm.setChecked(bool(self.ctl.get("tm_enable", True)))
-        for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate_ur, self.p_rate_shr):
+        for wd in (self.p_sender, self.p_bpsk, self.p_oqpsk, self.p_rate_ur, self.p_rate_shr, self.p_bpu):
             wd.currentIndexChanged.connect(lambda *_: self._collect())
         for wd in (self.p_freq, self.p_tsnr, self.p_srmin):
             wd.valueChanged.connect(lambda *_: self._collect())
@@ -1271,6 +1277,7 @@ class BosStation(QtWidgets.QWidget):
         f.addRow("УР (BPSK) rate", self.p_rate_ur)
         f.addRow("ШР (OQPSK) rate", self.p_rate_shr)
         f.addRow("Session limit", self.p_tsnr)
+        f.addRow("АФАР БПУ set (SET_BPU_AFAR_mode)", self.p_bpu)
         f.addRow("Minimum session duration", self.p_srmin)
         self.p_fswmode = QtWidgets.QComboBox()
         for k, t in (("iq", "I/Q recording + software analysis (all diagnostics)"), ("k70", "FSW-K70 (VSA)"),
@@ -1951,6 +1958,7 @@ class BosStation(QtWidgets.QWidget):
                             bpsk_cmd=self.p_bpsk.currentData(), oqpsk_cmd=self.p_oqpsk.currentData(),
                             rate_ur=self.p_rate_ur.currentData(), rate_shr=self.p_rate_shr.currentData(),
                             time_snr=self.p_tsnr.value(), sr_min_s=self.p_srmin.value(),
+                            bpu_afar=self.p_bpu.currentData(),
                             fsw_mode=self.p_fswmode.currentData(), level_mode=self.p_level.currentData(),
                             fsw_disp_off=self.p_disp.isChecked(),
                             keepalive=self.p_keep.isChecked(), tm_enable=self.p_tm.isChecked())
@@ -2400,6 +2408,7 @@ class BosStation(QtWidgets.QWidget):
         self._ref_failed = False
         self._gate_rows = set()
         self._tsnr_set, self._sr_life, self._sr_cmd, self._sr_warned = None, None, None, {}
+        self._bpu_done = False
         self._lvl_cache, self._timing_log = {}, []
         if need_fsw and not getattr(self.host, "connected", False):
             msg = "FSW not connected - connect it on the Spectrum Analyzer tab first"
@@ -3016,6 +3025,8 @@ class BosStation(QtWidgets.QWidget):
                  "info" if a["negative"] == expect_neg else "err")
         if expect_neg:
             return a
+        if code == 0x08 and not a["negative"]:
+            self._bpu_done = True
         if a["negative"]:
             hint = "" if a["unknown"] else (" — the sender address may not be allowed, or the command is only "
                                              "executed in standby (ДЖР); try sender ВМ 1 (0x20)")
@@ -3033,6 +3044,10 @@ class BosStation(QtWidgets.QWidget):
         data = bp.p_session(code, int(self.ctl.get("freq_n", 800)), min(bp.ATTEN_MAX_DB, self.cur_att),
                             coding=1 if code == 0xA4 else 0, continuous=True, count=2047, rate=rate,
                             reg=5 if code == 0xA1 else 1)
+        if not getattr(self, "_bpu_done", False):           # first session after power-up: БПУ set first (standby)
+            if getattr(self, "_sr_cmd", None):
+                yield from self._proto(0x01, what="MODE_D (standby) - SET_BPU_AFAR_mode is executed in standby only")
+            yield from self._bpu_setup(what=" (before the first session)")
         yield from self._ref_gate(bp.COMMANDS[code][0])      # 10 MHz reference ready before a mode command
         self._sr_t = time.monotonic()
         self._in_session = True                             # no timer re-issue while this one is sent
@@ -3054,6 +3069,18 @@ class BosStation(QtWidgets.QWidget):
                 f"2047 × {'КБД' if code != 0xA2 else 'preambles'} at {bp.RATES.get(rate)} kbit/s"
             self.log(f"BOS station: {bp.COMMANDS[code][0]} lasts ≈ {self._sr_life:.1f} s ({why}) < {need:g} s - "
                      f"re-issued before it ends", "warn")
+
+    def _bpu_setup(self, T=None, what=""):
+        """SET_BPU_AFAR_mode in standby after power-up: the BOS starts no session without it (default БПУ1)."""
+        bpu = int(self.ctl.get("bpu_afar", 1) or 0)
+        if not bpu or self.ctl.get("method") != "protocol":
+            self._bpu_done = True
+            return
+        name = {1: "БПУ1", 2: "БПУ2", 3: "automatic selection"}.get(bpu, str(bpu))
+        yield from self._proto(0x08, bytes([bpu]), f"SET_BPU_AFAR_mode {name}{what}")
+        self._bpu_done = True
+        if T:
+            self._row(T, "АФАР БПУ set (SET_BPU_AFAR_mode)", None, "", "КВ+", "PASS", text=f"{name}, КВ+")
 
     def _time_snr_setting(self):
         """SET_Time_SNR value to send: the configured one, raised to the minimum session duration (max 255 s);
@@ -3197,6 +3224,7 @@ class BosStation(QtWidgets.QWidget):
 
     def _t_ref(self):
         T = TEST_NAME["ref"]
+        self._bpu_done = False                              # power-up: SET_BPU_AFAR_mode needed again
         c = self.ctl
         demo = self._is_demo()
         # 1) TFG6806 first: it must give the 10 MHz before the BOS gets power
@@ -3341,6 +3369,7 @@ class BosStation(QtWidgets.QWidget):
             yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s")
             self._tsnr_set = ts
             self._row(T, "Session limit (SET_Time_SNR)", ts, "s", "КВ+", "PASS", spec="{:.0f}")
+        yield from self._bpu_setup(T)
         if not self.ctl.get("tm_enable", True):
             return
         for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
@@ -3426,6 +3455,7 @@ class BosStation(QtWidgets.QWidget):
         if ts:
             yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s (re-applied)")
             self._tsnr_set = ts
+        yield from self._bpu_setup(what=" (re-applied)")
         if self.ctl.get("tm_enable", True):
             for tm, per in ((0xFB, 1.0), (0xFC, 1.0), (0xFD, 10.0)):
                 yield from self._proto(0x10, bp.p_period_tm(tm, per), f"SET_PeriodTM {bp.TM_TYPES[tm]} {per:g} s "
@@ -3806,12 +3836,26 @@ class BosStation(QtWidgets.QWidget):
             t3 = time.perf_counter()
             res = dev.measure()
             t4 = time.perf_counter()
-            extra = {}
-            for k, q in (("gimb", "GIMB"), ("qerr", "QERR"), ("perr", "PERR"), ("merr", "MERR")):
-                try:
-                    extra[k] = float(str(dev.query(f"CALC3:MARK:FUNC:DDEM:STAT:{q}?")).split(",")[0])
-                except Exception:
-                    extra[k] = float("nan")
+            # extra results with a short I/O timeout: a result the FSW does not have (gain imbalance / quadrature
+            # error of BPSK) gives no answer - each such query waited the full 15 s timeout (60 s in all)
+            extra = {k: float("nan") for k in ("gimb", "qerr", "perr", "merr")}
+            qs = (("perr", "PERR"), ("merr", "MERR")) if mod == "BPSK" else \
+                (("gimb", "GIMB"), ("qerr", "QERR"), ("perr", "PERR"), ("merr", "MERR"))
+            inst = getattr(dev, "inst", None)
+            old = getattr(inst, "timeout", None)
+            try:
+                if inst is not None and old:
+                    inst.timeout = min(old, 2000)
+                for k, q in qs:
+                    try:
+                        extra[k] = float(str(dev.query(f"CALC3:MARK:FUNC:DDEM:STAT:{q}?")).split(",")[0])
+                    except Exception:
+                        clear = getattr(dev, "_clear_io", None)
+                        if clear:
+                            clear()                         # no stale answer left in the buffer
+            finally:
+                if inst is not None and old:
+                    inst.timeout = old
             return {"res": res or {}, "rb": rb, "errs": errs, "cmds": cmds, "extra": extra,
                     "timing": {"settings": t1 - t0, "level": t2 - t1, "read back": t3 - t2, "measure": t4 - t3,
                                "results": time.perf_counter() - t4}}
@@ -4383,6 +4427,7 @@ class BosStation(QtWidgets.QWidget):
             if ts:
                 yield from self._proto(0x04, bp.p_byte(ts), f"SET_Time_SNR {ts} s")
                 self._tsnr_set = ts
+            yield from self._bpu_setup()
             yield from self._set_mode(mod.lower())
         while not self.abort_flag:
             n += 1
