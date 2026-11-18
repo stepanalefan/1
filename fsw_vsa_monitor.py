@@ -1289,6 +1289,38 @@ class DemoFsw:
 # --------------------------------------------------------------------------- #
 #  Worker thread: owns the instrument, runs jobs and the sweep loop            #
 # --------------------------------------------------------------------------- #
+class DetachedTab(QtWidgets.QWidget):
+    """A main-window tab in a window of its own (second monitor). Closing it puts the tab back."""
+
+    def __init__(self, host, page, title):
+        super().__init__(host, QtCore.Qt.Window)
+        self.host, self.page, self.title = host, page, title
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(4, 4, 4, 4)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addStretch(1)
+        back = QtWidgets.QPushButton("Back to the main window")
+        back.setToolTip("Put this page back as a tab of the main window (closing the window does the same)")
+        back.clicked.connect(self.close)
+        bar.addWidget(back)
+        v.addLayout(bar)
+        v.addWidget(page, 1)
+        page.show()
+        try:
+            name = i18n.tr(title, i18n.CURRENT) if i18n else title
+        except Exception:
+            name = title
+        self.setWindowTitle(f"KTR TEST - {name}")
+        self.setWindowIcon(host.windowIcon())
+
+    def closeEvent(self, ev):
+        lay = self.layout()
+        lay.removeWidget(self.page)
+        self.host.reattach(self)
+        ev.accept()
+        self.deleteLater()
+
+
 class Worker(QtCore.QObject):
     measured = QtCore.pyqtSignal(object)
     job_done = QtCore.pyqtSignal(str, object)
@@ -1595,6 +1627,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bos.demo_setup()
         if args.connect or args.demo:
             QtCore.QTimer.singleShot(200, self.on_connect)
+        QtCore.QTimer.singleShot(300, self._restore_detached)
+        try:
+            import device_addresses as _da
+            auto = bool(_da.option("autoconnect", True))
+            if self.help and hasattr(self.help, "autocon"):
+                self.help.autocon.setChecked(auto)
+                self.help.autocon.toggled.connect(lambda on: _da.set_option("autoconnect", bool(on)))
+            if auto and not args.demo and not getattr(args, "no_autoconnect", False):
+                QtCore.QTimer.singleShot(1200, self._autoconnect)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -2021,6 +2064,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(0, self.translator.apply)
         self.tabs.currentChanged.connect(self.on_tab)
         split.setSizes([420, 1140])
+        # separate windows: right-click or double-click a tab
+        self._tab_order = [(self.tabs.widget(i), self.tabs.tabText(i)) for i in range(self.tabs.count())]
+        self._detached: list = []
+        self._closing = False
+        tb = self.tabs.tabBar()
+        tb.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        tb.customContextMenuRequested.connect(self._tab_menu)
+        self.tabs.tabBarDoubleClicked.connect(lambda i: i >= 0 and self.detach_tab(i))
+        tb.setToolTip("Right-click or double-click a tab to open it in a separate window")
 
         # ---------------- bottom: log
         self.log = QtWidgets.QPlainTextEdit()
@@ -2532,6 +2584,72 @@ class MainWindow(QtWidgets.QMainWindow):
         """FSW application of the Spectrum Analyzer sub-tab: 'vsa', 'spec' or 'iq'."""
         return ("vsa", "spec", "iq")[self.fsw_tabs.currentIndex()]
 
+    # ---- tabs in separate windows (large screen / second monitor)
+    def _tab_menu(self, pos):
+        i = self.tabs.tabBar().tabAt(pos)
+        m = QtWidgets.QMenu(self)
+        _t = (lambda s: i18n.tr(s, i18n.CURRENT)) if i18n else (lambda s: s)
+        if i >= 0 and self.tabs.count() > 1:
+            m.addAction(_t("Open in a separate window"), lambda: self.detach_tab(i))
+        if self._detached:
+            m.addAction(_t("Bring all windows back"), self.reattach_all)
+        if not m.isEmpty():
+            m.exec_(self.tabs.tabBar().mapToGlobal(pos))
+
+    def detach_tab(self, idx, geometry=None):
+        if self.tabs.count() <= 1:
+            return None
+        page = self.tabs.widget(idx)
+        title = next((t for w, t in self._tab_order if w is page), self.tabs.tabText(idx))
+        self.tabs.removeTab(idx)
+        win = DetachedTab(self, page, title)
+        if geometry:
+            win.restoreGeometry(QtCore.QByteArray.fromBase64(geometry.encode()))
+        else:
+            win.resize(max(900, self.width() * 2 // 3), max(600, self.height() * 3 // 4))
+            win.move(self.x() + 60, self.y() + 60)
+        self._detached.append(win)
+        win.show()
+        self._save_detached()
+        return win
+
+    def reattach(self, win):
+        if win not in self._detached:
+            return
+        self._detached.remove(win)
+        order = [w for w, _ in self._tab_order]
+        k = order.index(win.page) if win.page in order else len(order)
+        pos = sum(1 for w in order[:k] if self.tabs.indexOf(w) >= 0)
+        self.tabs.insertTab(pos, win.page, win.title)
+        self.tabs.setCurrentIndex(pos)
+        if not self._closing:
+            self._save_detached()
+
+    def reattach_all(self):
+        for win in list(self._detached):
+            win.close()
+
+    def _save_detached(self):
+        try:
+            import device_addresses as _da
+            _da.set_option("detached_tabs", {w.title: bytes(w.saveGeometry().toBase64()).decode()
+                                             for w in self._detached})
+        except Exception:
+            pass
+
+    def _restore_detached(self):
+        try:
+            import device_addresses as _da
+            saved = _da.option("detached_tabs", {}) or {}
+        except Exception:
+            return
+        for title, geo in saved.items():
+            for i in range(self.tabs.count()):
+                w = self.tabs.widget(i)
+                if next((t for ww, t in self._tab_order if ww is w), None) == title:
+                    self.detach_tab(i, geo)
+                    break
+
     def on_tab(self, idx):
         w = self.tabs.widget(idx)
         shown = w.widget() if isinstance(w, QtWidgets.QScrollArea) else w
@@ -2693,6 +2811,40 @@ class MainWindow(QtWidgets.QMainWindow):
         return {k: g() for k, g in getters.items() if k in self.supported}
 
     # ----------------------------------------------------------- actions
+    def _autoconnect(self):
+        """Start-up: connect every device that has a saved connection (device_addresses.json) and the ticked CAN
+        lines (can_lines.json). One device after the other, 0.4 s apart; a device that is off only logs an error."""
+        import device_addresses as _da
+        todo = []
+        if not self.connected and _da.load("FSW").get("addr"):
+            todo.append(("FSW", self.on_connect))
+        if self.can_win and not self.can_win.workers and os.path.exists(self.can_win.lines_file) and any(
+                ln.get("enabled") and (ln.get("channel") or ln.get("iface") in ("demo", "socketcan"))
+                for ln in self.can_win.lines):
+            def can():
+                self.can_win.conn_btn.setChecked(True)
+                self.can_win.toggle_connect()
+            todo.append(("CAN lines", can))
+        if self.tfg and not self.tfg.is_connected and _da.load("TFG6806"):
+            todo.append(("TFG6806", self.tfg.on_connect))
+        if self.bench and not self.bench._hmp_ok and _da.load("HMP4040").get("addr"):
+            todo.append(("HMP4040", self.bench.on_hmp_connect))
+        if self.n67 and not self.n67.ok and _da.load("N6701C").get("addr"):
+            todo.append(("N6701C", self.n67.on_connect))
+        if self.it68 and not self.it68.ok and _da.load("IT6832").get("addr"):
+            todo.append(("IT6832", self.it68.on_connect))
+        if not todo:
+            return
+        self.logmsg("Start-up: connecting " + ", ".join(n for n, _ in todo) +
+                    " (saved connections; switch off on the Help tab)")
+        for k, (name, fn) in enumerate(todo):
+            def run(name=name, fn=fn):
+                try:
+                    fn()
+                except Exception as e:
+                    self.logmsg(f"Start-up connection {name}: {type(e).__name__}: {e}", "warn")
+            QtCore.QTimer.singleShot(400 * k, run)
+
     def on_connect_toggle(self):
         if self.connected:
             self.on_disconnect()
@@ -2997,6 +3149,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trend_curve.setData([], [])
 
     def closeEvent(self, ev):
+        if self._detached:
+            self._save_detached()                     # opened again in their windows next time
         if self.bos:
             self.bos.shutdown()
         if self.dash:
@@ -3060,6 +3214,8 @@ def main():
     ap.add_argument("--protocol", choices=["hislip", "vxi11", "socket"], help="LAN protocol")
     ap.add_argument("--connect", action="store_true", help="connect on start-up")
     ap.add_argument("--demo", action="store_true", help="simulated instrument, no hardware needed")
+    ap.add_argument("--no-autoconnect", action="store_true",
+                    help="do not connect the saved devices / CAN lines at start-up")
     ap.add_argument("--system-font", action="store_true",
                     help="keep the system fonts (Segoe UI / Consolas) instead of the bundled Inter / DejaVu Sans Mono")
     ap.add_argument("--demo-no-k70", action="store_true",

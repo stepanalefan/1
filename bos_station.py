@@ -243,6 +243,7 @@ def fmt(v, spec="{:.2f}"):
 # --------------------------------------------------------------------------- #
 #  FSW capture (runs in the FSW worker thread)                                 #
 # --------------------------------------------------------------------------- #
+OP_MARK = "   ·  progress "     # status line: step text + progress of the running operation
 K70_NSYM = 4000                # symbols per FSW-K70 capture (result range: half of it)
 
 
@@ -1060,6 +1061,9 @@ class BosStation(QtWidgets.QWidget):
         root.addLayout(bar)
         self.step_lbl = QtWidgets.QLabel("Ready. Connect the FSW (Spectrum Analyzer tab) and the BOS CAN line (CAN tab).")
         self.step_lbl.setStyleSheet(f"color:{C_DIM};")
+        # one fixed text line: a longer text or a symbol from a fallback font must not move the layout below
+        self.step_lbl.setFixedHeight(self.step_lbl.fontMetrics().height() + 6)
+        self.step_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         root.addWidget(self.step_lbl)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -1560,6 +1564,7 @@ class BosStation(QtWidgets.QWidget):
         self.sig_info.setFont(_mono())
         self.sig_src = QtWidgets.QComboBox()
         self.sig_src.currentIndexChanged.connect(self._draw_signal)
+        self.sig_src.activated.connect(lambda *_: setattr(self, "_sig_manual", True))   # operator's choice is kept
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel("Capture"))
         top.addWidget(self.sig_src, 1)
@@ -2452,6 +2457,7 @@ class BosStation(QtWidgets.QWidget):
         self.sig_src.blockSignals(True)
         self.sig_src.clear()
         self.sig_src.blockSignals(False)
+        self._live_cap, self._sig_manual = None, False
         self.on_done = done
         self.abort_flag = False
         self.running = True
@@ -2530,7 +2536,7 @@ class BosStation(QtWidgets.QWidget):
 
     # ---- progress of the current step (status line): elapsed time against the duration it took last time
     def _op_start(self, kind, expected=None):
-        base = self.step_lbl.text().split("  ⏳")[0]
+        base = self.step_lbl.text().split(OP_MARK)[0]
         key = (kind, base.split(":")[-1].split("(")[0].strip()[:60])
         if expected is None:
             expected = self._op_hist.get(key)
@@ -2555,9 +2561,9 @@ class BosStation(QtWidgets.QWidget):
         exp = op["exp"]
         if exp and exp > 0.5:
             pct = min(99, int(100 * el / exp))
-            txt = f"  ⏳ {pct} % · {el:.1f} / {exp:.1f} s" + ("  (longer than last time)" if el > 1.3 * exp else "")
+            txt = f"{OP_MARK}{pct} %  ({el:.1f} / {exp:.1f} s)" + ("  (longer than last time)" if el > 1.3 * exp else "")
         else:
-            txt = f"  ⏳ {el:.1f} s"
+            txt = f"{OP_MARK}{el:.1f} s"
         self.step_lbl.setText(op["base"] + txt)
 
     def _handle(self, req):
@@ -3557,6 +3563,11 @@ class BosStation(QtWidgets.QWidget):
             self.log(f"BOS station: capture {label} ({n:,} samples = {dtxt} of signal): "
                      + ", ".join(parts) + f" - longest: {slow}", "info")
             self._timing_log.append((label, n, fs, dict(tm)))
+        if not self.live_mode:
+            try:
+                self._show_live_capture(label, r)
+            except Exception:
+                pass
         return r
 
     def _mcfg(self, mod):
@@ -3717,6 +3728,17 @@ class BosStation(QtWidgets.QWidget):
                       text="not done - modulation measured by the FSW-K70 only (Unit control / plan setting)")
             return
         r = yield from self._mod_capture(mod)
+        k = 0
+        while not r.get("present") and not self.live_mode and k < 2 and not self.abort_flag:
+            k += 1                                          # RF not (yet) on: wait, then re-send the session
+            self.log(f"BOS station: {mod}: no signal in the capture ({fmt(r.get('power'), '{:.1f}')} dBm, "
+                     f"{fmt(r.get('snr_floor'), '{:.1f}')} dB over the FSW noise floor) - "
+                     + ("waiting 2 s" if k == 1 else "re-sending the session command") + f", capture again ({k}/2)",
+                     "warn")
+            if k == 2 and self.ctl.get("method") == "protocol":
+                yield from self._session()
+            yield ("sleep", 2.0 if not self._is_demo() else 0.02)
+            r = yield from self._mod_capture(mod, f"{mod} (repeat {k})")
         self.res[f"mod_{mod}"] = r
         ro = r.get("rolloff")
         if ro and ro.get("band_limited") and not self.live_mode:
@@ -4201,6 +4223,9 @@ class BosStation(QtWidgets.QWidget):
             k += 1
             r = yield from self._mod_capture("BPSK", f"BER {tot['raw_bits']:,}/{target:,} bits")
             d = r.get("decode") or {}
+            if not r.get("present"):
+                self.log(f"BOS station: BER capture {k}: no signal ({fmt(r.get('power'), '{:.1f}')} dBm, "
+                         f"{fmt(r.get('snr_floor'), '{:.1f}')} dB over the FSW noise floor)", "warn")
             if "frames" not in d:
                 continue
             for key in ("n_frames", "rs_fail", "rs_corrected", "crc_fail", "idle_bad", "vcfc_gaps", "raw_bits"):
@@ -4431,16 +4456,44 @@ class BosStation(QtWidgets.QWidget):
         self._row(test, name, value, unit, lt, st, spec, note=note)
 
     def _add_capture(self, label, r):
-        self.res.setdefault("_caps", []).append((label, r))
-        self.sig_src.addItem(label)
-        self.sig_src.setCurrentIndex(self.sig_src.count() - 1)
+        caps = self.res.setdefault("_caps", [])
+        caps.append((label, r))
+        self.sig_src.addItem(label, len(caps) - 1)
+        if not getattr(self, "_sig_manual", False):
+            self.sig_src.setCurrentIndex(self.sig_src.count() - 1)
+
+    def _show_live_capture(self, label, r):
+        """Every capture of a plan as it arrives (BER loop, DAC calibration, …): one "latest capture" entry at the
+        top of the Signal list, followed unless the operator picked another entry."""
+        if not isinstance(r, dict) or not (r.get("i") is not None or r.get("spec_f") is not None
+                                           or (r.get("spectrum") or {}).get("spec_f") is not None):
+            return
+        self._live_cap = (label, r)
+        text = f"▶ latest capture: {label}"
+        k = self.sig_src.findData("live")
+        if k < 0:
+            self.sig_src.blockSignals(True)
+            self.sig_src.insertItem(0, text, "live")
+            self.sig_src.blockSignals(False)
+            k = 0
+        else:
+            self.sig_src.setItemText(k, text)
+        if getattr(self, "_sig_manual", False):
+            return
+        if self.sig_src.currentIndex() != k:
+            self.sig_src.setCurrentIndex(k)                  # redraws
+        else:
+            self._draw_signal()
 
     def _draw_signal(self, *_):
         caps = self.res.get("_caps", [])
-        k = self.sig_src.currentIndex()
-        if not 0 <= k < len(caps):
+        k = self.sig_src.currentData()
+        if k == "live" and getattr(self, "_live_cap", None):
+            label, r = self._live_cap
+        elif isinstance(k, int) and 0 <= k < len(caps):
+            label, r = caps[k]
+        else:
             return
-        label, r = caps[k]
         if r.get("i") is not None:
             i, q = np.asarray(r["i"]), np.asarray(r["q"])
             step = max(1, len(i) // 6000)
@@ -4454,6 +4507,9 @@ class BosStation(QtWidgets.QWidget):
         pe = r.get("phase_err_series")
         self.phase_curve.setData(np.asarray(pe) if pe is not None else [])
         lines = [f"{label}"]
+        if r.get("kind") == "mod" and r.get("present") is False:
+            lines += [f"NO SIGNAL in this capture: {fmt(r.get('snr_floor'), '{:.1f}')} dB over the FSW noise floor "
+                      f"(needs > 10 dB) - the values below are noise, not the BOS signal.", ""]
         for key, name, spec_ in (("power", "Power, dBm", "{:.2f}"), ("mer", "MER, dB", "{:.2f}"),
                                  ("evm", "EVM, %", "{:.2f}"), ("cfe", "Carrier freq error, Hz", "{:+.1f}"),
                                  ("cfe_ppm", "  … ppm", "{:+.4f}"), ("srerr", "Symbol rate error, ppm", "{:+.2f}"),
@@ -4770,7 +4826,7 @@ class BosStation(QtWidgets.QWidget):
         caps = self.res.get("_caps", [])
         keep = self.sig_src.currentIndex()
         for k, (label, r) in enumerate(caps[:8]):
-            self.sig_src.setCurrentIndex(k)
+            self.sig_src.setCurrentIndex(self.sig_src.findData(k))
             QtWidgets.QApplication.processEvents()
             h.append(f"<h3>{e(label)}</h3><table><tr><td><img src='data:image/png;base64,{self._img(self.const)}' "
                      f"width=420></td><td><img src='data:image/png;base64,{self._img(self.spec)}' width=520></td></tr></table>")

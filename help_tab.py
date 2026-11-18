@@ -167,6 +167,12 @@ class HelpTab(QtWidgets.QWidget):
         self.lang.setToolTip("User-interface language (languages of the G8 countries). Help pages, reports\n"
                              "and measurement results stay in English.")
         top.addWidget(self.lang)
+        top.addSpacing(24)
+        self.autocon = QtWidgets.QCheckBox("Connect the saved devices and CAN lines at start-up")
+        self.autocon.setToolTip("At program start the instruments are connected with the addresses of their last\n"
+                                "successful connection (device_addresses.json) and the ticked CAN lines with their\n"
+                                "adapters (can_lines.json). A device that is off only logs an error.")
+        top.addWidget(self.autocon)
         top.addStretch(1)
         v.addLayout(top)
         self.tabs = QtWidgets.QTabWidget()

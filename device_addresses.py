@@ -63,6 +63,23 @@ def save(device: str, settings: dict, addr_key: str = "addr"):
         pass
 
 
+def option(name: str, default=None):
+    """Program option kept in the same file (key "_options")."""
+    return _read().get("_options", {}).get(name, default)
+
+
+def set_option(name: str, value):
+    d = _read()
+    d.setdefault("_options", {})[name] = value
+    try:
+        tmp = STORE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, STORE_FILE)
+    except OSError:
+        pass
+
+
 def fill_combo(combo, device: str, current: str = ""):
     """Put the recent addresses into an editable QComboBox (current text kept / set)."""
     have = {combo.itemText(i) for i in range(combo.count())}

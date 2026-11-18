@@ -667,9 +667,24 @@ def save_language(code: str):
 _TAG = re.compile(r"^(<b>)(.*)(</b>)$", re.S)
 
 
+_TR_CACHE: dict = {}
+
+
 def tr(text: str, lang: str) -> str:
     if lang == "en" or not text:
         return text
+    key = (text, lang)
+    hit = _TR_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = _tr_uncached(text, lang)
+    if len(_TR_CACHE) > 50000:
+        _TR_CACHE.clear()
+    _TR_CACHE[key] = out
+    return out
+
+
+def _tr_uncached(text: str, lang: str) -> str:
     d = TABLE.get(text)
     if d:
         return d.get(lang, text)
@@ -713,13 +728,15 @@ class Translator(QtCore.QObject):
 
     def _t(self, obj, slot, cur: str, setter):
         key = (id(obj), slot)
-        src, shown = self._src.get(key, (None, None))
+        src, shown, lang = self._src.get(key, (None, None, None))
+        if src is not None and cur == shown and lang == self.lang:
+            return                                        # unchanged since the last pass: nothing to do
         if src is None or cur != shown:                   # new text set by the program -> new source
             src = cur
         new = tr(src, self.lang)
         if new != cur:
             setter(new)
-        self._src[key] = (src, new)
+        self._src[key] = (src, new, self.lang)
 
     def apply(self):
         if self.lang == "en" and not self._src:
@@ -733,7 +750,8 @@ class Translator(QtCore.QObject):
                     self._t(w, "title", w.title(), w.setTitle)
                 if isinstance(w, QtWidgets.QTabWidget):
                     for i in range(w.count()):
-                        self._t(w, f"tab{i}", w.tabText(i), lambda s, i=i, w=w: w.setTabText(i, s))
+                        self._t(w.widget(i) or w, f"tab{i}" if w.widget(i) is None else "tabtitle", w.tabText(i),
+                                lambda s, i=i, w=w: w.setTabText(i, s))
                 if isinstance(w, QtWidgets.QLineEdit) and w.placeholderText():
                     self._t(w, "ph", w.placeholderText(), w.setPlaceholderText)
                 if isinstance(w, QtWidgets.QComboBox) and not w.isEditable():

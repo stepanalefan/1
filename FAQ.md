@@ -464,7 +464,14 @@ measures 4000 symbols per capture (2000 in the result range). With K70 the Tx fi
 Every capture logs its times: `capture OQPSK (…): setup 0.05 s, level 0.62 s, acquire 0.01 s, transfer 0.08 s,
 analysis 0.9 s - longest: …` (K70 steps: settings / level / measure), and the end of a plan sums them up. The
 messages of the log panel at the bottom of the window are also written to `messages_log_YYYY-MM-DD.txt` next to
-the program (one file per day) - send that file when something is slow or fails. What was done:
+the program (one file per day) - send that file when something is slow or fails.
+
+### The Signal tab shows an old capture / "nothing happens" during the BER test
+The Signal tab now follows every capture as it arrives: the entry **▶ latest capture: …** at the top of the list
+(BER loop, DAC calibration, roll-off edges, …) is redrawn after each capture. Pick another entry to look at it -
+the list then stays where you put it until the next run. A capture without the BOS signal (less than 10 dB over the
+FSW noise floor) is marked **NO SIGNAL** above its values (those are then noise, not the BOS); the modulation tests
+wait 2 s and capture again, then re-send the session command and try once more before reporting NO SIGNAL. What was done:
 * **auto level once per signal** (Unit control → FSW level): ADJ:LEV is a measurement of its own and ran before
   every capture; now it runs at the first capture of a mode / attenuation / frequency and the reference level is
   reused;
@@ -673,6 +680,19 @@ the program (FSW: address, protocol, timeout; HMP4040 and N6701C: address; IT683
 address, protocol, Arduino option, model; TFG6806: LAN / USB, IP, port, USB resource) and filled in at the next
 start - like `can_lines.json` for the CAN lines. Demo connections are not saved. The address lists (HMP4040 address,
 IT6832 COM port) also offer the last few addresses used. A `--ip` given on the command line still wins for the FSW.
+
+### Can the program connect everything by itself at start-up?
+Yes (on by default). About a second after the start, every instrument that has a saved connection in
+`device_addresses.json` is connected (FSW, TFG6806, HMP4040, N6701C, IT6832), and the CAN lines ticked in
+`can_lines.json` are opened - one after the other; the log says what is being connected, and a device that is
+switched off only logs an error. Switch it off on the **Help** tab (*Connect the saved devices and CAN lines at
+start-up*) or start the program with `--no-autoconnect`. Not done in `--demo`.
+
+### Can I put a tab into its own window (second monitor)?
+Yes. **Right-click a tab → Open in a separate window**, or double-click it. The page then lives in its own window
+(e.g. *Main* on one screen, *Telemetry* or *BOS Test Station* on the other) and keeps working as before. *Back to
+the main window* - or closing that window - puts it back at its old place; right-click a tab → *Bring all windows
+back* does it for all. Which tabs were separate, and where their windows were, is remembered for the next start.
 
 ## 7. CAN and telemetry
 
