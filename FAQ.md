@@ -500,22 +500,26 @@ of Change_DAC_1 / MD_SETTINGS DAC_offsets (table 4.7) are off: qmc_offseta / b, 
 One measurement gives the size but not the direction: the demodulator locks to one of four orientations on every
 capture, so the sign / rail of the error changes from capture to capture.
 
-**▶ Auto-calibrate (live)** finds the direction: Live diagnose runs and the registers are calibrated in this order
-(OQPSK; BPSK: coarse_dac and offsets only):
+**▶ Auto-calibrate (live)** runs a **coordinate search** (Live diagnose is started if needed), strictly in this order:
 
-1. **coarse_dac** (DAC full-scale current) is lowered one step at a time; a step is kept while the MER does not get
-   worse (0.1 dB tolerance) and the output has not dropped more than *Max. output drop* (6 dB); it never goes
-   below *coarse_dac not below*. Can be switched off (*Lower coarse_dac first*). Done once per start.
-2. **qmc_phaseab** - quadrature error: phase ±s probed, q² fitted by a parabola, the optimum sent and checked.
-3. **qmc_gaina / qmc_gainb** - gain imbalance: gain B-A ±s, g² parabola.
-4. **qmc_offseta / qmc_offsetb** - carrier offset: A ±s, B ±s, A+B, |offset|² quadratic surface.
+1. **Baseline** - the metric of the starting registers is measured and is the first best result. Metric = total
+   error power relative to the signal in dB (carrier offset² + gain imbalance + quadrature error + remaining MER
+   error), lower is better; it does not depend on the demodulator's lock orientation.
+2. **One at a time** - every candidate changes ONE register by its step; all others stay at the best values. Order:
+   coarse_dac (only lowered, step 1), qmc_phaseab, qmc_gaina, qmc_gainb, qmc_offseta, qmc_offsetb (BPSK:
+   coarse_dac and the offsets).
+3. **Delta** - each candidate's metric is compared with the current best: Δ = best − candidate (dB, positive =
+   better), logged for every candidate.
+4. **Greedy pruning** - a candidate with Δ ≤ *Keep a change only for Δ >* (default 0.05 dB, just above the noise),
+   or one that breaks a constraint (register range, coarse_dac below its minimum, output down more than *Max.
+   output drop*), is discarded at once and the next candidate starts from the best registers. An accepted one is
+   the new best, and the search goes on in the same direction while it keeps improving.
 
-All fits are independent of the demodulator's lock orientation (like LO-leakage nulling with a spectrum analyser).
-Each stage repeats with half the probe steps until its quantity is within the target (offset ≤ -55 dBc, gain ≤
-0.02 dB, quadrature ≤ 0.1°), up to 4 fits; a fit that makes it worse is taken back. Stages 2-4 then run again and
-again - **there is no time limit: the calibration goes on until you press ■ Stop calibration**; while everything is
-within the targets it only keeps measuring. Stop keeps the best working point measured and sends it to the BOS.
-The register scales found are kept per unit serial.
+A register where both directions are discarded gets half the step next cycle. The calibration is **complete** when a
+whole cycle at the smallest steps brings no improvement; it also ends with **■ Stop calibration**. Either way the best
+registers go back into the unit and a file is written: `bos_reports/dac_calibration/DAC_<serial>_<date>.txt` - the
+final registers (signed, hex, binary), the Change_DAC_1 data bytes, baseline and final metric, and every candidate
+with its Δ and verdict.
 The BOS must be transmitting (session on, e.g. from Control KTR), the DAC is off in standby.
 
 Measurement settings (panel *Auto-calibration measurement*): **captures per setting** (default 3 - |offset|²,
