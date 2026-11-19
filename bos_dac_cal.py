@@ -182,14 +182,19 @@ def _vertex(y_m, y_0, y_p, s):
     return s * (y_m - y_p) / (2 * curv), curv / (s * s)
 
 
-def cost_db(m):
-    """Optimisation metric (dB, lower = better): total error power relative to the signal, from rotation-invariant
-    quantities - carrier offset |c|², gain imbalance, quadrature error and the remaining error of the MER."""
-    e = abs(m["c"]) ** 2 + 10 ** (-m["mer"] / 10) if math.isfinite(m["mer"]) else abs(m["c"]) ** 2
+def cost_db(m, reg="qmc"):
+    """Optimisation metric (dB, lower = better).
+    coarse_dac: -MER (the full-scale current changes compression / noise, which only the MER shows);
+    QMC registers: sum of the squared QMC impairments - carrier offset |c|, gain imbalance,
+    quadrature error, each relative to its target (0 dB = all at their targets) - measured directly and
+    rotation-invariant (the MER is too noisy to see small QMC steps)."""
+    if reg == "coarse_dac":
+        return -m["mer"] if math.isfinite(m["mer"]) else float("inf")
+    e = (abs(m["c"]) / 10 ** (TARGET["off_dbc"] / 20)) ** 2           # each impairment relative to its target
     if math.isfinite(m["g"]):
-        e += ((10 ** (m["g"] / 20) - 1) / 2) ** 2
+        e += (m["g"] / TARGET["gain_db"]) ** 2
     if math.isfinite(m["q"]):
-        e += (math.radians(m["q"]) / 2) ** 2
+        e += (m["q"] / TARGET["quad_deg"]) ** 2
     return 10 * math.log10(max(e, 1e-15))
 
 
@@ -276,15 +281,17 @@ class AutoCal:
 
     # ---- search
     def _feed(self, m):
-        c = cost_db(m)
+        reg = self.cand[0] if self.cand else "qmc"
+        c = cost_db(m, reg)
         if self.phase == "baseline":
+            c = cost_db(m)
             bpsk = not (math.isfinite(m["g"]) and math.isfinite(m["q"]))
             self.params = [x for x in COORD if (self.coarse or x[0] != "coarse_dac") and
                            not (bpsk and x[0] in ("qmc_phaseab", "qmc_gaina", "qmc_gainb"))]
             self.best = (c, dict(self.center), m)
             self.p0 = m.get("power", float("nan"))
             self.history.append((0, "baseline", "", c, 0.0, "baseline"))
-            self.log.append(f"1. baseline: metric {c:.2f} dB ({self._desc(m)})")
+            self.log.append(f"1. baseline: QMC error {c:.2f} dB, MER {m['mer']:.2f} dB ({self._desc(m)})")
             self.log.append("2.-4. coordinate search, one register per step: " +
                             " → ".join(x[0] for x in self.params) + f"; a candidate is kept only for Δ > "
                             f"{self.min_delta:g} dB and within the constraints")
@@ -294,7 +301,7 @@ class AutoCal:
         # a candidate was measured
         reg, d, sregs = self.cand
         self.n_eval += 1
-        delta = self.best[0] - c                                  # > 0: better than the best
+        delta = cost_db(self.best[2], reg) - c                    # > 0: better than the best (same metric)
         drop = (self.p0 - m.get("power", self.p0)) if math.isfinite(self.p0) and \
             math.isfinite(m.get("power", math.nan)) else 0.0
         viol = f"output {-drop:+.2f} dB (limit -{self.max_drop:g} dB)" if drop > self.max_drop else ""
@@ -306,7 +313,7 @@ class AutoCal:
             self.dir = None
             return self._next_candidate()
         self.n_acc += 1
-        self.best = (c, dict(sregs), m)
+        self.best = (cost_db(m), dict(sregs), m)
         self.center = dict(sregs)
         self.dir = d
         self.improved_cycle = True
