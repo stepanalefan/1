@@ -42,6 +42,63 @@ def _mono_font():
     except Exception:
         return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 
+class RegSpin(QtWidgets.QSpinBox):
+    """Register field shown in HEX / DEC / BIN (like the Frames tab); the value is always the signed number."""
+
+    def __init__(self, nbits, signed):
+        super().__init__()
+        self.nbits, self.signed, self.fmt = nbits, signed, "DEC"
+
+    def set_fmt(self, fmt):
+        self.fmt = fmt
+        v = self.value()
+        self.setDisplayIntegerBase(10)
+        self.lineEdit().setText(self.textFromValue(v))
+        self.updateGeometry()
+
+    def _raw(self, v):
+        return v & ((1 << self.nbits) - 1)
+
+    def textFromValue(self, v):
+        if self.fmt == "HEX":
+            return f"0x{self._raw(v):0{(self.nbits + 3) // 4}X}"
+        if self.fmt == "BIN":
+            return f"0b{self._raw(v):0{self.nbits}b}"
+        return str(v)
+
+    def valueFromText(self, text):
+        t = text.strip().replace("_", "").replace(" ", "")
+        try:
+            if self.fmt == "HEX" or t.lower().startswith("0x"):
+                raw = int(t[2:] if t.lower().startswith("0x") else t, 16)
+            elif self.fmt == "BIN" or t.lower().startswith("0b"):
+                raw = int(t[2:] if t.lower().startswith("0b") else t, 2)
+            else:
+                return int(t)
+        except ValueError:
+            return self.value()
+        raw &= (1 << self.nbits) - 1
+        if self.signed and raw >= 1 << (self.nbits - 1):
+            raw -= 1 << self.nbits
+        return raw
+
+    def validate(self, text, pos):
+        t = text.strip().replace("_", "").replace(" ", "")
+        if t in ("", "-", "0x", "0X", "0b", "0B"):
+            return (QtGui.QValidator.Intermediate, text, pos)
+        try:
+            if self.fmt == "HEX" or t.lower().startswith("0x"):
+                ok = int(t[2:] if t.lower().startswith("0x") else t, 16) < 1 << self.nbits
+            elif self.fmt == "BIN" or t.lower().startswith("0b"):
+                ok = int(t[2:] if t.lower().startswith("0b") else t, 2) < 1 << self.nbits
+            else:
+                v = int(t)
+                ok = self.minimum() <= v <= self.maximum()
+        except ValueError:
+            return (QtGui.QValidator.Invalid, text, pos)
+        return (QtGui.QValidator.Acceptable if ok else QtGui.QValidator.Invalid, text, pos)
+
+
 REGS = ["qmc_offseta", "qmc_offsetb", "qmc_gaina", "qmc_gainb", "qmc_phaseab", "coarse_dac"]
 DOC_DEFAULT = {"qmc_offseta": 0x1F84, "qmc_offsetb": 0x1E36, "qmc_gaina": 0x3F4, "qmc_gainb": 0x3F4,
                "qmc_phaseab": 0xFF6, "coarse_dac": 7}          # table 4.43 defaults (raw register values)
@@ -316,9 +373,17 @@ class DacCalPanel(QtWidgets.QWidget):
         g = QtWidgets.QGroupBox("Registers in the unit (Change_DAC_1 / DAC_offsets)")
         f = QtWidgets.QFormLayout(g)
         self.ed = {}
+        self.fmt = QtWidgets.QComboBox()
+        self.fmt.addItems(["HEX", "DEC", "BIN"])
+        self.fmt.setCurrentText("DEC")
+        self.fmt.setToolTip("HEX / BIN: the raw register bits (two's complement for the offsets and phase), as in "
+                            "the CAN frame;\nDEC: the signed value. Typing works in the shown format "
+                            "(0x… / 0b… prefixes also accepted).")
+        self.fmt.currentTextChanged.connect(self._set_fmt)
+        f.addRow("Format", self.fmt)
         for k in REGS:
             n, sg = BITS[k]
-            sp = QtWidgets.QSpinBox()
+            sp = RegSpin(n, sg)
             sp.setRange(-(1 << (n - 1)) if sg else 0, (1 << (n - 1)) - 1 if sg else (1 << n) - 1)
             sp.setValue(to_signed(k, self.regs[k]))
             sp.setToolTip(f"{n}-bit {'two-s complement' if sg else 'unsigned'} (signed value; raw in the table)")
@@ -509,6 +574,10 @@ class DacCalPanel(QtWidgets.QWidget):
             f"gain {md['gain_db_lsb'] * 1e3:.2f} mdB/LSB, phase {md['phase_deg_lsb'] * 1e3:.2f} m°/LSB")
 
     # ---- actions
+    def _set_fmt(self, fmt):
+        for sp in self.ed.values():
+            sp.set_fmt(fmt)
+
     def _send(self, regs):
         import bos_protocol as bp
         data = bp.encode(0x50, regs)
