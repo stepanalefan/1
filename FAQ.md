@@ -502,9 +502,11 @@ capture, so the sign / rail of the error changes from capture to capture.
 
 **▶ Auto-calibrate (live)** runs a **coordinate search** (Live diagnose is started if needed), strictly in this order:
 
-1. **Baseline** - the metric of the starting registers is measured and is the first best result. Metric = total
-   error power relative to the signal in dB (carrier offset² + gain imbalance + quadrature error + remaining MER
-   error), lower is better; it does not depend on the demodulator's lock orientation.
+1. **Baseline** - the metric of the starting registers is measured and is the first best result. Metrics (dB, lower
+   = better, independent of the demodulator's lock orientation): for **coarse_dac** −MER (the full-scale current
+   changes compression / DAC noise, which only the MER shows); for the **QMC registers** the sum of carrier offset,
+   gain imbalance and quadrature error, each squared relative to its target (0 dB = all at their targets) - measured
+   directly, so small steps are not lost in the MER noise.
 2. **One at a time** - every candidate changes ONE register by its step; all others stay at the best values. Order:
    coarse_dac (only lowered, step 1), qmc_phaseab, qmc_gaina, qmc_gainb, qmc_offseta, qmc_offsetb (BPSK:
    coarse_dac and the offsets).

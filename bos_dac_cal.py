@@ -655,7 +655,7 @@ class DacCalPanel(QtWidgets.QWidget):
              f"result      {how}"]
         if a.best and a.history:
             L.append(f"metric      baseline {a.history[0][3]:.2f} dB -> final {a.best[0]:.2f} dB "
-                     f"(total error power vs signal, lower = better)")
+                     f"(QMC impairments vs their targets: 0 dB = at the targets, lower = better; coarse_dac judged by the MER)")
             L.append(f"final       {a._desc(a.best[2])}")
             L.append(f"candidates  {a.n_eval} measured, {a.n_acc} accepted; min. delta {a.min_delta:g} dB, "
                      f"max. output drop {a.max_drop:g} dB, coarse_dac >= {a.coarse_min}")
