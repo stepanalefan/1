@@ -500,12 +500,22 @@ of Change_DAC_1 / MD_SETTINGS DAC_offsets (table 4.7) are off: qmc_offseta / b, 
 One measurement gives the size but not the direction: the demodulator locks to one of four orientations on every
 capture, so the sign / rail of the error changes from capture to capture.
 
-**▶ Auto-calibrate (live)** finds the direction: Live diagnose runs (OQPSK: all registers; BPSK: offsets only),
-Change_DAC_1 is sent with the registers probed around the working point (offset A ±s, B ±s, A+B; gain B-A ±s;
-phase ±s - 9 captures), |offset|², gain² and phase² are fitted (quadratic surface / parabolas, independent of the
-lock orientation, like LO-leakage nulling with a spectrum analyser), the optimum is sent and checked; if not within
-the targets (offset ≤ -55 dBc, gain ≤ 0.02 dB, quadrature ≤ 0.1°) the next round uses half the probe steps (up to 4
-rounds; on failure the best values measured are put back). The register scales found are kept per unit serial.
+**▶ Auto-calibrate (live)** finds the direction: Live diagnose runs and the registers are calibrated in this order
+(OQPSK; BPSK: coarse_dac and offsets only):
+
+1. **coarse_dac** (DAC full-scale current) is lowered one step at a time; a step is kept while the MER does not get
+   worse (0.1 dB tolerance) and the output has not dropped more than *Max. output drop* (6 dB); it never goes
+   below *coarse_dac not below*. Can be switched off (*Lower coarse_dac first*). Done once per start.
+2. **qmc_phaseab** - quadrature error: phase ±s probed, q² fitted by a parabola, the optimum sent and checked.
+3. **qmc_gaina / qmc_gainb** - gain imbalance: gain B-A ±s, g² parabola.
+4. **qmc_offseta / qmc_offsetb** - carrier offset: A ±s, B ±s, A+B, |offset|² quadratic surface.
+
+All fits are independent of the demodulator's lock orientation (like LO-leakage nulling with a spectrum analyser).
+Each stage repeats with half the probe steps until its quantity is within the target (offset ≤ -55 dBc, gain ≤
+0.02 dB, quadrature ≤ 0.1°), up to 4 fits; a fit that makes it worse is taken back. Stages 2-4 then run again and
+again - **there is no time limit: the calibration goes on until you press ■ Stop calibration**; while everything is
+within the targets it only keeps measuring. Stop keeps the best working point measured and sends it to the BOS.
+The register scales found are kept per unit serial.
 The BOS must be transmitting (session on, e.g. from Control KTR), the DAC is off in standby.
 
 Measurement settings (panel *Auto-calibration measurement*): **captures per setting** (default 3 - |offset|²,

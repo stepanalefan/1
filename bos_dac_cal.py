@@ -7,7 +7,8 @@ the DAC_offsets sets of MD_SETTINGS, table 4.7).
 
 Registers (DAC38J82): qmc_offseta / qmc_offsetb (13-bit two's complement, added to the A / B data - cancel the LO
 leakage / carrier offset), qmc_gaina / qmc_gainb (11-bit, gain = code / 1024 - I/Q amplitude balance), qmc_phaseab
-(12-bit two's complement - quadrature), coarse_dac (full-scale current, not changed here).
+(12-bit two's complement - quadrature), coarse_dac (full-scale current, lowered first while the MER
+holds - see AutoCal).
 
 The station measures, on the demodulated OQPSK / BPSK symbols (bos_analysis.iq_impairments): the complex carrier
 offset c (relative to the RMS symbol), the Q / I gain imbalance g (dB) and the quadrature error q (deg).
@@ -113,7 +114,8 @@ NOMINAL = {  # register scales before a unit has been calibrated (DAC38J82 data-
 TARGET = {"off_dbc": -55.0, "gain_db": 0.02, "quad_deg": 0.1}
 STEP = {"off": 160, "gain": 16, "phase": 64}         # first-round probe steps (LSB); halved every round
 STEP_MIN = {"off": 12, "gain": 2, "phase": 6}
-OPTS = {"n_avg": 3, "skip": 1, "settle_s": 1.0, "nsym": 32000, "own_session": True}   # defaults of the panel
+OPTS = {"n_avg": 3, "skip": 1, "settle_s": 1.0, "nsym": 32000, "own_session": True, "coarse": True,
+        "coarse_min": 0, "max_drop_db": 6.0}   # defaults of the panel
 
 
 def to_signed(name, raw_v):
@@ -146,7 +148,7 @@ def measurement(r):
         return None
     return {"c": c, "g": r.get("gain_imb", float("nan")), "q": r.get("quad_err", float("nan")),
             "mer": r.get("mer", float("nan")), "mer_corr": r.get("mer_corr", float("nan")),
-            "mod": r.get("expected", "")}
+            "power": r.get("power", float("nan")), "mod": r.get("expected", "")}
 
 
 def dbc(c):
@@ -181,25 +183,38 @@ def _vertex(y_m, y_0, y_p, s):
 
 
 class AutoCal:
-    """Probe / fit / apply rounds driven by successive measurements (live diagnose)."""
+    """Staged calibration driven by successive measurements (live diagnose), in the order:
+    1. coarse_dac - lowered one step at a time while the MER does not get worse (and the output drops by no more than
+       `max_drop_db`); the best code is kept. Done once per start.
+    2. qmc_phaseab - quadrature error (parabola of q² over 3 points), 3. qmc_gaina / qmc_gainb - gain imbalance
+       (parabola of g² over gain B - gain A), 4. qmc_offseta / qmc_offsetb - carrier offset (quadratic surface of |c|²).
+    Each stage probes, fits, applies and checks, up to 4 times with halved steps, and is skipped while its quantity is
+    within the target (BPSK: offsets only). A fit that makes its quantity worse is taken back. Stages 2-4 then run
+    again and again - the calibration has no time limit and runs until the operator stops it."""
 
-    def __init__(self, regs_raw, model, max_rounds=4, n_avg=3, skip=1):
+    MAX_ITER = 4
+
+    def __init__(self, regs_raw, model, n_avg=3, skip=1, coarse=True, coarse_min=0, max_drop_db=6.0, **_):
         self.n_avg, self.skip = max(1, int(n_avg)), max(0, int(skip))
-        self.buf, self.to_skip = [], self.skip      # captures of the current setting / still to discard (the working point was just sent)
+        self.buf, self.to_skip = [], self.skip
         self.center = signed(regs_raw)             # working point (signed register values)
         self.model = copy.deepcopy(model)
-        self.max_rounds = max_rounds
-        self.round = 0
-        self.step = dict(STEP)
         self.log = []
-        self.done = self.ok = False
-        self.y = {}
-        self.plan = []
-        self.cur = None                            # None = measuring the working point
-        self.regs = dict(regs_raw)
+        self.done = self.ok = False                # never set: runs until stopped
         self.bpsk = None
-        self.best = None                           # (|c|-based score, signed regs)
+        self.coarse_min, self.max_drop = int(coarse_min), float(max_drop_db)
+        self.stages = (["coarse"] if coarse else []) + ["phase", "gain", "offset"]
+        self.stage_i, self.iter, self.passes = 0, 0, 0
+        self.step = dict(STEP)
+        self.cur = None                            # None = measuring the working point, else a probe name
+        self.plan, self.y = [], {}
+        self.regs = dict(regs_raw)
+        self.before = None                         # stage quantity before the last fit, and the centre then
+        self.cb = None                             # coarse stage: (best MER, best code, power at the start)
+        self.best = None                           # (score, signed regs) of the best working point
+        self.changed, self.watching = True, False
 
+    # ---- helpers
     @staticmethod
     def _y(m):
         return {"P": abs(m["c"]) ** 2, "G": m["g"] ** 2 if math.isfinite(m["g"]) else float("nan"),
@@ -212,25 +227,9 @@ class AutoCal:
         s["qmc_gaina"] -= d.get("g", 0) / 2
         s["qmc_gainb"] += d.get("g", 0) / 2
         s["qmc_phaseab"] += d.get("p", 0)
+        if "k" in d:
+            s["coarse_dac"] = d["k"]
         return raw(s)
-
-    def _start_round(self, m):
-        self.round += 1
-        so, sg, sp = self.step["off"], self.step["gain"], self.step["phase"]
-        self.y = {"0": self._y(m)}
-        self.plan = [("a+", {"a": so}), ("a-", {"a": -so}), ("b+", {"b": so}), ("b-", {"b": -so}),
-                     ("ab", {"a": so, "b": so})]
-        if not self.bpsk:
-            self.plan += [("g+", {"g": sg}), ("g-", {"g": -sg}), ("p+", {"p": sp}), ("p-", {"p": -sp})]
-        self.log.append(f"round {self.round}: probes ±{so} LSB offset" +
-                        ("" if self.bpsk else f", ±{sg} LSB gain, ±{sp} LSB phase") + f" ({len(self.plan)} captures)")
-        return self._next()
-
-    def _next(self):
-        name, d = self.plan.pop(0)
-        self.cur = name
-        self.regs = self._point(d)
-        return self.regs
 
     def _score(self, m):
         sc = abs(m["c"]) / 10 ** (TARGET["off_dbc"] / 20)
@@ -238,13 +237,52 @@ class AutoCal:
             sc += abs(m["g"]) / TARGET["gain_db"] + abs(m["q"]) / TARGET["quad_deg"]
         return sc
 
+    @property
+    def stage(self):
+        return self.stages[self.stage_i]
+
+    def _quantity(self, m, stage=None):
+        """(value, within target, text) of the stage's quantity."""
+        st = stage or self.stage
+        if st == "phase":
+            return abs(m["q"]), abs(m["q"]) <= TARGET["quad_deg"], f"quad {abs(m['q']):.3f}°"
+        if st == "gain":
+            return abs(m["g"]), abs(m["g"]) <= TARGET["gain_db"], f"gain {abs(m['g']):.4f} dB"
+        return abs(m["c"]), dbc(m["c"]) <= TARGET["off_dbc"], f"offset {dbc(m['c']):.1f} dBc"
+
+    def _apply(self, sregs):
+        self.center = signed(raw(sregs))
+        self.regs = raw(self.center)
+        self.cur = None
+        return self.regs
+
+    def _next_stage(self):
+        self.stage_i += 1
+        self.iter, self.before = 0, None
+        if self.stage_i >= len(self.stages):
+            self.passes += 1
+            if self.changed:
+                self.log.append(f"pass {self.passes} done - next pass (phase → gain → offsets); Stop ends the "
+                                f"calibration")
+                self.watching = False
+            elif not self.watching:
+                self.log.append("all within the targets - watching; a stage runs again when its value drifts out "
+                                "(Stop ends the calibration)")
+                self.watching = True
+            self.changed = False
+            self.stages = [x for x in self.stages if x != "coarse"]
+            self.stage_i = 0
+            self.step = dict(STEP)
+        if self.bpsk and self.stage in ("phase", "gain"):
+            return self._next_stage()
+
+    # ---- capture handling
     def feed(self, m):
-        """One capture with self.regs. Returns the registers to send next, None when finished, or "wait" while
-        captures of this setting are still being collected (after a change the first `skip` are discarded, then
-        `n_avg` are averaged: |c|², g², q² - the quantities the fit uses)."""
+        """One capture with self.regs. Returns the registers to send next, or "wait" (keep measuring with the
+        present ones). After a change the first `skip` captures are discarded, then `n_avg` are averaged."""
         if self.to_skip > 0:
             self.to_skip -= 1
-            self.log.append(f"  capture discarded (settling after the change)")
+            self.log.append("  capture discarded (settling after the change)")
             return "wait"
         self.buf.append(m)
         if len(self.buf) < self.n_avg:
@@ -259,90 +297,171 @@ class AutoCal:
         P = [abs(x["c"]) ** 2 for x in ms]
         G = [x["g"] ** 2 for x in ms if math.isfinite(x["g"])]
         Q = [x["q"] ** 2 for x in ms if math.isfinite(x["q"])]
+        pw = [x.get("power", float("nan")) for x in ms]
         avg = {"c": complex(math.sqrt(float(np.mean(P))), 0.0),
                "g": math.sqrt(float(np.mean(G))) if G else float("nan"),
                "q": math.sqrt(float(np.mean(Q))) if Q else float("nan"),
                "mer": float(np.mean([x["mer"] for x in ms])), "mer_corr": float(np.mean([x["mer_corr"] for x in ms])),
+               "power": float(np.mean(pw)) if all(math.isfinite(v) for v in pw) else float("nan"),
                "mod": ms[0]["mod"], "n": len(ms)}
-        if len(ms) > 1:
-            d = [dbc(x["c"]) for x in ms]
-            avg["spread"] = f" (±{np.std(d):.1f} dB over {len(ms)} captures)"
-        else:
-            avg["spread"] = ""
+        avg["spread"] = f" (±{np.std([dbc(x['c']) for x in ms]):.1f} dB over {len(ms)} captures)" if len(ms) > 1 else ""
         return avg
 
-    def _feed(self, m):
-        if self.bpsk is None:
-            self.bpsk = not (math.isfinite(m["g"]) and math.isfinite(m["q"]))
-        if self.cur is None:                        # working point (start or after a correction)
-            self.log.append(f"{'start' if self.round == 0 else 'check'}: offset {dbc(m['c']):.1f} dBc"
-                            f"{m.get('spread', '')}" +
-                            ("" if self.bpsk else f", gain {abs(m['g']):.3f} dB, quad {abs(m['q']):.2f}°") +
-                            f", MER {m['mer']:.1f} dB")
-            sc = self._score(m)
-            if self.best is None or sc < self.best[0]:
-                self.best = (sc, dict(self.center))
-            if converged(m):
-                return self._finish(True, "within the targets" + (f" after {self.round} round(s)" if self.round else
-                                                                  " - nothing changed"))
-            if self.round >= self.max_rounds:
-                self.center = dict(self.best[1])
-                return self._finish(False, f"not within the targets after {self.round} rounds (noise / drift?) - "
-                                           f"the best values measured are applied")
-            return self._start_round(m)
-        self.y[self.cur] = self._y(m)
-        self.log.append(f"  {self.cur}: offset {dbc(m['c']):.1f} dBc{m.get('spread', '')}" +
-                        ("" if self.bpsk else f", gain {abs(m['g']):.3f} dB, quad {abs(m['q']):.2f}°"))
-        if self.plan:
-            return self._next()
-        return self._solve()
+    def _desc(self, m):
+        return (f"offset {dbc(m['c']):.1f} dBc{m.get('spread', '')}" +
+                ("" if self.bpsk else f", gain {abs(m['g']):.4f} dB, quad {abs(m['q']):.3f}°") +
+                f", MER {m['mer']:.2f} dB" + (f", {m['power']:.2f} dBm" if math.isfinite(m.get("power", math.nan))
+                                              else ""))
 
-    def _solve(self):
-        y, so = self.y, self.step["off"]
-        P0 = y["0"]["P"]
-        A1 = (y["a+"]["P"] - y["a-"]["P"]) / (2 * so)
-        B1 = (y["b+"]["P"] - y["b-"]["P"]) / (2 * so)
-        A2 = (y["a+"]["P"] + y["a-"]["P"] - 2 * P0) / (2 * so * so)
-        B2 = (y["b+"]["P"] + y["b-"]["P"] - 2 * P0) / (2 * so * so)
-        C = (y["ab"]["P"] - P0 - A1 * so - B1 * so - A2 * so * so - B2 * so * so) / (so * so)
-        H = np.array([[2 * A2, C], [C, 2 * B2]])
-        if A2 > 0 and B2 > 0 and np.linalg.det(H) > 0:
-            d = np.linalg.solve(H, -np.array([A1, B1]))
-        elif A2 > 0 and B2 > 0:
-            d = np.array([-A1 / (2 * A2), -B1 / (2 * B2)])
+    def _feed(self, m):
+        first = self.bpsk is None
+        if first:
+            self.bpsk = not (math.isfinite(m["g"]) and math.isfinite(m["q"]))
+            self.log.append(f"start: {self._desc(m)}")
+            if self.stage == "coarse":
+                self.log.append("stage: coarse")
+        if self.stage == "coarse":
+            return self._coarse(m)
+        if self.cur is not None:                    # a probe
+            self.y[self.cur] = self._y(m)
+            self.log.append(f"  {self.cur}: {self._quantity(m)[2]}{m.get('spread', '')}")
+            if self.plan:
+                name, d = self.plan.pop(0)
+                self.cur = name
+                self.regs = self._point(d)
+                return self.regs
+            return self._fit()
+        # working point
+        if not first and not self.watching:
+            self.log.append(f"check: {self._desc(m)}")
+        sc = self._score(m)
+        if self.best is None or sc < self.best[0]:
+            self.best = (sc, dict(self.center))
+        for _ in range(len(self.stages) + 1):       # stages already within target are passed with this capture
+            if self.stage == "coarse":
+                return self._coarse(m)
+            val, ok, txt = self._quantity(m)
+            if self.before is not None and val > self.before[0] * 1.05:
+                self.log.append(f"  {self.stage}: worse after the fit ({txt}) - previous setting restored")
+                c = self.before[1]
+                self.before = None
+                self.step = {k: max(STEP_MIN[k], v // 2) for k, v in self.step.items()}
+                return self._apply(c)
+            if ok or self.iter >= self.MAX_ITER:
+                if not ok:
+                    self.log.append(f"  {self.stage}: {txt} after {self.iter} fits - moving on")
+                self._next_stage()
+                if self.stage_i == 0 and self.passes and not ok:
+                    pass
+                continue
+            return self._probe(m)
+        return "wait"                               # everything within the targets: keep watching
+
+    def _probe(self, m):
+        if self.iter == 0:
+            self.log.append(f"stage: {self.stage}")
+        self.changed = True
+        self.iter += 1
+        self.y = {"0": self._y(m)}
+        self.before = (self._quantity(m)[0], dict(self.center))
+        so, sg, sp = self.step["off"], self.step["gain"], self.step["phase"]
+        if self.stage == "phase":
+            self.plan = [("p+", {"p": sp}), ("p-", {"p": -sp})]
+        elif self.stage == "gain":
+            self.plan = [("g+", {"g": sg}), ("g-", {"g": -sg})]
         else:
-            return self._finish(False, "the offset registers have no clear effect on the carrier offset - is the DAC "
-                                       "running (session on) and is Change_DAC_1 accepted?")
-        d = np.clip(d, -6 * so, 6 * so)
-        self.model["off_lsb"] = 1 / math.sqrt((A2 + B2) / 2)           # |c| = 1 per off_lsb LSB
-        new = dict(self.center)
-        new["qmc_offseta"] += d[0]
-        new["qmc_offsetb"] += d[1]
-        txt = f"offset A {d[0]:+.0f}, B {d[1]:+.0f}"
-        if not self.bpsk:
-            sg, sp = self.step["gain"], self.step["phase"]
-            dg, kg = _vertex(y["g-"]["G"], y["0"]["G"], y["g+"]["G"], sg)
-            dp, kp = _vertex(y["p-"]["Q"], y["0"]["Q"], y["p+"]["Q"], sp)
-            if dg is not None:
-                dg = float(np.clip(dg, -6 * sg, 6 * sg))
-                new["qmc_gaina"] -= dg / 2
-                new["qmc_gainb"] += dg / 2
-                self.model["gain_db_lsb"] = math.sqrt(kg)
-                txt += f", gain B-A {dg:+.0f}"
-            if dp is not None:
-                dp = float(np.clip(dp, -6 * sp, 6 * sp))
-                new["qmc_phaseab"] += dp
-                self.model["phase_deg_lsb"] = math.sqrt(kp)
-                txt += f", phase {dp:+.0f}"
-        self.model["learned"] = time.strftime("%Y-%m-%d %H:%M")
-        self.center = signed(raw(new))
-        self.regs = raw(self.center)
-        self.step = {k: max(STEP_MIN[k], self.step[k] // 2) for k in self.step}
-        self.cur = None
-        self.log.append(f"fit → {txt} LSB; applying and checking")
+            self.plan = [("a+", {"a": so}), ("a-", {"a": -so}), ("b+", {"b": so}), ("b-", {"b": -so}),
+                         ("ab", {"a": so, "b": so})]
+        self.log.append(f"  {self.stage} fit {self.iter}: {len(self.plan)} probes, step " +
+                        {"phase": f"±{sp}", "gain": f"±{sg}", "offset": f"±{so}"}[self.stage] + " LSB")
+        name, d = self.plan.pop(0)
+        self.cur = name
+        self.regs = self._point(d)
         return self.regs
 
-    def _finish(self, ok, why):
+    def _fit(self):
+        y = self.y
+        new = dict(self.center)
+        st = self.stage
+        if st in ("phase", "gain"):
+            key, s_, kk = ("Q", self.step["phase"], "p") if st == "phase" else ("G", self.step["gain"], "g")
+            d, k = _vertex(y[kk + "-"][key], y["0"][key], y[kk + "+"][key], s_)
+            if d is None:
+                self.log.append(f"  {st}: no clear minimum (noise?) - larger averaging may help; moving on")
+                self.before = None
+                self._next_stage()
+                return self._apply(new)
+            d = float(np.clip(d, -6 * s_, 6 * s_))
+            if st == "phase":
+                new["qmc_phaseab"] += d
+                self.model["phase_deg_lsb"] = math.sqrt(k)
+                txt = f"qmc_phaseab {d:+.0f}"
+            else:
+                new["qmc_gaina"] -= d / 2
+                new["qmc_gainb"] += d / 2
+                self.model["gain_db_lsb"] = math.sqrt(k)
+                txt = f"qmc_gainb - qmc_gaina {d:+.0f}"
+            self.step[{"phase": "phase", "gain": "gain"}[st]] = max(STEP_MIN[st], s_ // 2)
+        else:
+            so = self.step["off"]
+            P0 = y["0"]["P"]
+            A1 = (y["a+"]["P"] - y["a-"]["P"]) / (2 * so)
+            B1 = (y["b+"]["P"] - y["b-"]["P"]) / (2 * so)
+            A2 = (y["a+"]["P"] + y["a-"]["P"] - 2 * P0) / (2 * so * so)
+            B2 = (y["b+"]["P"] + y["b-"]["P"] - 2 * P0) / (2 * so * so)
+            C = (y["ab"]["P"] - P0 - A1 * so - B1 * so - A2 * so * so - B2 * so * so) / (so * so)
+            H = np.array([[2 * A2, C], [C, 2 * B2]])
+            if A2 > 0 and B2 > 0 and np.linalg.det(H) > 0:
+                d = np.linalg.solve(H, -np.array([A1, B1]))
+            elif A2 > 0 and B2 > 0:
+                d = np.array([-A1 / (2 * A2), -B1 / (2 * B2)])
+            else:
+                self.log.append("  offset: the offset registers have no clear effect on the carrier offset - is the "
+                                "DAC running (session on) and Change_DAC_1 accepted? Moving on")
+                self.before = None
+                self._next_stage()
+                return self._apply(new)
+            d = np.clip(d, -6 * so, 6 * so)
+            self.model["off_lsb"] = 1 / math.sqrt((A2 + B2) / 2)
+            new["qmc_offseta"] += d[0]
+            new["qmc_offsetb"] += d[1]
+            txt = f"qmc_offseta {d[0]:+.0f}, qmc_offsetb {d[1]:+.0f}"
+            self.step["off"] = max(STEP_MIN["off"], so // 2)
+        self.model["learned"] = time.strftime("%Y-%m-%d %H:%M")
+        self.log.append(f"  fit → {txt} LSB; applying and checking")
+        return self._apply(new)
+
+    def _coarse(self, m):
+        k = int(self.center["coarse_dac"]) if self.cur is None else int(signed(self.regs)["coarse_dac"])
+        if self.cur is None:                        # start of the stage: the working point
+            self.cb = (m["mer"], k, m.get("power", float("nan")))
+            self.log.append(f"  coarse_dac {k}: MER {m['mer']:.2f} dB")
+        else:
+            best_mer, best_k, p0 = self.cb
+            drop = p0 - m.get("power", p0) if math.isfinite(p0) else 0.0
+            self.log.append(f"  coarse_dac {k}: MER {m['mer']:.2f} dB" + (f", output {-drop:+.2f} dB" if drop else ""))
+            if m["mer"] >= best_mer - 0.1 and drop <= self.max_drop:
+                self.cb = (max(best_mer, m["mer"]), k, p0)
+            else:
+                why = "MER got worse" if m["mer"] < best_mer - 0.1 else f"output down more than {self.max_drop:g} dB"
+                self.log.append(f"  coarse_dac {k}: {why} - coarse_dac {best_k} kept")
+                return self._coarse_done(best_k)
+        _, best_k, _ = self.cb
+        if best_k - 1 < self.coarse_min:
+            self.log.append(f"  coarse_dac at the minimum allowed ({self.coarse_min})")
+            return self._coarse_done(best_k)
+        self.cur = "coarse"
+        self.regs = self._point({"k": best_k - 1})
+        return self.regs
+
+    def _coarse_done(self, k):
+        new = dict(self.center)
+        new["coarse_dac"] = k
+        self.best = None                            # the other registers are judged at the new full scale
+        self._next_stage()
+        return self._apply(new)
+
+    def _finish(self, ok, why):                    # kept for compatibility (not used: runs until stopped)
         self.done, self.ok = True, ok
         self.regs = raw(self.center)
         self.log.append(("✔ " if ok else "✖ ") + why)
@@ -442,7 +561,27 @@ class DacCalPanel(QtWidgets.QWidget):
         of.addRow("Settle after a change", self.o_settle)
         of.addRow("Symbols per capture", self.o_nsym)
         of.addRow(self.o_sess)
-        for w in (self.o_avg, self.o_skip, self.o_nsym):
+        self.o_coarse = QtWidgets.QCheckBox("Lower coarse_dac first (while the MER holds)")
+        self.o_coarse.setChecked(bool(self.opts["coarse"]))
+        self.o_coarse.setToolTip("Stage 1: coarse_dac is lowered one step at a time; a step is kept while the MER does "
+                                 "not get worse (0.1 dB tolerance)\nand the output has not dropped by more than the "
+                                 "limit below. Then phase, gain and offsets are calibrated.")
+        self.o_cmin = QtWidgets.QSpinBox()
+        self.o_cmin.setRange(0, 15)
+        self.o_cmin.setValue(int(self.opts["coarse_min"]))
+        self.o_cmin.setToolTip("coarse_dac is never set below this code")
+        self.o_drop = QtWidgets.QDoubleSpinBox()
+        self.o_drop.setRange(0.0, 30.0)
+        self.o_drop.setDecimals(1)
+        self.o_drop.setSuffix(" dB")
+        self.o_drop.setValue(float(self.opts["max_drop_db"]))
+        self.o_drop.setToolTip("Largest output power drop allowed when lowering coarse_dac")
+        of.addRow(self.o_coarse)
+        of.addRow("coarse_dac not below", self.o_cmin)
+        of.addRow("Max. output drop", self.o_drop)
+        self.o_coarse.toggled.connect(self._opts_changed)
+        self.o_drop.valueChanged.connect(self._opts_changed)
+        for w in (self.o_avg, self.o_skip, self.o_nsym, self.o_cmin):
             w.valueChanged.connect(self._opts_changed)
         self.o_settle.valueChanged.connect(self._opts_changed)
         self.o_sess.toggled.connect(self._opts_changed)
@@ -455,7 +594,10 @@ class DacCalPanel(QtWidgets.QWidget):
         self.b_auto.setStyleSheet("font-weight:700;padding:5px 12px;")
         self.b_auto.setToolTip("Live diagnose is started if needed (OQPSK: offset, gain and phase; BPSK: offset only). "
                                "The registers are probed around the working point, the optimum is fitted, applied "
-                               "and checked - 10 captures per round, up to 4 rounds. The BOS must be transmitting.")
+                               "Order: coarse_dac lowered (while the MER holds), then qmc_phaseab, qmc_gaina / gainb, qmc_offseta / offsetb - "
+                               "each probed, fitted, applied and checked.\nPhase / gain / offsets are then repeated "
+                               "until you press Stop (no time limit); Stop keeps the best working point. "
+                               "The BOS must be transmitting.")
         self.b_auto.clicked.connect(self.toggle_auto)
         self.b_md = QtWidgets.QPushButton("Write to MD_SETTINGS…")
         self.b_md.setToolTip("Put these values into a DAC_offsets row of the MD_SETTINGS editor (Telemetry → BOS) "
@@ -514,7 +656,9 @@ class DacCalPanel(QtWidgets.QWidget):
 
     def _opts_changed(self, *_):
         self.opts = {"n_avg": self.o_avg.value(), "skip": self.o_skip.value(), "settle_s": self.o_settle.value(),
-                     "nsym": self.o_nsym.value(), "own_session": self.o_sess.isChecked()}
+                     "nsym": self.o_nsym.value(), "own_session": self.o_sess.isChecked(),
+                     "coarse": self.o_coarse.isChecked(), "coarse_min": self.o_cmin.value(),
+                     "max_drop_db": self.o_drop.value()}
         self._save()
         self._estimate()
 
@@ -587,17 +731,25 @@ class DacCalPanel(QtWidgets.QWidget):
 
     def toggle_auto(self):
         if self.auto is not None:
-            self.auto = None
+            a, self.auto = self.auto, None
             self.st._live_session = False
             self.b_auto.setText("▶ Auto-calibrate (live)")
-            self.say("auto-calibration stopped - sending back the working point")
-            self._send(self.regs)
+            keep = a.best[1] if a.best else a.center
+            regs = raw(keep)
+            if a.model.get("learned"):
+                self.models[self.serial()] = a.model
+            self.set_regs(regs)
+            self.say("auto-calibration stopped by the operator - best working point kept: " +
+                     ", ".join(f"{k} {v:+d} (0x{regs[k]:X})" for k, v in signed(regs).items()))
+            self._send(regs)
             return
         st = self.st
         if st.running and not st.live_mode:
             self.say("the station is running a plan - wait until it ends")
             return
-        self.auto = AutoCal(self.regs, self.model(), n_avg=self.opts["n_avg"], skip=self.opts["skip"])
+        self.auto = AutoCal(self.regs, self.model(), n_avg=self.opts["n_avg"], skip=self.opts["skip"],
+                            coarse=self.opts["coarse"], coarse_min=self.opts["coarse_min"],
+                            max_drop_db=self.opts["max_drop_db"])
         st._live_session = bool(self.opts["own_session"]) and st.ctl.get("method") == "protocol"
         self.b_auto.setText("■ Stop calibration")
         self.say(f"auto-calibration started (unit '{self.serial()}'), working point " +

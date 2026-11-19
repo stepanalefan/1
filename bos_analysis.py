@@ -1535,7 +1535,7 @@ class BosSimulator:
         # DAC38J82 QMC (Change_DAC_1): the hidden "ideal" values of this simulated unit differ from the document
         # defaults; the measured offset is rotated (rails swapped / inverted on the way) to exercise the calibration
         self.qmc = {"qmc_offseta": -124, "qmc_offsetb": -458, "qmc_gaina": 1012, "qmc_gainb": 1012,
-                    "qmc_phaseab": -10}
+                    "qmc_phaseab": -10, "coarse_dac": 7}
         self.qmc_ideal = {"qmc_offseta": -124 + 70, "qmc_offsetb": -458 - 45, "gdiff": 12, "qmc_phaseab": -10 + 50}
         self.md_settings = None           # last MD_SETTINGS received
         self.protocol = False             # True once driven by protocol commands (designation required)
@@ -1708,6 +1708,15 @@ class BosSimulator:
                 i = np.fft.ifft(np.fft.fft(i) * hlp).real
                 q = np.fft.ifft(np.fft.fft(q) * hlp).real
             s = i + 1j * g * (q * math.cos(phi) + i * math.sin(phi))
+            # coarse_dac (DAC full-scale current): each step ≈ 1.5 dB of output; a high full scale drives the
+            # upconverter into compression, a low one brings the DAC noise floor up -> best MER at about code 4
+            cd = int(self.qmc.get("coarse_dac", 7))
+            p += 1.5 * (cd - 7)
+            a_ = np.abs(s)
+            sat = 10 ** ((4.0 + 1.5 * (7 - cd)) / 20) * math.sqrt(np.mean(a_ ** 2))
+            s = s / (1 + (a_ / sat) ** 4) ** 0.25
+            nl = 10 ** (-(33.0 + 1.5 * cd) / 20) * math.sqrt(np.mean(np.abs(s) ** 2) / 2)
+            s = s + nl * (rng.normal(size=len(s)) + 1j * rng.normal(size=len(s)))
         if "leak" in self.faults:
             s = s + 10 ** (self.faults["leak"] / 20) * math.sqrt(np.mean(np.abs(s) ** 2))
         if self.mode != "cw":                                    # DAC offset error -> carrier offset (rotated, 6000 LSB = RMS)
